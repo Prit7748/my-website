@@ -1,29 +1,60 @@
-import { connectDB } from "@/lib/db";
-import User from "@/models/User";
 import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
+import dbConnect from "@/lib/db";
+import User from "@/models/User";
+
 
 export async function POST(req: Request) {
   try {
-    const { name, email, password } = await req.json();
-    
-    // 1. Database Connect karein
-    await connectDB();
+    const body = await req.json();
+    const name = (body?.name || "").toString().trim();
+    const email = (body?.email || "").toString().trim().toLowerCase();
+    const password = (body?.password || "").toString();
 
-    // 2. Check karein user pehle se hai ya nahi
-    const existingUser = await User.findOne({ email });
-    if (existingUser) {
-      return NextResponse.json({ message: "Email already exists" }, { status: 400 });
+    if (!email || !password) {
+      return NextResponse.json(
+        { error: "Email and password are required" },
+        { status: 400 }
+      );
     }
 
-    // 3. Password ko encrypt karein
-    const hashedPassword = await bcrypt.hash(password, 10);
+    if (password.length < 6) {
+      return NextResponse.json(
+        { error: "Password must be at least 6 characters" },
+        { status: 400 }
+      );
+    }
 
-    // 4. Naya user create karein
-    await User.create({ name, email, password: hashedPassword });
+    await dbConnect();
 
-    return NextResponse.json({ message: "User registered successfully" }, { status: 201 });
-  } catch (error: any) {
-    return NextResponse.json({ message: "Error: " + error.message }, { status: 500 });
+    const existing = await User.findOne({ email });
+    if (existing) {
+      return NextResponse.json(
+        { error: "Email already registered" },
+        { status: 409 }
+      );
+    }
+
+    const passwordHash = await bcrypt.hash(password, 10);
+
+    const user = await User.create({
+      name,
+      email,
+      passwordHash,
+      role: "user",
+    });
+
+    return NextResponse.json(
+      {
+        message: "Registered successfully",
+        user: { id: user._id.toString(), name: user.name, email: user.email, role: user.role },
+      },
+      { status: 201 }
+    );
+  } catch (err: any) {
+    return NextResponse.json(
+      { error: "Server error", details: err?.message || "unknown" },
+      { status: 500 }
+    );
   }
 }
