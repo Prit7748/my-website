@@ -140,8 +140,8 @@ export default function DashboardPage() {
         icon: FolderOpen,
       },
       {
-        title: "Projects",
-        desc: "Project reports & files.",
+        title: "projects",
+        desc: "projects reports & files.",
         href: "/projects",
         icon: FolderOpen,
       },

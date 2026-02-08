@@ -5,31 +5,31 @@ const ProductSchema = new Schema(
     // Identity
     title: { type: String, required: true, trim: true },
     slug: { type: String, required: true, unique: true, index: true },
-    sku: { type: String, required: true, unique: true, index: true }, // ✅ Unique ID pattern
+    sku: { type: String, required: true, unique: true, index: true },
 
-    // Category (single)
-    category: { type: String, required: true, index: true }, // e.g. "Solved Assignments"
+    // Category
+    category: { type: String, required: true, index: true },
 
-    // Subject (single) + titles
-    subjectCode: { type: String, required: true, index: true }, // e.g. BHIC 109
+    // Subject
+    subjectCode: { type: String, required: true, index: true },
     subjectTitleHi: { type: String, default: "" },
     subjectTitleEn: { type: String, default: "" },
 
-    // Course mapping (filters) - can be multiple
-    courseCodes: { type: [String], default: [], index: true }, // e.g. ["BAHIH","BAG"]
-    courseTitles: { type: [String], default: [] }, // optional same order
+    // Course
+    courseCodes: { type: [String], default: [], index: true },
+    courseTitles: { type: [String], default: [] },
 
     // Session + Language
-    session: { type: String, required: true, index: true }, // e.g. "2025-2026"
-    session6: { type: String, required: true, index: true }, // e.g. "202526"
-    language: { type: String, required: true, index: true }, // "Hindi"/"English"/"Other text"
-    lang3: { type: String, required: true, index: true }, // "HIN"/"ENG"/"OTH"
+    session: { type: String, required: true, index: true },
+    session6: { type: String, required: true, index: true },
+    language: { type: String, required: true, index: true },
+    lang3: { type: String, required: true, index: true },
 
     // Pricing
     price: { type: Number, required: true },
     oldPrice: { type: Number, default: 0 },
 
-    // Extra fields
+    // Extra
     pages: { type: Number, default: 0 },
     availability: {
       type: String,
@@ -39,15 +39,15 @@ const ProductSchema = new Schema(
     },
     importantNote: { type: String, default: "" },
 
-    // Descriptions
+    // Description
     shortDesc: { type: String, default: "" },
     descriptionHtml: { type: String, default: "" },
 
-    // Digital flags
+    // Digital
     isDigital: { type: Boolean, default: true },
     pdfUrl: { type: String, default: "" },
 
-    // Images system
+    // Images
     images: { type: [String], default: [] },
     thumbnailUrl: { type: String, default: "" },
     quickUrl: { type: String, default: "" },
@@ -61,6 +61,46 @@ const ProductSchema = new Schema(
     lastModifiedAt: { type: Date, default: Date.now },
   },
   { timestamps: true }
+);
+
+/* ===== COMPOUND INDEXES ===== */
+ProductSchema.index({ isActive: 1, createdAt: -1 });
+ProductSchema.index({ isActive: 1, price: 1 });
+ProductSchema.index({ isActive: 1, price: -1 });
+ProductSchema.index({ isActive: 1, category: 1, createdAt: -1 });
+ProductSchema.index({ isActive: 1, session: 1, createdAt: -1 });
+ProductSchema.index({ isActive: 1, courseCodes: 1, createdAt: -1 });
+
+/* ===== TEXT SEARCH INDEX ===== */
+ProductSchema.index(
+  {
+    subjectCode: "text",
+    title: "text",
+    subjectTitleEn: "text",
+    subjectTitleHi: "text",
+    courseCodes: "text",
+    courseTitles: "text",
+    slug: "text",
+    category: "text",
+    session: "text",
+    language: "text",
+  },
+  {
+    name: "product_text_search_v2",
+    weights: {
+      subjectCode: 20,
+      title: 12,
+      courseCodes: 10,
+      courseTitles: 8,
+      subjectTitleEn: 7,
+      subjectTitleHi: 6,
+      slug: 5,
+      category: 3,
+      session: 2,
+      language: 1,
+    },
+    default_language: "none",
+  }
 );
 
 export default models.Product || model("Product", ProductSchema);

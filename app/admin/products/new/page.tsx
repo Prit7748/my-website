@@ -11,7 +11,7 @@ const CATEGORIES: CategoryOpt[] = [
   { label: "Question Papers (PYQ)", skuSuffix: "Q", slugKey: "question-paper" },
   { label: "Handwritten PDFs", skuSuffix: "H", slugKey: "handwritten-pdf" },
   { label: "Ebooks", skuSuffix: "E", slugKey: "ebook" },
-  { label: "Projects", skuSuffix: "P", slugKey: "project" },
+  { label: "projects", skuSuffix: "P", slugKey: "projects" },
   { label: "Guess Papers", skuSuffix: "G", slugKey: "guess-paper" },
   { label: "Combo", skuSuffix: "C", slugKey: "combo" },
   { label: "Handwritten Hardcopy (Delivery)", skuSuffix: "D", slugKey: "hardcopy-delivery" },
@@ -102,6 +102,7 @@ export default function AdminNewProductPage() {
     subjectCode: "",
     subjectTitleHi: "",
     subjectTitleEn: "",
+    subjectTitleOther: "", // Added for 'Other' language mode
 
     courseCodes: "",
     courseTitles: "",
@@ -189,11 +190,15 @@ export default function AdminNewProductPage() {
       .filter(Boolean);
   }, [form.imagesText]);
 
+  // ✅ Updated to include 'Other' title logic
   const activeSubjectTitle = useMemo(() => {
+    if (languageMode === "other" && form.subjectTitleOther) {
+      return form.subjectTitleOther.trim();
+    }
     return (selectedLanguage || "").toLowerCase().includes("hin")
       ? form.subjectTitleHi.trim()
       : form.subjectTitleEn.trim();
-  }, [selectedLanguage, form.subjectTitleHi, form.subjectTitleEn]);
+  }, [selectedLanguage, form.subjectTitleHi, form.subjectTitleEn, languageMode, form.subjectTitleOther]);
 
   function applyAutoFill() {
     setForm((p) => ({
@@ -290,6 +295,13 @@ export default function AdminNewProductPage() {
       .map((x) => x.trim())
       .filter(Boolean);
 
+    // ✅ Determine final titles based on language mode
+    // If language is OTHER, we map subjectTitleOther to subjectTitleHi (as vernacular storage)
+    const finalSubjectTitleHi =
+      languageMode === "other" && form.subjectTitleOther
+        ? form.subjectTitleOther.trim()
+        : form.subjectTitleHi || "";
+
     const payload = {
       title: form.title.trim(),
       slug: (form.slug || suggestedSlug).trim(),
@@ -297,7 +309,7 @@ export default function AdminNewProductPage() {
       category: form.category,
 
       subjectCode: form.subjectCode.trim(),
-      subjectTitleHi: form.subjectTitleHi || "",
+      subjectTitleHi: finalSubjectTitleHi,
       subjectTitleEn: form.subjectTitleEn || "",
 
       courseCodes: splitCsv(form.courseCodes),
@@ -601,6 +613,22 @@ export default function AdminNewProductPage() {
                     />
                   </div>
                 </div>
+
+                {/* ✅ New Conditional Title Input for 'Other' languages */}
+                {languageMode === "other" && (
+                  <div className="mt-3">
+                    <label className="text-xs font-bold text-slate-500 uppercase ml-1">Subject Title (Other Language)</label>
+                    <input
+                      className="w-full mt-1 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none focus:border-blue-500 transition font-medium"
+                      placeholder="e.g. تاریخ (Urdu Title)"
+                      value={form.subjectTitleOther}
+                      onChange={(e) => setForm((p) => ({ ...p, subjectTitleOther: e.target.value }))}
+                    />
+                    <div className="text-[11px] text-slate-500 mt-1">
+                      Note: This will be saved as the primary/vernacular title.
+                    </div>
+                  </div>
+                )}
 
                 <div className="text-[11px] text-slate-500 mt-2">
                   Current active title (based on language): <b>{activeSubjectTitle || "—"}</b>

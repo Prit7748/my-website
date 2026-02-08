@@ -5,12 +5,14 @@ import Link from "next/link";
 import { Star, ShoppingCart, Eye, Layers, ImageIcon } from "lucide-react";
 import { useSearchParams } from "next/navigation";
 import ProductQuickView from "./ProductQuickView";
+import { productHref } from "@/lib/productHref";
 
 type Meta = { total: number; page: number; totalPages: number; limit: number };
 
 interface ProductGridProps {
   selectedCat: string[];
   onMeta?: (meta: Meta) => void;
+  search?: string; // ✅ NEW: optional search prop (fix TS error)
 }
 
 function fileNameOf(path: string) {
@@ -29,7 +31,7 @@ function pickImagesSorted(images?: string[]) {
   return { first, second, all: sorted };
 }
 
-export default function ProductGrid({ selectedCat, onMeta }: ProductGridProps) {
+export default function ProductGrid({ selectedCat, onMeta, search }: ProductGridProps) {
   const searchParams = useSearchParams();
 
   const [loading, setLoading] = useState(true);
@@ -41,12 +43,21 @@ export default function ProductGrid({ selectedCat, onMeta }: ProductGridProps) {
 
   const queryKey = useMemo(() => {
     const params = new URLSearchParams(searchParams.toString());
+
+    // category override (page-specific)
     if (selectedCatKey) params.set("category", selectedCatKey);
     else params.delete("category");
+
+    // ✅ NEW: search override (from prop, fallback to URL)
+    const qSearch = (typeof search === "string" ? search : params.get("search") || "").trim();
+    if (qSearch) params.set("search", qSearch);
+    else params.delete("search");
+
     if (!params.get("page")) params.set("page", "1");
     if (!params.get("limit")) params.set("limit", "24");
+
     return params.toString();
-  }, [searchParams, selectedCatKey]);
+  }, [searchParams, selectedCatKey, search]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -120,6 +131,7 @@ export default function ProductGrid({ selectedCat, onMeta }: ProductGridProps) {
         {products.map((p: any) => {
           const { first, all } = pickImagesSorted(p.images);
           const isCombo = (p.category || "").toLowerCase().includes("combo");
+          const href = productHref(p);
 
           return (
             <div
@@ -127,7 +139,7 @@ export default function ProductGrid({ selectedCat, onMeta }: ProductGridProps) {
               className="bg-white rounded-xl overflow-hidden hover:shadow-2xl hover:-translate-y-1 transition-all duration-300 border border-gray-100 group w-full flex flex-col relative"
             >
               <div className="aspect-[210/297] bg-gray-100 relative overflow-hidden border-b border-gray-50 group-hover:opacity-95 transition-opacity">
-                <Link href={`/product/${p.slug || p._id}`} className="block w-full h-full">
+                <Link href={href} className="block w-full h-full">
                   {first ? (
                     <Image
                       src={first}
@@ -158,7 +170,6 @@ export default function ProductGrid({ selectedCat, onMeta }: ProductGridProps) {
                   onClick={(e) => {
                     e.preventDefault();
                     e.stopPropagation();
-                    // ✅ QuickView ko already-sorted images pass kar do (no mismatch)
                     setSelectedProduct({
                       ...p,
                       images: all,
@@ -185,7 +196,7 @@ export default function ProductGrid({ selectedCat, onMeta }: ProductGridProps) {
                 <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">{p.category}</p>
 
                 <h3 className="text-[13px] md:text-[16px] font-bold text-gray-800 leading-snug line-clamp-2 mb-2 h-[38px] md:h-[48px] group-hover:text-blue-600 transition-colors">
-                  <Link href={`/product/${p.slug || p._id}`}>{p.title}</Link>
+                  <Link href={href}>{p.title}</Link>
                 </h3>
 
                 <div className="flex gap-0.5 mb-3">
@@ -197,9 +208,7 @@ export default function ProductGrid({ selectedCat, onMeta }: ProductGridProps) {
                 <div className="mt-auto">
                   <div className="flex items-baseline gap-2 mb-3">
                     <span className="text-lg md:text-xl font-bold text-blue-700">₹{p.price}</span>
-                    {!!p.oldPrice && (
-                      <span className="text-xs md:text-sm text-gray-400 line-through">₹{p.oldPrice}</span>
-                    )}
+                    {!!p.oldPrice && <span className="text-xs md:text-sm text-gray-400 line-through">₹{p.oldPrice}</span>}
                   </div>
 
                   <button className="w-full bg-[#1e40af] text-white py-2.5 rounded-lg text-[12px] md:text-[14px] font-bold flex items-center justify-center gap-2 hover:bg-[#1e3a8a] transition shadow-md active:scale-95">
@@ -213,9 +222,7 @@ export default function ProductGrid({ selectedCat, onMeta }: ProductGridProps) {
         })}
       </div>
 
-      {selectedProduct && (
-        <ProductQuickView product={selectedProduct} onClose={() => setSelectedProduct(null)} />
-      )}
+      {selectedProduct && <ProductQuickView product={selectedProduct} onClose={() => setSelectedProduct(null)} />}
     </>
   );
 }

@@ -29,7 +29,7 @@ export default function AboutPage() {
             </h1>
             <p className="text-blue-100 text-lg md:text-xl max-w-2xl mx-auto leading-relaxed">
                We bridge the gap between distance learning and academic excellence. 
-               Get <strong>90+ Marks Guaranteed</strong> Solved Assignments, Notes & Projects.
+               Get <strong>90+ Marks Guaranteed</strong> Solved Assignments, Notes & projects.
             </p>
          </div>
       </section>
@@ -114,7 +114,7 @@ export default function AboutPage() {
                   <Star className="text-pink-600 mb-4" size={40}/>
                   <h3 className="text-xl font-bold text-slate-900 mb-3">Our Vision</h3>
                   <p className="text-slate-600 leading-relaxed">
-                     To become India's most trusted digital companion for IGNOU students, providing everything from admission help to final degree project guidance under one roof.
+                     To become India's most trusted digital companion for IGNOU students, providing everything from admission help to final degree projects guidance under one roof.
                   </p>
                </div>
             </div>

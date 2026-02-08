@@ -10,7 +10,7 @@ export default function FAQPage() {
     { q: "Are these assignments valid for 2025-26?", a: "Yes, we update our content regularly. Please check the session mentioned in the product title before buying." },
     { q: "Can I get a refund if the file is wrong?", a: "If there is a mistake from our side (e.g., wrong medium or subject code), we will provide a replacement or refund. However, refunds are not available for mistaken purchases by the user." },
     { q: "How long does Hardcopy delivery take?", a: "Handwritten hardcopies are sent via Speed Post and usually take 7-10 working days to reach your address." },
-    { q: "Do you provide project synopsis?", a: "Yes, we provide approval-guaranteed project synopsis and reports for MBA, MA, and other courses." },
+    { q: "Do you provide projects synopsis?", a: "Yes, we provide approval-guaranteed projects synopsis and reports for MBA, MA, and other courses." },
   ];
 
   return (

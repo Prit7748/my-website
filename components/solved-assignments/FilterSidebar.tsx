@@ -1,73 +1,83 @@
 "use client";
+
 import { useEffect, useMemo, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams, usePathname } from "next/navigation";
 import { X, Search, Loader2 } from "lucide-react";
 
 interface FilterSidebarProps {
   className?: string;
   closeFilter?: () => void;
 
-  // ✅ existing props (category)
+  // ✅ Parent controls categories
   selectedCat: string[];
   onToggleCategory: (cat: string) => void;
+
+  /**
+   * ✅ Primary category for this page (eg: "Solved Assignments" or "Question Papers (PYQ)")
+   * Used for:
+   * - facets fallback
+   * - reset behavior (keep primary selected)
+   */
+  primaryCategory?: string;
 }
 
-/** UI Category Name -> DB slug mapping (आपके Product model के category field के हिसाब से) */
-const UI_TO_DB_CATEGORY: Record<string, string> = {
-  "Solved Assignments": "solved-assignments",
-  "Handwritten PDFs": "handwritten-pdfs",
-  "Hardcopy Delivery": "handwritten-hardcopy",
-  "Project & Synopsis": "projects",
-  "Question Papers (PYQs)": "question-papers",
-  "eBooks/Notes": "ebooks",
-  "Guess Paper": "guess-papers",
-  "Combo": "combo",
-};
-
-const categoriesUI = Object.keys(UI_TO_DB_CATEGORY);
+/** ✅ Keep UI labels exactly same as DB category names */
+const CATEGORIES: string[] = [
+  "Solved Assignments",
+  "Question Papers (PYQ)",
+  "Handwritten PDFs",
+  "Ebooks",
+  "Projects",
+  "Guess Papers",
+  "Combo",
+  "Handwritten Hardcopy (Delivery)",
+];
 
 export default function FilterSidebar({
   className = "",
   closeFilter,
   selectedCat,
   onToggleCategory,
+  primaryCategory = "Solved Assignments",
 }: FilterSidebarProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const pathname = usePathname(); // ✅ current page route (fixes redirect issue)
 
   // URL se existing selected values
   const selectedCourseFromUrl = (searchParams.get("course") || "").trim();
   const selectedSessionFromUrl = (searchParams.get("session") || "").trim();
+  const selectedSearchFromUrl = (searchParams.get("search") || "").trim();
 
-  const [keyword, setKeyword] = useState(searchParams.get("q") || "");
   const [courseSearch, setCourseSearch] = useState("");
-
   const [selectedCourse, setSelectedCourse] = useState<string>(selectedCourseFromUrl);
   const [selectedSession, setSelectedSession] = useState<string>(selectedSessionFromUrl);
+
+  // ✅ One search param everywhere (same as page + ProductGrid uses)
+  const [keyword, setKeyword] = useState<string>(selectedSearchFromUrl);
 
   const [courses, setCourses] = useState<string[]>([]);
   const [sessions, setSessions] = useState<string[]>([]);
   const [loadingFacets, setLoadingFacets] = useState(false);
 
-  // --- SORTING: selected categories top ---
+  // --- Sorting: selected categories first ---
   const sortedCategories = useMemo(() => {
-    return [...categoriesUI].sort((a, b) => {
-      const isA = selectedCat.includes(a);
-      const isB = selectedCat.includes(b);
-      return isA === isB ? 0 : isA ? -1 : 1;
+    const selectedSet = new Set(selectedCat);
+    return [...CATEGORIES].sort((a, b) => {
+      const aSel = selectedSet.has(a);
+      const bSel = selectedSet.has(b);
+      if (aSel === bSel) return 0;
+      return aSel ? -1 : 1;
     });
   }, [selectedCat]);
 
-  // selected UI categories -> DB slugs (for API facets scope)
-  const selectedCategorySlugs = useMemo(() => {
-    const slugs = selectedCat
-      .map((ui) => UI_TO_DB_CATEGORY[ui])
-      .filter(Boolean);
-    // fallback: Solved Assignments selected नहीं है तो भी solved-assignments scope दे दें
-    return slugs.length ? slugs : ["solved-assignments"];
-  }, [selectedCat]);
+  // ✅ Facets scope: selected categories OR primary fallback
+  const categoryScope = useMemo(() => {
+    const cats = Array.isArray(selectedCat) ? selectedCat.filter(Boolean) : [];
+    return cats.length ? cats : [primaryCategory];
+  }, [selectedCat, primaryCategory]);
 
-  // ✅ Facets fetch (courses + sessions) API से
+  // ✅ Facets fetch (courses + sessions)
   useEffect(() => {
     let active = true;
 
@@ -75,13 +85,14 @@ export default function FilterSidebar({
       try {
         setLoadingFacets(true);
         const qs = new URLSearchParams();
-        qs.set("category", selectedCategorySlugs.join(","));
-        qs.set("limit", "1"); // facets के लिए data नहीं चाहिए
+        qs.set("category", categoryScope.join(","));
+        qs.set("limit", "1");
         qs.set("page", "1");
 
         const res = await fetch(`/api/products?${qs.toString()}`, {
           method: "GET",
           credentials: "include",
+          cache: "no-store",
         });
         const data = await res.json();
 
@@ -92,7 +103,7 @@ export default function FilterSidebar({
 
         setCourses(nextCourses);
         setSessions(nextSessions);
-      } catch (e) {
+      } catch {
         if (!active) return;
         setCourses([]);
         setSessions([]);
@@ -106,22 +117,21 @@ export default function FilterSidebar({
     return () => {
       active = false;
     };
-  }, [selectedCategorySlugs]);
+  }, [categoryScope]);
 
   const filteredCourses = useMemo(() => {
     const s = courseSearch.toLowerCase();
     return courses.filter((c) => (c || "").toLowerCase().includes(s));
   }, [courses, courseSearch]);
 
-  // ✅ URL update helper (apply/reset)
-  const updateUrl = (next: { course?: string; session?: string; q?: string; resetPage?: boolean }) => {
+  // ✅ URL update helper (IMPORTANT FIX: use pathname, not hardcoded route)
+  const updateUrl = (next: { course?: string; session?: string; search?: string; resetPage?: boolean }) => {
     const params = new URLSearchParams(searchParams.toString());
 
-    // optional: keyword (future)
-    if (typeof next.q === "string") {
-      const v = next.q.trim();
-      if (v) params.set("q", v);
-      else params.delete("q");
+    if (typeof next.search === "string") {
+      const v = next.search.trim();
+      if (v) params.set("search", v);
+      else params.delete("search");
     }
 
     if (typeof next.course === "string") {
@@ -136,33 +146,30 @@ export default function FilterSidebar({
       else params.delete("session");
     }
 
-    // pagination reset on filter change
     if (next.resetPage) params.delete("page");
 
     const qs = params.toString();
-    router.replace(`/solved-assignments${qs ? `?${qs}` : ""}`);
+    router.replace(`${pathname}${qs ? `?${qs}` : ""}`, { scroll: false });
   };
 
   const handleApply = () => {
-    updateUrl({ course: selectedCourse, session: selectedSession, q: keyword, resetPage: true });
+    updateUrl({ course: selectedCourse, session: selectedSession, search: keyword, resetPage: true });
     if (closeFilter) closeFilter();
   };
 
   const handleReset = () => {
-    setKeyword("");
     setCourseSearch("");
     setSelectedCourse("");
     setSelectedSession("");
+    setKeyword("");
 
-    // categories reset: सिर्फ "Solved Assignments" रखना है तो ये logic:
-    // अगर currently कई categories selected हैं, तो uncheck करके सिर्फ solved assignments रखो
-    // NOTE: onToggleCategory से toggle होता है, इसलिए safe approach: जो selected हैं और "Solved Assignments" नहीं हैं उन्हें हटाओ
+    // ✅ keep only primaryCategory selected (page dedicated behavior)
     selectedCat.forEach((c) => {
-      if (c !== "Solved Assignments") onToggleCategory(c);
+      if (c !== primaryCategory) onToggleCategory(c);
     });
-    if (!selectedCat.includes("Solved Assignments")) onToggleCategory("Solved Assignments");
+    if (!selectedCat.includes(primaryCategory)) onToggleCategory(primaryCategory);
 
-    updateUrl({ course: "", session: "", q: "", resetPage: true });
+    updateUrl({ course: "", session: "", search: "", resetPage: true });
     if (closeFilter) closeFilter();
   };
 
@@ -176,21 +183,22 @@ export default function FilterSidebar({
             <button
               onClick={closeFilter}
               className="p-2 bg-gray-100 rounded-full hover:bg-red-50 text-gray-500 hover:text-red-600 transition"
+              aria-label="Close"
             >
               <X size={20} />
             </button>
           )}
         </div>
 
-        {/* 1) Search Keyword (future ready; अभी grid API में q नहीं लगा है, लेकिन URL में store होगा) */}
+        {/* Search (search param) */}
         <div className="mb-6">
           <label className="text-[13px] font-bold text-gray-600 block mb-2 uppercase tracking-wide">
-            Search Keyword
+            Search
           </label>
           <div className="relative">
             <input
               type="text"
-              placeholder="Search..."
+              placeholder="Type course code / title / subject..."
               value={keyword}
               onChange={(e) => setKeyword(e.target.value)}
               className="w-full text-sm border border-gray-200 rounded px-3 py-2.5 pl-9 outline-none focus:border-blue-500 transition"
@@ -199,39 +207,41 @@ export default function FilterSidebar({
           </div>
         </div>
 
-        {/* 2) Category */}
+        {/* Category */}
         <div className="mb-6">
           <label className="text-[13px] font-bold text-gray-600 block mb-2 uppercase tracking-wide">
             Category
           </label>
 
-          <div className="space-y-1 pr-1 border border-gray-50 rounded p-1" style={{ maxHeight: "220px", overflowY: "auto" }}>
-            {sortedCategories.map((cat) => (
-              <label
-                key={cat}
-                className={`flex items-center gap-3 cursor-pointer group select-none p-2 rounded-lg transition-all duration-200 border ${
-                  selectedCat.includes(cat)
-                    ? "bg-blue-50 border-blue-100 sticky top-0 z-10 shadow-sm"
-                    : "border-transparent hover:bg-gray-50"
-                }`}
-              >
-                <div className="relative flex items-center">
+          <div
+            className="space-y-1 pr-1 border border-gray-50 rounded p-1"
+            style={{ maxHeight: "220px", overflowY: "auto" }}
+          >
+            {sortedCategories.map((cat) => {
+              const checked = selectedCat.includes(cat);
+              return (
+                <label
+                  key={cat}
+                  className={`flex items-center gap-3 cursor-pointer group select-none p-2 rounded-lg transition-all duration-200 border ${
+                    checked ? "bg-blue-50 border-blue-100" : "border-transparent hover:bg-gray-50"
+                  }`}
+                >
                   <input
                     type="checkbox"
-                    checked={selectedCat.includes(cat)}
+                    checked={checked}
                     onChange={() => onToggleCategory(cat)}
                     className="peer w-5 h-5 border-gray-300 rounded text-blue-600 focus:ring-blue-500 cursor-pointer"
                   />
-                </div>
-                <span
-                  className={`text-[14px] font-medium transition leading-snug ${
-                    selectedCat.includes(cat) ? "text-blue-700 font-bold" : "text-gray-700 group-hover:text-blue-700"
-                  }`}
-                >
-                  {cat}
-                </span>
-              </label>
-            ))}
+                  <span
+                    className={`text-[14px] font-medium transition leading-snug ${
+                      checked ? "text-blue-700 font-bold" : "text-gray-700 group-hover:text-blue-700"
+                    }`}
+                  >
+                    {cat}
+                  </span>
+                </label>
+              );
+            })}
           </div>
         </div>
 
@@ -242,7 +252,7 @@ export default function FilterSidebar({
           </div>
         )}
 
-        {/* 3) Course (API facets) */}
+        {/* Course */}
         <div className="mb-6">
           <label className="text-[13px] font-bold text-gray-600 block mb-2 uppercase tracking-wide">
             Course
@@ -258,7 +268,10 @@ export default function FilterSidebar({
             />
           </div>
 
-          <div className="space-y-1 pr-1 border border-gray-50 rounded p-1" style={{ maxHeight: "160px", overflowY: "auto" }}>
+          <div
+            className="space-y-1 pr-1 border border-gray-50 rounded p-1"
+            style={{ maxHeight: "160px", overflowY: "auto" }}
+          >
             {filteredCourses.length > 0 ? (
               filteredCourses.map((c) => {
                 const checked = selectedCourse === c;
@@ -287,7 +300,7 @@ export default function FilterSidebar({
           </div>
         </div>
 
-        {/* 4) Session (API facets) */}
+        {/* Session */}
         <div className="mb-6">
           <label className="text-[13px] font-bold text-gray-600 block mb-2 uppercase tracking-wide">
             Session

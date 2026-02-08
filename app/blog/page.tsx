@@ -1,188 +1,494 @@
+// app/blog/page.tsx  ✅ COMPLETE REPLACE (API powered + search + tag filter + pagination + featured + industrial UI)
 "use client";
-import Navbar from "../../components/Navbar";
-import Footer from "../../components/Footer";
-import TopBar from "../../components/TopBar";
+
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { Calendar, Clock, ChevronRight, Tag, TrendingUp, BookOpen, Bell, Zap } from "lucide-react";
+import { useRouter, useSearchParams } from "next/navigation";
+
+import TopBar from "@/components/TopBar";
+import Navbar from "@/components/Navbar";
+import Footer from "@/components/Footer";
+
+import {
+  Calendar,
+  Clock,
+  ChevronRight,
+  Tag,
+  TrendingUp,
+  BookOpen,
+  Bell,
+  Zap,
+  Search,
+  X,
+  ArrowLeft,
+  ArrowRight,
+} from "lucide-react";
+
+type BlogCard = {
+  _id: string;
+  title: string;
+  slug: string;
+  excerpt?: string;
+  coverUrl?: string;
+  tags?: string[];
+  publishedAt?: string | null;
+};
+
+function safeStr(x: any) {
+  return String(x || "").trim();
+}
+function fmtDate(d?: string | null) {
+  if (!d) return "";
+  try {
+    return new Intl.DateTimeFormat("en-IN", { year: "numeric", month: "short", day: "2-digit" }).format(new Date(d));
+  } catch {
+    return d;
+  }
+}
+function readingTimeFromExcerpt(excerpt?: string) {
+  const text = safeStr(excerpt);
+  if (!text) return "2 min read";
+  const words = text.split(/\s+/).filter(Boolean).length;
+  const mins = Math.max(2, Math.ceil(words / 80));
+  return `${mins} min read`;
+}
 
 export default function BlogPage() {
-  // --- DUMMY DATA ---
-  const featuredPost = {
-    id: 1,
-    title: "IGNOU TEE June 2026: Complete Exam Strategy & Study Plan by Toppers",
-    excerpt: "Stop worrying and start preparing. Here is the exact 60-day roadmap used by IGNOU gold medalists to score 90+ marks in Term End Exams without stress.",
-    date: "Jan 30, 2026",
-    readTime: "8 min read",
-    category: "Exam Strategy",
-    image: "https://images.unsplash.com/photo-1434030216411-0b793f4b4173?q=80&w=1000&auto=format&fit=crop" // Placeholder Image
+  const router = useRouter();
+  const searchParams = useSearchParams();
+
+  const urlTag = safeStr(searchParams.get("tag"));
+  const urlSearch = safeStr(searchParams.get("search"));
+  const urlPage = Math.max(1, Number(searchParams.get("page") || 1));
+
+  const [loading, setLoading] = useState(true);
+  const [blogs, setBlogs] = useState<BlogCard[]>([]);
+  const [featured, setFeatured] = useState<BlogCard | null>(null);
+
+  // UI state
+  const [searchInput, setSearchInput] = useState(urlSearch);
+  const [debouncedSearch, setDebouncedSearch] = useState(urlSearch);
+
+  const limit = 9;
+  const totalPages = useMemo(() => {
+    // lightweight: client-side paging fallback; later you can add server-side pagination in API
+    return Math.max(1, Math.ceil((blogs?.length || 0) / limit));
+  }, [blogs?.length]);
+
+  // ✅ Global styles (without style jsx global)
+  const GlobalStyles = () => (
+    <style>{`
+      @keyframes shimmer {
+        0% { background-position: 0% 50%; }
+        50% { background-position: 100% 50%; }
+        100% { background-position: 0% 50%; }
+      }
+      .isp-shimmer {
+        background-size: 200% 200%;
+        animation: shimmer 10s ease-in-out infinite;
+      }
+      .no-scrollbar::-webkit-scrollbar { display: none; }
+      .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+    `}</style>
+  );
+
+  const categories = useMemo(
+    () => [
+      { name: "All Posts", icon: Zap, tag: "" },
+      { name: "Exam Tips & Tricks", icon: TrendingUp, tag: "exam" },
+      { name: "IGNOU News & Updates", icon: Bell, tag: "news" },
+      { name: "Study Guides & Notes", icon: BookOpen, tag: "guide" },
+    ],
+    []
+  );
+
+  const setUrl = (next: { tag?: string; search?: string; page?: number }) => {
+    const params = new URLSearchParams(searchParams.toString());
+
+    if (safeStr(next.tag)) params.set("tag", safeStr(next.tag));
+    else params.delete("tag");
+
+    if (safeStr(next.search)) params.set("search", safeStr(next.search));
+    else params.delete("search");
+
+    if (next.page && next.page > 1) params.set("page", String(next.page));
+    else params.delete("page");
+
+    const qs = params.toString();
+    router.replace(`/blog${qs ? `?${qs}` : ""}`, { scroll: false });
   };
 
-  const categories = [
-    { name: "All Posts", icon: Zap, active: true },
-    { name: "Exam Tips & Tricks", icon: TrendingUp, active: false },
-    { name: "IGNOU News & Updates", icon: Bell, active: false },
-    { name: "Study Guides & Notes", icon: BookOpen, active: false },
-  ];
+  // ✅ debounce search
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(searchInput.trim()), 450);
+    return () => clearTimeout(t);
+  }, [searchInput]);
 
-  const blogPosts = [
-    { 
-      id: 2, title: "How to Download IGNOU Hall Ticket June 2026? (Step-by-Step)", 
-      excerpt: "The official link is active now. Follow these simple steps to download your admit card correctly and check for errors.",
-      date: "Jan 28, 2026", category: "News", readTime: "3 min read",
-      bg: "bg-blue-50", text: "text-blue-600"
-    },
-    { 
-      id: 3, title: "Assignment vs. Project vs. Dissertation: What's the Difference?", 
-      excerpt: "Confused between these three? Understand the evaluation criteria, submission deadlines, and weightage for each.",
-      date: "Jan 25, 2026", category: "Guide", readTime: "5 min read",
-      bg: "bg-purple-50", text: "text-purple-600"
-    },
-    { 
-      id: 4, title: "Top 5 Mistakes Students Make in IGNOU Assignment Writing", 
-      excerpt: "Are you losing marks unnecessarily? Avoid these common pitfalls to ensure your tutor gives you full marks.",
-      date: "Jan 20, 2026", category: "Exam Tips", readTime: "6 min read",
-      bg: "bg-pink-50", text: "text-pink-600"
-    },
-    { 
-      id: 5, title: "Is IGNOU Degree Valid for Govt Jobs & UPSC? (Myth busted)", 
-      excerpt: "A detailed analysis regarding the validity and recognition of IGNOU degrees across India and abroad.",
-      date: "Jan 15, 2026", category: "Guide", readTime: "4 min read",
-      bg: "bg-purple-50", text: "text-purple-600"
-    },
-    { 
-      id: 6, title: "IGNOU Re-Registration July 2026: Last Date & Process", 
-      excerpt: "Don't miss your next semester. Check the complete procedure to re-register online before the portal closes.",
-      date: "Jan 10, 2026", category: "News", readTime: "3 min read",
-      bg: "bg-blue-50", text: "text-blue-600"
-    },
-  ];
+  // ✅ keep URL synced when debouncedSearch changes
+  useEffect(() => {
+    if (debouncedSearch === urlSearch) return;
+    setUrl({ tag: urlTag, search: debouncedSearch, page: 1 });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [debouncedSearch]);
+
+  // ✅ fetch blogs from API (existing /api/blogs route we created)
+  useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      setLoading(true);
+      try {
+        // We’ll fetch by tag first (if tag exists), then client-search filter for now.
+        // Later you can enhance API to support search + pagination server-side.
+        const q = new URLSearchParams();
+        q.set("limit", "60"); // pull a decent set; client filters + pages
+        if (urlTag) q.set("tag", urlTag);
+        if (safeStr(blogs?.[0]?.slug)) q.set("exclude", ""); // no-op, keeps signature consistent
+
+        const res = await fetch(`/api/blogs?${q.toString()}`, { cache: "no-store" });
+        const data = await res.json();
+
+        const list: BlogCard[] = Array.isArray(data?.blogs) ? data.blogs : [];
+
+        if (cancelled) return;
+
+        // ✅ client-side search filter
+        const qSearch = safeStr(urlSearch).toLowerCase();
+        const filtered = qSearch
+          ? list.filter((b) => {
+              const t = safeStr(b.title).toLowerCase();
+              const e = safeStr(b.excerpt).toLowerCase();
+              const tags = Array.isArray(b.tags) ? b.tags.join(" ").toLowerCase() : "";
+              return t.includes(qSearch) || e.includes(qSearch) || tags.includes(qSearch);
+            })
+          : list;
+
+        setBlogs(filtered);
+
+        // Featured: first blog item (latest) as hero
+        setFeatured(filtered[0] || null);
+      } catch {
+        setBlogs([]);
+        setFeatured(null);
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [urlTag, urlSearch]);
+
+  // ✅ paging (client side)
+  const page = Math.min(urlPage, totalPages);
+  const pageItems = useMemo(() => {
+    const start = (page - 1) * limit;
+    const end = start + limit;
+    const list = Array.isArray(blogs) ? blogs : [];
+    // exclude featured from grid to avoid duplication
+    const grid = featured ? list.filter((x) => x.slug !== featured.slug) : list;
+    return grid.slice(start, end);
+  }, [blogs, featured, page]);
+
+  const canPrev = page > 1;
+  const canNext = page < totalPages;
 
   return (
     <main className="min-h-screen bg-gray-50 font-sans text-slate-800">
+      <GlobalStyles />
       <TopBar />
       <Navbar />
 
-      {/* ================= RIBBON 1: HERO / FEATURED POST (Dark Blue Gradient) ================= */}
-      <section className="bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900 py-16 text-white">
-         <div className="max-w-[1200px] mx-auto px-4">
-            <div className="flex flex-col md:flex-row gap-8 items-center rounded-2xl overflow-hidden bg-white/10 backdrop-blur-sm border border-white/10 p-1 md:p-2">
-               
-               {/* Image Side */}
-               <div className="w-full md:w-1/2 h-64 md:h-auto relative rounded-xl overflow-hidden">
-                  <img src={featuredPost.image} alt="Featured Blog Post" className="w-full h-full object-cover hover:scale-105 transition duration-500"/>
-                  <div className="absolute top-4 left-4 bg-blue-600 text-white text-xs font-bold px-3 py-1.5 rounded-full uppercase tracking-wider flex items-center gap-1 shadow-lg">
-                    <Zap size={14} /> Featured
+      {/* ================= HERO / FEATURED ================= */}
+      <section className="bg-gradient-to-br from-slate-900 via-blue-900 to-slate-900 py-14 md:py-16 text-white">
+        <div className="max-w-[1200px] mx-auto px-4">
+          <div className="flex flex-col lg:flex-row gap-8 items-stretch rounded-3xl overflow-hidden bg-white/10 backdrop-blur-sm border border-white/10 p-2">
+            {/* Left: image */}
+            <div className="w-full lg:w-1/2 relative rounded-2xl overflow-hidden min-h-[260px]">
+              {featured?.coverUrl ? (
+                <img
+                  src={featured.coverUrl}
+                  alt={featured.title}
+                  className="w-full h-full object-cover hover:scale-105 transition duration-500"
+                />
+              ) : (
+                <div className="w-full h-full bg-white/10 flex items-center justify-center">
+                  <div className="opacity-60">
+                    <Zap size={42} />
                   </div>
-               </div>
-               
-               {/* Content Side */}
-               <div className="w-full md:w-1/2 p-4 md:p-8 flex flex-col justify-center">
-                  <div className="flex items-center gap-4 text-blue-200 text-sm mb-4">
-                     <span className="flex items-center gap-1"><Calendar size={14}/> {featuredPost.date}</span>
-                     <span className="flex items-center gap-1"><Clock size={14}/> {featuredPost.readTime}</span>
+                </div>
+              )}
+
+              <div className="absolute top-4 left-4 bg-blue-600 text-white text-xs font-extrabold px-3 py-1.5 rounded-full uppercase tracking-wider flex items-center gap-1 shadow-lg">
+                <Zap size={14} /> Featured
+              </div>
+
+              <div className="absolute bottom-4 left-4 right-4">
+                <div className="rounded-2xl bg-black/35 backdrop-blur border border-white/10 p-3">
+                  <div className="text-[11px] font-extrabold text-white/90">Best tips • news • guides</div>
+                  <div className="text-[12px] font-semibold text-white/75">
+                    Updated posts to help IGNOU students score better.
                   </div>
-                  <h1 className="text-2xl md:text-4xl font-bold mb-4 leading-tight hover:text-blue-300 transition cursor-pointer">
-                     {featuredPost.title}
-                  </h1>
-                  <p className="text-blue-100 text-lg mb-6 line-clamp-3">
-                     {featuredPost.excerpt}
-                  </p>
-                  <div>
-                     <Link href="#" className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-full font-bold transition inline-flex items-center gap-2">
-                        Read Full Article <ChevronRight size={18}/>
-                     </Link>
-                  </div>
-               </div>
+                </div>
+              </div>
             </div>
-         </div>
+
+            {/* Right: content */}
+            <div className="w-full lg:w-1/2 p-4 md:p-8 flex flex-col justify-center">
+              <div className="flex items-center gap-4 text-blue-200 text-sm mb-4">
+                <span className="flex items-center gap-1">
+                  <Calendar size={14} /> {fmtDate(featured?.publishedAt) || "Updated"}
+                </span>
+                <span className="flex items-center gap-1">
+                  <Clock size={14} /> {readingTimeFromExcerpt(featured?.excerpt)}
+                </span>
+              </div>
+
+              <h1 className="text-2xl md:text-4xl font-extrabold mb-4 leading-tight">
+                {featured?.title || "IGNOU Blog — Tips, News & Guides"}
+              </h1>
+
+              <p className="text-blue-100 text-base md:text-lg mb-6 line-clamp-3">
+                {featured?.excerpt ||
+                  "Practical strategies, latest updates, and student-friendly guides. Filter by tag or search to find exactly what you need."}
+              </p>
+
+              <div className="flex flex-col sm:flex-row gap-3">
+                <Link
+                  href={featured?.slug ? `/blog/${featured.slug}` : "/blog"}
+                  className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-2xl font-extrabold transition inline-flex items-center justify-center gap-2"
+                >
+                  Read Full Article <ChevronRight size={18} />
+                </Link>
+
+                <Link
+                  href="/products"
+                  className="bg-white/10 hover:bg-white/15 text-white px-6 py-3 rounded-2xl font-extrabold transition inline-flex items-center justify-center gap-2 border border-white/15"
+                >
+                  Browse Products <ChevronRight size={18} />
+                </Link>
+              </div>
+
+              {/* Search bar (hero) */}
+              <div className="mt-6 rounded-2xl border border-white/15 bg-white/10 backdrop-blur p-3">
+                <div className="text-[11px] font-extrabold text-white/90 uppercase mb-2">Search blog</div>
+                <div className="flex items-center gap-2 px-3 py-2.5 rounded-xl border border-white/15 bg-white/10">
+                  <Search size={18} className="text-white/60" />
+                  <input
+                    value={searchInput}
+                    onChange={(e) => setSearchInput(e.target.value)}
+                    placeholder="Type keyword (assignment, TEE, hall ticket, re-registration...)"
+                    className="w-full bg-transparent outline-none text-sm font-semibold text-white placeholder:text-white/50"
+                  />
+                  {searchInput ? (
+                    <button
+                      onClick={() => setSearchInput("")}
+                      className="h-8 w-8 rounded-lg hover:bg-white/10 flex items-center justify-center text-white/70"
+                      aria-label="Clear search"
+                    >
+                      <X size={16} />
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
       </section>
 
-      {/* ================= RIBBON 2: CATEGORY FILTER (Clean White) ================= */}
+      {/* ================= CATEGORY FILTER ================= */}
       <section className="bg-white border-b border-gray-200 sticky top-0 z-10 shadow-sm">
-         <div className="max-w-[1200px] mx-auto px-4 py-4 overflow-x-auto no-scrollbar flex gap-3">
-            {categories.map((cat, idx) => (
-               <button key={idx} className={`flex items-center gap-2 px-5 py-2.5 rounded-full text-sm font-bold whitespace-nowrap transition ${cat.active ? 'bg-slate-900 text-white shadow-md' : 'bg-gray-100 text-slate-600 hover:bg-gray-200'}`}>
-                  <cat.icon size={16}/> {cat.name}
-               </button>
-            ))}
-         </div>
+        <div className="max-w-[1200px] mx-auto px-4 py-4 overflow-x-auto no-scrollbar flex gap-3">
+          {categories.map((cat) => {
+            const isActive = safeStr(urlTag) === safeStr(cat.tag);
+            const Icon = cat.icon;
+            return (
+              <button
+                key={cat.name}
+                onClick={() => {
+                  setUrl({ tag: cat.tag, search: urlSearch, page: 1 });
+                }}
+                className={`flex items-center gap-2 px-5 py-2.5 rounded-full text-sm font-extrabold whitespace-nowrap transition ${
+                  isActive ? "bg-slate-900 text-white shadow-md" : "bg-gray-100 text-slate-600 hover:bg-gray-200"
+                }`}
+              >
+                <Icon size={16} /> {cat.name}
+              </button>
+            );
+          })}
+        </div>
       </section>
 
-      {/* ================= RIBBON 3: LATEST POSTS GRID (Light Gray) ================= */}
-      <section className="py-16">
-         <div className="max-w-[1200px] mx-auto px-4">
-            <div className="flex items-center justify-between mb-10">
-               <h2 className="text-2xl md:text-3xl font-bold text-slate-900 flex items-center gap-2">
-                  Latest Articles <span className="hidden md:inline-block h-1 w-20 bg-blue-600 rounded-full ml-2"></span>
-               </h2>
-            </div>
+      {/* ================= POSTS GRID ================= */}
+      <section className="py-14">
+        <div className="max-w-[1200px] mx-auto px-4">
+          <div className="flex items-center justify-between mb-8 gap-4 flex-wrap">
+            <h2 className="text-2xl md:text-3xl font-extrabold text-slate-900 flex items-center gap-2">
+              Latest Articles
+              <span className="hidden md:inline-block h-1 w-20 bg-blue-600 rounded-full ml-2"></span>
+            </h2>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8">
-               {blogPosts.map((post) => (
-                  <article key={post.id} className="bg-white rounded-2xl border border-gray-200 overflow-hidden hover:shadow-xl hover:-translate-y-1 transition duration-300 group flex flex-col h-full">
-                     {/* Card Header (Placeholder Image & Category) */}
-                     <div className={`h-48 ${post.bg} relative flex items-center justify-center overflow-hidden`}>
-                        {/* Replace this div with an actual <img> tag in future */}
-                        <div className={`opacity-30 ${post.text}`}>
-                           <Tag size={48} />
-                        </div>
-                        
-                        <span className={`absolute top-4 left-4 bg-white ${post.text} text-[11px] font-bold px-3 py-1 rounded-full uppercase tracking-wider shadow-sm`}>
-                           {post.category}
+            {(urlTag || urlSearch) && (
+              <button
+                onClick={() => {
+                  setSearchInput("");
+                  setUrl({ tag: "", search: "", page: 1 });
+                }}
+                className="inline-flex items-center gap-2 rounded-2xl border border-gray-200 bg-white px-4 py-2 text-sm font-extrabold text-slate-800 hover:bg-gray-50"
+              >
+                <X size={16} /> Clear Filters
+              </button>
+            )}
+          </div>
+
+          {loading ? (
+            <div className="rounded-3xl border border-gray-200 bg-white p-6 font-extrabold text-slate-700">
+              Loading blogs...
+            </div>
+          ) : blogs.length === 0 ? (
+            <div className="rounded-3xl border border-gray-200 bg-white p-8">
+              <div className="text-xl font-extrabold text-slate-900">No posts found</div>
+              <div className="mt-2 text-sm font-semibold text-slate-600">
+                Try changing filters or search keywords.
+              </div>
+              <div className="mt-4">
+                <Link
+                  href="/blog"
+                  className="inline-flex items-center justify-center px-5 py-3 rounded-2xl bg-slate-900 text-white font-extrabold hover:bg-slate-800 transition"
+                >
+                  Reset
+                </Link>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-7">
+                {pageItems.map((post) => {
+                  const tags = Array.isArray(post.tags) ? post.tags.filter(Boolean) : [];
+                  return (
+                    <article
+                      key={post.slug}
+                      className="bg-white rounded-3xl border border-gray-200 overflow-hidden hover:shadow-xl hover:-translate-y-1 transition duration-300 group flex flex-col h-full"
+                    >
+                      {/* Cover */}
+                      <div className="h-48 bg-slate-50 relative flex items-center justify-center overflow-hidden">
+                        {post.coverUrl ? (
+                          <img src={post.coverUrl} alt={post.title} className="w-full h-full object-cover group-hover:scale-105 transition duration-500" />
+                        ) : (
+                          <div className="opacity-30 text-slate-500">
+                            <Tag size={48} />
+                          </div>
+                        )}
+
+                        <span className="absolute top-4 left-4 bg-white text-slate-700 text-[11px] font-extrabold px-3 py-1 rounded-full uppercase tracking-wider shadow-sm border border-gray-200">
+                          {tags[0] ? tags[0] : "Blog"}
                         </span>
-                     </div>
+                      </div>
 
-                     {/* Card Body */}
-                     <div className="p-6 flex flex-col flex-1">
+                      {/* Body */}
+                      <div className="p-6 flex flex-col flex-1">
                         <div className="flex items-center gap-3 text-gray-400 text-xs mb-3">
-                           <span className="flex items-center gap-1"><Calendar size={12}/> {post.date}</span>
-                           <span className="flex items-center gap-1"><Clock size={12}/> {post.readTime}</span>
+                          <span className="flex items-center gap-1">
+                            <Calendar size={12} /> {fmtDate(post.publishedAt) || "Updated"}
+                          </span>
+                          <span className="flex items-center gap-1">
+                            <Clock size={12} /> {readingTimeFromExcerpt(post.excerpt)}
+                          </span>
                         </div>
-                        
-                        <h3 className="text-xl font-bold text-slate-900 mb-3 leading-snug group-hover:text-blue-600 transition line-clamp-2">
-                           <a href="#">{post.title}</a>
-                        </h3>
-                        
-                        <p className="text-sm text-slate-500 mb-6 line-clamp-3 flex-1 leading-relaxed">
-                           {post.excerpt}
-                        </p>
-                        
-                        <div className="mt-auto pt-4 border-t border-gray-100">
-                           <Link href="#" className="text-sm font-bold text-blue-600 hover:text-blue-800 flex items-center gap-1 transition group/link">
-                              Read More <ChevronRight size={16} className="group-hover/link:translate-x-1 transition"/>
-                           </Link>
-                        </div>
-                     </div>
-                  </article>
-               ))}
-            </div>
 
-            {/* Load More Button */}
-            <div className="text-center mt-12">
-               <button className="bg-white border-2 border-slate-900 text-slate-900 px-8 py-3 rounded-full font-bold hover:bg-slate-900 hover:text-white transition">
-                  Load More Articles
-               </button>
-            </div>
-         </div>
+                        <h3 className="text-xl font-extrabold text-slate-900 mb-3 leading-snug group-hover:text-blue-600 transition line-clamp-2">
+                          <Link href={`/blog/${post.slug}`}>{post.title}</Link>
+                        </h3>
+
+                        <p className="text-sm text-slate-600 mb-6 line-clamp-3 flex-1 leading-relaxed font-semibold">
+                          {post.excerpt || "Read this post for helpful IGNOU guidance and updates."}
+                        </p>
+
+                        <div className="mt-auto pt-4 border-t border-gray-100 flex items-center justify-between gap-3">
+                          <Link
+                            href={`/blog/${post.slug}`}
+                            className="text-sm font-extrabold text-blue-600 hover:text-blue-800 flex items-center gap-1 transition group/link"
+                          >
+                            Read More <ChevronRight size={16} className="group-hover/link:translate-x-1 transition" />
+                          </Link>
+
+                          {tags.length > 0 ? (
+                            <button
+                              onClick={() => setUrl({ tag: tags[0], search: urlSearch, page: 1 })}
+                              className="text-[11px] font-extrabold text-slate-700 rounded-full border border-gray-200 px-3 py-1 hover:bg-gray-50"
+                              title="Filter by tag"
+                            >
+                              #{tags[0]}
+                            </button>
+                          ) : null}
+                        </div>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+
+              {/* Pagination */}
+              <div className="mt-10 flex items-center justify-between gap-3">
+                <button
+                  disabled={!canPrev}
+                  onClick={() => setUrl({ tag: urlTag, search: urlSearch, page: page - 1 })}
+                  className={`inline-flex items-center gap-2 rounded-2xl px-4 py-2 text-sm font-extrabold border ${
+                    canPrev ? "bg-white hover:bg-gray-50 border-gray-200 text-slate-900" : "bg-gray-100 border-gray-200 text-gray-400 cursor-not-allowed"
+                  }`}
+                >
+                  <ArrowLeft size={16} /> Prev
+                </button>
+
+                <div className="text-sm font-extrabold text-slate-700">
+                  Page <span className="text-slate-900">{page}</span> / {totalPages}
+                </div>
+
+                <button
+                  disabled={!canNext}
+                  onClick={() => setUrl({ tag: urlTag, search: urlSearch, page: page + 1 })}
+                  className={`inline-flex items-center gap-2 rounded-2xl px-4 py-2 text-sm font-extrabold border ${
+                    canNext ? "bg-white hover:bg-gray-50 border-gray-200 text-slate-900" : "bg-gray-100 border-gray-200 text-gray-400 cursor-not-allowed"
+                  }`}
+                >
+                  Next <ArrowRight size={16} />
+                </button>
+              </div>
+            </>
+          )}
+        </div>
       </section>
 
-      {/* ================= RIBBON 4: NEWSLETTER CTA (Blue Gradient) ================= */}
-      <section className="bg-gradient-to-r from-blue-600 to-indigo-700 py-16 text-center text-white relative overflow-hidden">
-         <div className="absolute inset-0 bg-[url('/pattern.png')] opacity-10"></div>
-         <div className="max-w-xl mx-auto px-4 relative z-10">
-            <Bell size={40} className="mx-auto mb-4 text-blue-200"/>
-            <h2 className="text-3xl font-bold mb-4">Never Miss an IGNOU Update</h2>
-            <p className="text-blue-100 mb-8">
-               Get the latest exam news, free study tips, and exclusive offers delivered straight to your inbox.
-            </p>
-            <div className="flex flex-col sm:flex-row gap-2 max-w-md mx-auto p-1 bg-white/10 rounded-xl backdrop-blur-md">
-               <input type="email" placeholder="Enter your email address" className="flex-1 bg-white/90 text-slate-800 px-4 py-3 rounded-lg outline-none focus:ring-2 focus:ring-blue-300 placeholder:text-slate-400" />
-               <button className="bg-slate-900 hover:bg-black text-white px-6 py-3 rounded-lg font-bold transition whitespace-nowrap">
-                  Subscribe Now
-               </button>
-            </div>
-            <p className="text-xs text-blue-200 mt-4">No spam, ever. Unsubscribe anytime.</p>
-         </div>
+      {/* ================= CTA (WhatsApp instead of newsletter - better for your business) ================= */}
+      <section className="bg-gradient-to-r from-emerald-600 to-green-700 py-16 text-center text-white relative overflow-hidden">
+        <div className="absolute inset-0 opacity-20 bg-[radial-gradient(900px_300px_at_20%_0%,rgba(255,255,255,0.55),transparent)]"></div>
+        <div className="max-w-[900px] mx-auto px-4 relative z-10">
+          <div className="mx-auto mb-4 inline-flex items-center justify-center h-14 w-14 rounded-2xl bg-white/15 border border-white/20">
+            <Bell size={28} className="text-white" />
+          </div>
+
+          <h2 className="text-3xl md:text-4xl font-extrabold mb-4">Need help with IGNOU Assignments?</h2>
+          <p className="text-white/90 font-semibold mb-8 max-w-2xl mx-auto">
+            Get quick guidance, product suggestions, and support directly on WhatsApp. Fast replies + accurate matching.
+          </p>
+
+          <a
+            href={`https://wa.me/917496865680?text=${encodeURIComponent(
+              "Hi! I want help related to IGNOU assignments / exams. Please guide me."
+            )}`}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center justify-center bg-slate-900 hover:bg-black text-white px-8 py-4 rounded-2xl font-extrabold transition"
+          >
+            Chat on WhatsApp →
+          </a>
+
+          <div className="mt-4 text-xs text-white/80 font-semibold">
+            Tip: Use the blog search above to find exact topic quickly.
+          </div>
+        </div>
       </section>
 
       <Footer />

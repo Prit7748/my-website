@@ -32,7 +32,7 @@ export default function Footer() {
                <img src="/logo.png" alt="Logo" className="h-10 brightness-0 invert opacity-90"/> {/* White Logo */}
              </h2>
              <p className="text-sm leading-relaxed text-slate-400">
-               Your one-stop destination for IGNOU solved assignments, handwritten notes, and project help. We ensure 90+ marks quality content created by toppers.
+               Your one-stop destination for IGNOU solved assignments, handwritten notes, and projects help. We ensure 90+ marks quality content created by toppers.
              </p>
              <div className="flex gap-4 pt-2">
                 <a href="#" className="bg-slate-800 p-2.5 rounded-full hover:bg-blue-600 hover:text-white transition"><Facebook size={18}/></a>
