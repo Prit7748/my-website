@@ -318,8 +318,8 @@ export default function Home() {
               { t: "Fast Support", d: "WhatsApp help", icon: Search },
               { t: "Delivery Options", d: "Hardcopy available", icon: Truck },
             ].map((x) => (
-              <div 
-                key={x.t} 
+              <div
+                key={x.t}
                 className="group rounded-2xl border border-gray-200 bg-white shadow-sm p-4 flex items-center gap-3 transition-all duration-300 hover:bg-blue-50 hover:border-blue-200 cursor-pointer"
               >
                 <div className="h-11 w-11 rounded-2xl bg-slate-50 flex items-center justify-center group-hover:bg-white group-hover:shadow-sm transition-colors">
@@ -339,7 +339,7 @@ export default function Home() {
       <section className="relative py-16 bg-[#F8FAFC] overflow-hidden">
         {/* Subtle Background Elements */}
         <div className="absolute inset-0 isp-grid opacity-30" />
-        
+
         <div className="relative max-w-[1600px] mx-auto px-4">
           <div className="flex flex-col lg:flex-row lg:items-end lg:justify-between gap-6 mb-12">
             <div className="min-w-0">
@@ -393,7 +393,7 @@ export default function Home() {
                   <p className="mt-1 text-xs font-medium text-slate-600 line-clamp-2">
                     {cat.subtitle}
                   </p>
-                  
+
                   {/* Link text */}
                   <div className={`mt-4 inline-flex items-center text-[11px] font-bold ${cat.colorClass} opacity-80 group-hover:opacity-100 transition-opacity`}>
                     Explore <ChevronRight size={14} className="ml-0.5" />
@@ -442,7 +442,7 @@ export default function Home() {
               href="/courses"
               className="inline-flex items-center justify-center bg-slate-800 text-white px-8 py-3 rounded-full font-bold hover:bg-slate-700 transition shadow-lg hover:shadow-slate-300/50"
             >
-              <Link href="/courses">View All Courses</Link>
+              View All Courses
             </Link>
           </div>
         </div>
