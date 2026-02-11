@@ -5,12 +5,12 @@ type MongooseCache = {
   promise: Promise<typeof mongoose> | null;
 };
 
+// eslint-disable-next-line no-var
 declare global {
-  // eslint-disable-next-line no-var
   var mongoose: MongooseCache | undefined;
 }
 
-const cached: MongooseCache = global.mongoose || { conn: null, promise: null };
+const globalCache = global.mongoose || (global.mongoose = { conn: null, promise: null });
 
 export default async function dbConnect(): Promise<typeof mongoose> {
   const uri = process.env.MONGODB_URI;
@@ -20,18 +20,20 @@ export default async function dbConnect(): Promise<typeof mongoose> {
     );
   }
 
-  if (cached.conn && mongoose.connection.readyState === 1) {
-    return cached.conn;
+  // ✅ if already connected, return
+  if (mongoose.connection.readyState === 1 && globalCache.conn) {
+    return globalCache.conn;
   }
 
-  if (!cached.promise) {
-    cached.promise = mongoose.connect(uri, {
+  // ✅ if a connection is in progress, wait for it
+  if (!globalCache.promise) {
+    globalCache.promise = mongoose.connect(uri, {
       bufferCommands: false,
+      serverSelectionTimeoutMS: 10000,
+      socketTimeoutMS: 45000,
     });
   }
 
-  cached.conn = await cached.promise;
-  global.mongoose = cached;
-
-  return cached.conn;
+  globalCache.conn = await globalCache.promise;
+  return globalCache.conn;
 }

@@ -58,7 +58,10 @@ export default function LoginPage() {
           setView("login");
           setFormData((p) => ({ ...p, password: "" }));
         } else {
-          alert(data?.error || data?.message || "कुछ गलत हुआ");
+          alert(
+            (data?.error || data?.message || "कुछ गलत हुआ") +
+            (data?.details ? "\n\nDETAILS: " + data.details : "")
+          );
         }
       } else {
         // ✅ LOGIN
@@ -93,7 +96,10 @@ export default function LoginPage() {
 
           router.refresh();
         } else {
-          alert(data?.error || data?.message || "लॉगिन फेल हो गया");
+          alert(
+            (data?.error || data?.message || "लॉगिन फेल हो गया") +
+            (data?.details ? "\n\nDETAILS: " + data.details : "")
+          );
         }
       }
     } catch (err) {
