@@ -26,7 +26,10 @@ import SortBar from "@/components/solved-assignments/SortBar";
 import ProductGrid from "@/components/solved-assignments/ProductGrid";
 import Pagination from "@/components/solved-assignments/Pagination";
 
-const PROJECTS = "Projects";
+// ✅ IMPORTANT: DB/category master me aap "projects" save kar rahe ho (lowercase)
+// Isliye filter ko bhi exact same value bhejna hoga.
+const PROJECTS = "projects";
+const PROJECTS_LABEL = "Projects";
 
 function safeSplitComma(v: string | null) {
   return (v || "")
@@ -55,7 +58,7 @@ export default function ProjectsClient() {
   const urlSession = (searchParams.get("session") || "").trim();
   const urlSearch = (searchParams.get("search") || "").trim();
 
-  // ✅ default category
+  // ✅ default category (must be "projects")
   const [selectedCat, setSelectedCat] = useState<string[]>(
     urlCategory ? safeSplitComma(urlCategory) : [PROJECTS]
   );
@@ -101,7 +104,7 @@ export default function ProjectsClient() {
   };
 
   // ✅ toggle category rule:
-  // If user selects multiple categories OR any non-Projects => redirect to /products with same filters
+  // If user selects multiple categories OR any non-projects => redirect to /products with same filters
   const handleToggleCategory = (cat: string) => {
     const current = Array.isArray(selectedCat) ? selectedCat : [PROJECTS];
     const next = current.includes(cat) ? current.filter((c) => c !== cat) : [...current, cat];
@@ -158,7 +161,7 @@ export default function ProjectsClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchInput]);
 
-  const breadcrumbText = useMemo(() => PROJECTS, []);
+  const breadcrumbText = useMemo(() => PROJECTS_LABEL, []);
 
   useEffect(() => {
     document.body.style.overflow = isFilterOpen ? "hidden" : "auto";
@@ -225,7 +228,7 @@ export default function ProjectsClient() {
               {/* Chips */}
               <div className="mt-4 flex flex-wrap gap-2">
                 <span className="px-3 py-1 rounded-full bg-white/85 backdrop-blur border border-blue-100 text-blue-700 text-xs md:text-sm font-extrabold shadow-sm">
-                  {PROJECTS}
+                  {PROJECTS_LABEL}
                 </span>
                 {selectedCourse && (
                   <span className="px-3 py-1 rounded-full bg-white/85 backdrop-blur border border-gray-200 text-gray-700 text-xs md:text-sm font-bold shadow-sm">
@@ -363,8 +366,9 @@ export default function ProjectsClient() {
               />
             )}
             <div
-              className={`lg:hidden fixed top-0 left-0 z-[1000] h-full w-[85%] max-w-[360px] bg-white shadow-2xl transition-transform duration-300 ease-out ${isFilterOpen ? "translate-x-0" : "-translate-x-full"
-                }`}
+              className={`lg:hidden fixed top-0 left-0 z-[1000] h-full w-[85%] max-w-[360px] bg-white shadow-2xl transition-transform duration-300 ease-out ${
+                isFilterOpen ? "translate-x-0" : "-translate-x-full"
+              }`}
             >
               <FilterSidebar
                 closeFilter={() => setIsFilterOpen(false)}

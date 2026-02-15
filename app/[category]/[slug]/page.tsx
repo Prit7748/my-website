@@ -1,11 +1,14 @@
 // ✅ FILE: app/[category]/[slug]/page.tsx  (Complete Replace)
-// NOTE: Only additions for output:"export": generateStaticParams + dynamicParams.
-// Rest logic kept as-is.
+// NOTE: fetchProduct() is now DB-direct (NO internal API fetch).
+// Everything else kept same (SEO, JSON-LD, redirect, ProductDetailsClient).
 
 import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
 import Script from "next/script";
 import ProductDetailsClient from "@/components/product/ProductDetailsClient";
+
+import dbConnect from "@/lib/db";
+import Product from "@/models/Product";
 
 type ApiProduct = {
   _id: string;
@@ -45,12 +48,28 @@ type ApiProduct = {
 };
 
 function siteUrl() {
-  const base = process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "http://localhost:3000";
+  // ✅ Hardened: if user accidentally saves without scheme, we auto-fix
+  let base = process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "http://localhost:3000";
+  base = String(base || "").trim().replace(/\/+$/, "");
+
+  // If scheme missing -> auto add
+  if (!/^https?:\/\//i.test(base)) {
+    // localhost/dev should be http
+    if (base.startsWith("localhost") || base.startsWith("127.0.0.1")) {
+      base = `http://${base}`;
+    } else {
+      // production domain should be https
+      base = `https://${base}`;
+    }
+  }
+
   return base.replace(/\/+$/, "");
 }
+
 function safeText(input: any) {
   return String(input || "").trim();
 }
+
 function stripHtml(html: string) {
   return safeText(html)
     .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, " ")
@@ -59,21 +78,16 @@ function stripHtml(html: string) {
     .replace(/\s+/g, " ")
     .trim();
 }
+
 async function resolveParams<T extends Record<string, any>>(params: any): Promise<T> {
   if (params && typeof params.then === "function") return await params;
   return params as T;
 }
 
 /**
- * ✅ REQUIRED for output:"export"
- * Dynamic route needs build-time params.
- * For now empty (safe) so build passes; add real pairs later if needed.
+ * ✅ Keep same (your note)
  */
-export const dynamic = "force-static";
-
-export function generateStaticParams() {
-  return [];
-}
+export const dynamic = "force-dynamic";
 
 // ✅ Same mapping as your ProductDetailsClient (keep consistent)
 function categoryLabelFromSlug(categorySlug: string) {
@@ -92,20 +106,65 @@ function categoryLabelFromSlug(categorySlug: string) {
 }
 
 // ✅ Decide variant by categorySlug
-function variantFromCategorySlug(categorySlug: string): "digital" | "hardcopy" | "pyq" | "projects" | "combo" {
+function variantFromCategorySlug(
+  categorySlug: string
+): "digital" | "hardcopy" | "pyq" | "projects" | "combo" {
   if (categorySlug === "handwritten-hardcopy") return "hardcopy";
   if (categorySlug === "combo") return "combo";
   if (categorySlug === "projects") return "projects";
   if (categorySlug === "question-papers") return "pyq";
-  // solved-assignments, handwritten-pdfs, ebooks, guess-papers, etc => digital behavior (qty locked)
   return "digital";
 }
 
+/* =========================
+   ✅ DB DIRECT FETCH (FIX)
+   ========================= */
 async function fetchProduct(slug: string) {
-  const url = `${siteUrl()}/api/products/${encodeURIComponent(slug)}`;
-  const res = await fetch(url, { cache: "no-store" });
-  const data = await res.json().catch(() => null);
-  return { product: (data?.product || null) as ApiProduct | null, status: res.status };
+  await dbConnect();
+
+  // only non-trashed products should show publicly
+  const doc: any = await Product.findOne({ slug, deletedAt: null }).lean();
+
+  if (!doc) {
+    return { product: null as ApiProduct | null, status: 404 };
+  }
+
+  const product: ApiProduct = {
+    _id: String(doc._id),
+    title: safeText(doc.title),
+    slug: safeText(doc.slug),
+    sku: safeText(doc.sku),
+    category: safeText(doc.category),
+
+    subjectCode: safeText(doc.subjectCode),
+    subjectTitleHi: safeText(doc.subjectTitleHi),
+    subjectTitleEn: safeText(doc.subjectTitleEn),
+
+    courseCodes: Array.isArray(doc.courseCodes) ? doc.courseCodes.map((x: any) => safeText(x)).filter(Boolean) : [],
+    courseTitles: Array.isArray(doc.courseTitles) ? doc.courseTitles.map((x: any) => safeText(x)).filter(Boolean) : [],
+
+    session: safeText(doc.session),
+    language: safeText(doc.language),
+
+    price: Number(doc.price || 0),
+    oldPrice: doc.oldPrice === undefined || doc.oldPrice === null ? null : Number(doc.oldPrice || 0),
+
+    shortDesc: safeText(doc.shortDesc),
+    descriptionHtml: safeText(doc.descriptionHtml),
+    pages: Number(doc.pages || 0),
+    importantNote: safeText(doc.importantNote),
+
+    isDigital: Boolean(doc.isDigital ?? true),
+
+    // keep legacy compatibility (client may still read pdfUrl)
+    pdfUrl: safeText(doc.pdfUrl),
+
+    images: Array.isArray(doc.images) ? doc.images.map((x: any) => safeText(x)).filter(Boolean) : [],
+    thumbnailUrl: safeText(doc.thumbnailUrl),
+    quickUrl: safeText(doc.quickUrl),
+  };
+
+  return { product, status: 200 };
 }
 
 // ✅ Canonical + metadata
@@ -156,6 +215,7 @@ export default async function Page({ params }: { params: any }) {
 
   // ✅ IMPORTANT: Wrong category URL open ho to redirect (canonical + SEO)
   const label = safeText(product.category);
+
   const expectedSlugByLabel: Record<string, string> = {
     "Solved Assignments": "solved-assignments",
     "Handwritten PDFs": "handwritten-pdfs",
@@ -167,6 +227,7 @@ export default async function Page({ params }: { params: any }) {
     Combo: "combo",
     Products: "products",
   };
+
   const expectedCategorySlug = expectedSlugByLabel[label] || categorySlug;
   if (expectedCategorySlug && expectedCategorySlug !== categorySlug) {
     redirect(`/${expectedCategorySlug}/${product.slug}`);
@@ -245,11 +306,7 @@ export default async function Page({ params }: { params: any }) {
         dangerouslySetInnerHTML={{ __html: JSON.stringify(webPageJsonLd) }}
       />
 
-      <ProductDetailsClient
-        initialProduct={product as any}
-        categorySlug={expectedCategorySlug}
-        variant={variant}
-      />
+      <ProductDetailsClient initialProduct={product as any} categorySlug={expectedCategorySlug} variant={variant} />
     </>
   );
 }

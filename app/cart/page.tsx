@@ -168,7 +168,10 @@ export default function CartPage() {
                            )}
                         </div>
 
-                        <Link href="/checkout" className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold text-lg hover:bg-blue-700 transition shadow-lg shadow-blue-200 active:scale-95 flex items-center justify-center gap-2 mb-4">
+                        <Link
+                           href={`/checkout?coupon=${encodeURIComponent(coupon || "")}&discount=${discount}`}
+                           className="w-full bg-blue-600 text-white py-4 rounded-xl font-bold text-lg hover:bg-blue-700 transition shadow-lg shadow-blue-200 active:scale-95 flex items-center justify-center gap-2 mb-4"
+                        >
                            Proceed to Checkout <ArrowRight size={20} />
                         </Link>
 

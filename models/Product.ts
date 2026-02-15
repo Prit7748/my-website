@@ -1,3 +1,4 @@
+// models/Product.ts
 import mongoose, { Schema, models, model } from "mongoose";
 
 const ProductSchema = new Schema(
@@ -37,6 +38,12 @@ const ProductSchema = new Schema(
       default: "available",
       index: true,
     },
+
+    // ✅ Coming Soon config (NEW)
+    deliverWithinMinutes: { type: Number, default: 20, min: 1 },
+    comingSoonNote: { type: String, default: "" },
+    autoMakeAvailableOnUpload: { type: Boolean, default: true },
+
     importantNote: { type: String, default: "" },
 
     // Description
@@ -45,6 +52,11 @@ const ProductSchema = new Schema(
 
     // Digital
     isDigital: { type: Boolean, default: true },
+
+    // ✅ PRIVATE S3 KEY
+    pdfKey: { type: String, default: "" },
+
+    // legacy
     pdfUrl: { type: String, default: "" },
 
     // Images
@@ -59,6 +71,10 @@ const ProductSchema = new Schema(
     // Publish
     isActive: { type: Boolean, default: false, index: true },
     lastModifiedAt: { type: Date, default: Date.now },
+
+    // ✅ TRASH (soft delete)
+    deletedAt: { type: Date, default: null, index: true },
+    deletedBy: { type: String, default: "" },
   },
   { timestamps: true }
 );
@@ -70,6 +86,9 @@ ProductSchema.index({ isActive: 1, price: -1 });
 ProductSchema.index({ isActive: 1, category: 1, createdAt: -1 });
 ProductSchema.index({ isActive: 1, session: 1, createdAt: -1 });
 ProductSchema.index({ isActive: 1, courseCodes: 1, createdAt: -1 });
+
+/* ✅ Purge helper index */
+ProductSchema.index({ deletedAt: 1, createdAt: -1 });
 
 /* ===== TEXT SEARCH INDEX ===== */
 ProductSchema.index(

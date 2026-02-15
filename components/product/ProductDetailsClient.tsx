@@ -1,4 +1,4 @@
-// ✅ FILE: components/product/ProductDetailsClient.tsx (Complete Replace)
+// ✅ FILE: components/product/ProductDetailsClient.tsx (Complete Replace - UPDATED with availability + Want to Buy flow)
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
@@ -39,6 +39,7 @@ import {
   ExternalLink,
   CheckCircle2,
   Zap,
+  Loader2,
 } from "lucide-react";
 
 type Product = {
@@ -65,6 +66,9 @@ type Product = {
   descriptionHtml?: string;
   pages?: number;
   importantNote?: string;
+
+  // ✅ availability from API: "out_of_stock" / "available" / "coming_soon" etc.
+  availability?: string;
 
   isDigital?: boolean;
   pdfUrl?: string;
@@ -165,6 +169,14 @@ async function downloadImageSmart(url: string, filenameHint?: string) {
   }
 }
 
+function normAvail(v?: string) {
+  return safeStr(v).toLowerCase();
+}
+function isOutOfStock(p: Product) {
+  const a = normAvail(p.availability);
+  return a === "out_of_stock" || a === "outofstock" || a === "out-of-stock";
+}
+
 const RV_KEY = "isp_recently_viewed_v1";
 const RV_MAX = 18;
 
@@ -206,6 +218,15 @@ export default function ProductDetailsClient({
 
   // ✅ Hardcopy focus: WhatsApp text loop (EN/HI)
   const [waPulseText, setWaPulseText] = useState<"en" | "hi">("en");
+
+  // ✅ Want to Buy modal state (Out of Stock)
+  const [wtbOpen, setWtbOpen] = useState(false);
+  const [wtbLoading, setWtbLoading] = useState(false);
+  const [wtbForm, setWtbForm] = useState({
+    email: "",
+    phone: "",
+    message: "",
+  });
 
   const categoryLabel = useMemo(() => categoryLabelFromSlug(categorySlug), [categorySlug]);
 
@@ -300,7 +321,15 @@ export default function ProductDetailsClient({
   useEffect(() => {
     try {
       setPageUrl(window.location.href);
-    } catch {}
+    } catch { }
+  }, []);
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem("isp_user_email") || "";
+      if (saved && !wtbForm.email) setWtbForm((p) => ({ ...p, email: saved }));
+    } catch { }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const waBuyMsg = encodeURIComponent(
@@ -321,7 +350,7 @@ export default function ProductDetailsClient({
 
   const handleAddToCart = () => {
     addToCart({
-      id: product.slug,
+      id: product._id, // ✅ IMPORTANT: Mongo ObjectId
       title: computedTitle,
       price: Number(product.price || 0),
       image: product.thumbnailUrl || media[0] || "/images/cover1.jpg",
@@ -331,6 +360,7 @@ export default function ProductDetailsClient({
     });
     alert("Item added to cart successfully!");
   };
+
 
   const handleHardcopyWhatsApp = () => {
     window.open(waBuyLink, "_blank", "noopener,noreferrer");
@@ -345,123 +375,181 @@ export default function ProductDetailsClient({
         await navigator.clipboard.writeText(url);
         alert("Link copied!");
       }
-    } catch {}
+    } catch { }
   };
 
-  const BuySection = ({ isMobile = false }: { isMobile?: boolean }) => (
-    <div className={`flex gap-3 ${isMobile ? "" : "w-full"} ${isHardcopy ? "flex-col sm:flex-row" : ""}`}>
-      {/* Quantity */}
-      <div
-        className={`flex items-center rounded-2xl bg-white h-14 border ${
-          qtyLocked ? "border-gray-200 opacity-70" : "border-gray-200"
-        } shadow-sm`}
-      >
-        <button
-          onClick={() => setQuantity(Math.max(1, quantity - 1))}
-          className={`px-3 h-full rounded-l-2xl ${
-            qtyLocked ? "cursor-not-allowed" : "hover:bg-gray-50 text-gray-800"
-          }`}
-          disabled={qtyLocked}
-          aria-label="Decrease quantity"
+  async function submitWantToBuy() {
+    const productId = safeStr(product?._id);
+    const email = safeStr(wtbForm.email);
+    const phone = safeStr(wtbForm.phone);
+    const message = safeStr(wtbForm.message);
+
+    if (!email) {
+      alert("Email is required.");
+      return;
+    }
+
+    setWtbLoading(true);
+    try {
+      const res = await fetch("/api/products/want-to-buy", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          productId,
+          email,
+          phone,
+          message: message || `Interested in: ${computedTitle}\nLink: ${pageUrl || pathname}`,
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        alert(data?.error || "Request failed");
+        return;
+      }
+
+      try {
+        localStorage.setItem("isp_user_email", email);
+      } catch { }
+
+      alert(data?.message || "Request submitted ✅");
+      setWtbOpen(false);
+      setWtbForm((p) => ({ ...p, message: "" }));
+    } catch {
+      alert("Server error. Try again.");
+    } finally {
+      setWtbLoading(false);
+    }
+  }
+
+  const BuySection = ({ isMobile = false }: { isMobile?: boolean }) => {
+    const oos = isOutOfStock(product);
+
+    return (
+      <div className={`flex gap-3 ${isMobile ? "" : "w-full"} ${isHardcopy ? "flex-col sm:flex-row" : ""}`}>
+        {/* Quantity */}
+        <div
+          className={`flex items-center rounded-2xl bg-white h-14 border ${qtyLocked ? "border-gray-200 opacity-70" : "border-gray-200"
+            } shadow-sm`}
         >
-          <Minus size={16} />
-        </button>
-
-        <span className="px-2 font-extrabold text-base min-w-[2.5rem] text-center text-slate-900">
-          {qtyLocked ? 1 : quantity}
-        </span>
-
-        <button
-          onClick={() => setQuantity(quantity + 1)}
-          className={`px-3 h-full rounded-r-2xl ${
-            qtyLocked ? "cursor-not-allowed" : "hover:bg-gray-50 text-gray-800"
-          }`}
-          disabled={qtyLocked}
-          aria-label="Increase quantity"
-        >
-          <Plus size={16} />
-        </button>
-      </div>
-
-      {/* CTA Buttons */}
-      {isHardcopy ? (
-        <div className={`flex-1 flex gap-3 ${isMobile ? "" : ""}`}>
           <button
-            onClick={handleHardcopyWhatsApp}
-            className="
-              isp-wa-pulse
-              relative flex-1 h-14 rounded-2xl font-extrabold text-sm md:text-base
-              bg-emerald-600 text-white
-              shadow-[0_14px_35px_-18px_rgba(16,185,129,0.85)]
-              ring-2 ring-emerald-300/60
-              hover:bg-emerald-700 transition
-              active:scale-[0.98]
-              overflow-hidden
-            "
+            onClick={() => setQuantity(Math.max(1, quantity - 1))}
+            className={`px-3 h-full rounded-l-2xl ${qtyLocked ? "cursor-not-allowed" : "hover:bg-gray-50 text-gray-800"
+              }`}
+            disabled={qtyLocked}
+            aria-label="Decrease quantity"
           >
-            <span className="absolute inset-0 opacity-30 bg-[radial-gradient(600px_120px_at_20%_0%,rgba(255,255,255,0.6),transparent)]" />
-            <span className="relative inline-flex items-center justify-center gap-2 w-full h-full">
-              <MessageCircle size={20} />
-              <span className="grid place-items-center">
-                <span
-                  className={`col-start-1 row-start-1 transition-opacity duration-500 ease-in-out ${
-                    waPulseText === "en" ? "opacity-100" : "opacity-0"
-                  }`}
-                >
-                  Buy Direct from WhatsApp
-                </span>
-                <span
-                  className={`col-start-1 row-start-1 transition-opacity duration-500 ease-in-out ${
-                    waPulseText === "hi" ? "opacity-100" : "opacity-0"
-                  }`}
-                >
-                  सीधा व्हाट्सएप से खरीदें
-                </span>
-              </span>
-            </span>
+            <Minus size={16} />
           </button>
 
+          <span className="px-2 font-extrabold text-base min-w-[2.5rem] text-center text-slate-900">
+            {qtyLocked ? 1 : quantity}
+          </span>
+
+          <button
+            onClick={() => setQuantity(quantity + 1)}
+            className={`px-3 h-full rounded-r-2xl ${qtyLocked ? "cursor-not-allowed" : "hover:bg-gray-50 text-gray-800"
+              }`}
+            disabled={qtyLocked}
+            aria-label="Increase quantity"
+          >
+            <Plus size={16} />
+          </button>
+        </div>
+
+        {/* CTA Buttons */}
+        {isHardcopy ? (
+          <div className={`flex-1 flex gap-3 ${isMobile ? "" : ""}`}>
+            <button
+              onClick={handleHardcopyWhatsApp}
+              className="
+                isp-wa-pulse
+                relative flex-1 h-14 rounded-2xl font-extrabold text-sm md:text-base
+                bg-emerald-600 text-white
+                shadow-[0_14px_35px_-18px_rgba(16,185,129,0.85)]
+                ring-2 ring-emerald-300/60
+                hover:bg-emerald-700 transition
+                active:scale-[0.98]
+                overflow-hidden
+              "
+            >
+              <span className="absolute inset-0 opacity-30 bg-[radial-gradient(600px_120px_at_20%_0%,rgba(255,255,255,0.6),transparent)]" />
+              <span className="relative inline-flex items-center justify-center gap-2 w-full h-full">
+                <MessageCircle size={20} />
+                <span className="grid place-items-center">
+                  <span
+                    className={`col-start-1 row-start-1 transition-opacity duration-500 ease-in-out ${waPulseText === "en" ? "opacity-100" : "opacity-0"
+                      }`}
+                  >
+                    Buy Direct from WhatsApp
+                  </span>
+                  <span
+                    className={`col-start-1 row-start-1 transition-opacity duration-500 ease-in-out ${waPulseText === "hi" ? "opacity-100" : "opacity-0"
+                      }`}
+                  >
+                    सीधा व्हाट्सएप से खरीदें
+                  </span>
+                </span>
+              </span>
+            </button>
+
+            <button
+              onClick={handleAddToCart}
+              className="
+                h-14 px-4 rounded-2xl font-extrabold text-sm md:text-base
+                border border-slate-200 bg-white text-slate-900
+                hover:bg-slate-50 hover:border-slate-300 transition
+                shadow-sm active:scale-[0.99]
+                inline-flex items-center justify-center gap-2
+              "
+              aria-label="Add to cart"
+              title="Add to cart"
+            >
+              <ShoppingCart size={20} /> Add
+            </button>
+          </div>
+        ) : oos ? (
+          <button
+            onClick={() => setWtbOpen(true)}
+            className="
+              flex-1 h-14 rounded-2xl font-extrabold text-base
+              bg-emerald-600 text-white hover:bg-emerald-700 transition
+              shadow-[0_14px_35px_-18px_rgba(16,185,129,0.65)]
+              active:scale-[0.98]
+              flex items-center justify-center gap-2
+            "
+          >
+            <MessageCircle size={20} /> Want to Buy
+          </button>
+        ) : (
           <button
             onClick={handleAddToCart}
             className="
-              h-14 px-4 rounded-2xl font-extrabold text-sm md:text-base
-              border border-slate-200 bg-white text-slate-900
-              hover:bg-slate-50 hover:border-slate-300 transition
-              shadow-sm active:scale-[0.99]
-              inline-flex items-center justify-center gap-2
+              flex-1 h-14 rounded-2xl font-extrabold text-base
+              bg-blue-700 text-white hover:bg-blue-800 transition
+              shadow-[0_14px_35px_-18px_rgba(37,99,235,0.65)]
+              active:scale-[0.98]
+              flex items-center justify-center gap-2
             "
-            aria-label="Add to cart"
-            title="Add to cart"
           >
-            <ShoppingCart size={20} /> Add
+            <ShoppingCart size={20} /> Add to Cart
           </button>
-        </div>
-      ) : (
-        <button
-          onClick={handleAddToCart}
-          className="
-            flex-1 h-14 rounded-2xl font-extrabold text-base
-            bg-blue-700 text-white hover:bg-blue-800 transition
-            shadow-[0_14px_35px_-18px_rgba(37,99,235,0.65)]
-            active:scale-[0.98]
-            flex items-center justify-center gap-2
-          "
-        >
-          <ShoppingCart size={20} /> Add to Cart
-        </button>
-      )}
+        )}
 
-      {!isMobile && (
-        <button
-          onClick={handleShare}
-          className="h-14 w-14 flex items-center justify-center border-2 border-gray-200 rounded-2xl text-gray-600 hover:border-blue-500 hover:text-blue-700 transition bg-white shadow-sm"
-          aria-label="Share"
-        >
-          <Share2 size={20} />
-        </button>
-      )}
-    </div>
-  );
+        {!isMobile && (
+          <button
+            onClick={handleShare}
+            className="h-14 w-14 flex items-center justify-center border-2 border-gray-200 rounded-2xl text-gray-600 hover:border-blue-500 hover:text-blue-700 transition bg-white shadow-sm"
+            aria-label="Share"
+          >
+            <Share2 size={20} />
+          </button>
+        )}
+      </div>
+    );
+  };
 
   useEffect(() => {
     const card: ApiProductCard = {
@@ -486,7 +574,7 @@ export default function ProductDetailsClient({
       const next = [card, ...withoutCurrent].slice(0, RV_MAX);
       localStorage.setItem(RV_KEY, JSON.stringify(next));
       setRecentlyViewed(next.filter((x) => x.slug !== card.slug).slice(0, 12));
-    } catch {}
+    } catch { }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [product.slug]);
 
@@ -693,11 +781,10 @@ export default function ProductDetailsClient({
                   <div key={url + i} className="relative w-16 h-24 flex-shrink-0">
                     <button
                       onClick={() => setSelectedMediaIndex(i)}
-                      className={`relative w-16 h-24 rounded-xl overflow-hidden border-2 transition-all ${
-                        selectedMediaIndex === i
-                          ? "border-blue-700 ring-2 ring-blue-100"
-                          : "border-gray-200 hover:border-gray-300"
-                      }`}
+                      className={`relative w-16 h-24 rounded-xl overflow-hidden border-2 transition-all ${selectedMediaIndex === i
+                        ? "border-blue-700 ring-2 ring-blue-100"
+                        : "border-gray-200 hover:border-gray-300"
+                        }`}
                       aria-label={`Media ${i + 1}`}
                       title={`Media ${i + 1}`}
                     >
@@ -727,9 +814,8 @@ export default function ProductDetailsClient({
             <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm transition hover:shadow-md">
               <div className="flex items-start gap-3">
                 <div
-                  className={`mt-0.5 rounded-xl p-2 ${
-                    isHardcopy ? "bg-orange-50 text-orange-700" : "bg-emerald-50 text-emerald-700"
-                  }`}
+                  className={`mt-0.5 rounded-xl p-2 ${isHardcopy ? "bg-orange-50 text-orange-700" : "bg-emerald-50 text-emerald-700"
+                    }`}
                 >
                   {isHardcopy ? <Truck size={18} /> : <FileText size={18} />}
                 </div>
@@ -773,6 +859,12 @@ export default function ProductDetailsClient({
               <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-slate-50 text-slate-700 text-xs font-extrabold rounded-full border border-slate-200">
                 <BadgeCheck size={14} className="text-blue-700" /> Verified
               </span>
+
+              {isOutOfStock(product) ? (
+                <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-red-50 text-red-700 text-xs font-extrabold rounded-full border border-red-200">
+                  <X size={14} /> Out of Stock
+                </span>
+              ) : null}
             </div>
 
             <h1 className="text-2xl md:text-3xl lg:text-4xl font-extrabold text-slate-900 mb-3 leading-snug">
@@ -962,6 +1054,19 @@ export default function ProductDetailsClient({
                       </div>
                     </div>
                   </div>
+
+                  {isOutOfStock(product) ? (
+                    <div className="rounded-xl border border-red-200 bg-red-50 p-3">
+                      <div className="flex items-start gap-2">
+                        <div className="mt-0.5 text-red-700">
+                          <X size={16} />
+                        </div>
+                        <div className="text-xs text-red-800 font-semibold leading-relaxed">
+                          Currently Out of Stock. Tap <b>Want to Buy</b> to request availability.
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               </div>
             </div>
@@ -999,9 +1104,7 @@ export default function ProductDetailsClient({
               <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                 <div className="min-w-0">
                   <div className="text-xs font-extrabold text-emerald-800 uppercase tracking-wide">Save More</div>
-                  <div className="text-lg md:text-xl font-extrabold text-slate-900">
-                    Purchase in Combo & Save Money
-                  </div>
+                  <div className="text-lg md:text-xl font-extrabold text-slate-900">Purchase in Combo & Save Money</div>
                   <div className="mt-1 text-xs text-slate-700 font-semibold leading-relaxed">
                     Recommended: buy related products together for better value.
                   </div>
@@ -1021,10 +1124,7 @@ export default function ProductDetailsClient({
           <div
             className="prose prose-sm prose-blue max-w-none text-slate-700"
             dangerouslySetInnerHTML={{
-              __html:
-                categorySlug === "combo"
-                  ? computedDescriptionHtml
-                  : safeStr(product.descriptionHtml) || computedDescriptionHtml,
+              __html: categorySlug === "combo" ? computedDescriptionHtml : safeStr(product.descriptionHtml) || computedDescriptionHtml,
             }}
           />
         </div>
@@ -1091,7 +1191,7 @@ export default function ProductDetailsClient({
                   try {
                     localStorage.removeItem(RV_KEY);
                     setRecentlyViewed([]);
-                  } catch {}
+                  } catch { }
                 }}
                 className="text-sm font-extrabold text-gray-500 hover:text-red-600 transition"
               >
@@ -1111,6 +1211,92 @@ export default function ProductDetailsClient({
       <div className="fixed bottom-0 left-0 w-full bg-white/95 backdrop-blur p-3 border-t border-gray-200 lg:hidden z-50 shadow-[0_-10px_30px_-15px_rgba(0,0,0,0.35)]">
         <BuySection isMobile />
       </div>
+
+      {/* ✅ Want to Buy Modal */}
+      {wtbOpen ? (
+        <div className="fixed inset-0 z-[999] flex items-center justify-center px-4">
+          <div className="absolute inset-0 bg-black/40" onClick={() => !wtbLoading && setWtbOpen(false)} />
+          <div className="relative w-full max-w-lg rounded-3xl bg-white border border-gray-200 shadow-2xl overflow-hidden">
+            <div className="p-5 border-b border-gray-200 flex items-center justify-between">
+              <div>
+                <div className="text-lg font-extrabold">Want to Buy</div>
+                <div className="text-sm text-slate-600">
+                  This item is currently out of stock. Share details and we’ll contact you.
+                </div>
+              </div>
+              <button
+                onClick={() => !wtbLoading && setWtbOpen(false)}
+                className="h-10 w-10 rounded-xl border border-gray-200 bg-gray-50 hover:bg-white flex items-center justify-center"
+              >
+                <X />
+              </button>
+            </div>
+
+            <div className="p-5 space-y-4">
+              <div className="rounded-2xl border border-emerald-100 bg-emerald-50 p-4">
+                <div className="text-xs font-extrabold text-emerald-900">Product</div>
+                <div className="mt-1 text-sm font-extrabold text-slate-900">{computedTitle}</div>
+                <div className="mt-1 text-xs text-slate-700 font-semibold">
+                  Price: ₹{money(Number(product.price || 0))} • Category: {safeStr(product.category) || categoryLabel}
+                </div>
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-xs font-bold text-slate-500 uppercase ml-1">Email (required)</label>
+                <input
+                  value={wtbForm.email}
+                  onChange={(e) => setWtbForm((p) => ({ ...p, email: e.target.value }))}
+                  className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 outline-none focus:border-emerald-500 transition font-medium"
+                  placeholder="your@email.com"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-xs font-bold text-slate-500 uppercase ml-1">Phone (optional)</label>
+                <input
+                  value={wtbForm.phone}
+                  onChange={(e) => setWtbForm((p) => ({ ...p, phone: e.target.value }))}
+                  className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 outline-none focus:border-emerald-500 transition font-medium"
+                  placeholder="10 digit mobile"
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-xs font-bold text-slate-500 uppercase ml-1">Message (optional)</label>
+                <textarea
+                  value={wtbForm.message}
+                  onChange={(e) => setWtbForm((p) => ({ ...p, message: e.target.value }))}
+                  className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 outline-none focus:border-emerald-500 transition font-medium min-h-[90px]"
+                  placeholder="Any preference / urgency / quantity etc."
+                />
+              </div>
+
+              <div className="flex items-center justify-end gap-2">
+                <button
+                  onClick={() => setWtbOpen(false)}
+                  disabled={wtbLoading}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-bold disabled:opacity-60"
+                >
+                  Cancel
+                </button>
+
+                <button
+                  onClick={submitWantToBuy}
+                  disabled={wtbLoading}
+                  className="inline-flex items-center gap-2 px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white transition font-extrabold disabled:opacity-60"
+                >
+                  {wtbLoading ? <Loader2 className="animate-spin" size={18} /> : <MessageCircle size={18} />}
+                  Submit
+                </button>
+              </div>
+
+              <div className="text-xs text-slate-500 font-semibold">
+                Note: Request submit होते ही हमारी team आपको email/phone पर contact करेगी.
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       <div className="h-20 lg:h-0" />
       <Footer />

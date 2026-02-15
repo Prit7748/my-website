@@ -1,18 +1,20 @@
+// ✅ FILE: components/solved-assignments/ProductGrid.tsx  (COMPLETE REPLACE)
 "use client";
 import React, { useEffect, useMemo, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
-import { Star, ShoppingCart, Eye, Layers, ImageIcon } from "lucide-react";
+import { Star, ShoppingCart, Eye, Layers, ImageIcon, CheckCircle2 } from "lucide-react";
 import { useSearchParams } from "next/navigation";
 import ProductQuickView from "./ProductQuickView";
 import { productHref } from "@/lib/productHref";
+import { useCart } from "@/context/CartContext";
 
 type Meta = { total: number; page: number; totalPages: number; limit: number };
 
 interface ProductGridProps {
   selectedCat: string[];
   onMeta?: (meta: Meta) => void;
-  search?: string; // ✅ NEW: optional search prop (fix TS error)
+  search?: string;
 }
 
 function fileNameOf(path: string) {
@@ -31,24 +33,38 @@ function pickImagesSorted(images?: string[]) {
   return { first, second, all: sorted };
 }
 
+function money(n: number) {
+  try {
+    return new Intl.NumberFormat("en-IN").format(n);
+  } catch {
+    return String(n);
+  }
+}
+
 export default function ProductGrid({ selectedCat, onMeta, search }: ProductGridProps) {
   const searchParams = useSearchParams();
+  const { cart, addToCart, removeFromCart } = useCart();
 
   const [loading, setLoading] = useState(true);
   const [products, setProducts] = useState<any[]>([]);
   const [selectedProduct, setSelectedProduct] = useState<any>(null);
   const [error, setError] = useState<string>("");
 
+  // ✅ Non-blocking toast (no screen freeze)
+  const [toast, setToast] = useState<{ show: boolean; msg: string; kind: "add" | "remove" }>({
+    show: false,
+    msg: "",
+    kind: "add",
+  });
+
   const selectedCatKey = useMemo(() => selectedCat.join(","), [selectedCat]);
 
   const queryKey = useMemo(() => {
     const params = new URLSearchParams(searchParams.toString());
 
-    // category override (page-specific)
     if (selectedCatKey) params.set("category", selectedCatKey);
     else params.delete("category");
 
-    // ✅ NEW: search override (from prop, fallback to URL)
     const qSearch = (typeof search === "string" ? search : params.get("search") || "").trim();
     if (qSearch) params.set("search", qSearch);
     else params.delete("search");
@@ -58,6 +74,43 @@ export default function ProductGrid({ selectedCat, onMeta, search }: ProductGrid
 
     return params.toString();
   }, [searchParams, selectedCatKey, search]);
+
+  function isInCart(productId: string) {
+    return cart.some((x) => x.id === productId);
+  }
+
+  function showToast(msg: string, kind: "add" | "remove") {
+    setToast({ show: true, msg, kind });
+    window.clearTimeout((showToast as any)._t);
+    (showToast as any)._t = window.setTimeout(() => {
+      setToast((p) => ({ ...p, show: false }));
+    }, 1400);
+  }
+
+  function toggleCart(p: any) {
+    const id = String(p?._id || p?.id || p?.slug || "");
+    if (!id) return;
+
+    const { first } = pickImagesSorted(p.images);
+
+    if (isInCart(id)) {
+      removeFromCart(id);
+      showToast("Removed from cart", "remove");
+      return;
+    }
+
+    addToCart({
+      id,
+      title: String(p?.title || "Product"),
+      price: Number(p?.price || 0),
+      image: first || "/images/cover1.jpg",
+      quantity: 1,
+      category: String(p?.category || "Product"),
+      courseCode: String(p?.courseCode || (Array.isArray(p?.courseCodes) ? p.courseCodes[0] : "") || ""),
+    });
+
+    showToast("Added to cart", "add");
+  }
 
   useEffect(() => {
     const controller = new AbortController();
@@ -127,11 +180,34 @@ export default function ProductGrid({ selectedCat, onMeta, search }: ProductGrid
 
   return (
     <>
+      {/* ✅ Toast (non-blocking) */}
+      <div
+        className={`fixed bottom-5 left-1/2 -translate-x-1/2 z-[9999] transition-all duration-300 ${
+          toast.show ? "opacity-100 translate-y-0" : "opacity-0 translate-y-3 pointer-events-none"
+        }`}
+        aria-live="polite"
+        aria-atomic="true"
+      >
+        <div
+          className={`px-4 py-2 rounded-2xl shadow-lg border text-sm font-extrabold flex items-center gap-2 ${
+            toast.kind === "add"
+              ? "bg-emerald-600 text-white border-emerald-500"
+              : "bg-slate-900 text-white border-slate-800"
+          }`}
+        >
+          <CheckCircle2 size={18} />
+          {toast.msg}
+        </div>
+      </div>
+
       <div className="grid grid-cols-2 md:grid-cols-3 gap-4 md:gap-8">
         {products.map((p: any) => {
           const { first, all } = pickImagesSorted(p.images);
           const isCombo = (p.category || "").toLowerCase().includes("combo");
           const href = productHref(p);
+
+          const id = String(p?._id || p?.id || p?.slug || "");
+          const inCart = id ? isInCart(id) : false;
 
           return (
             <div
@@ -170,13 +246,11 @@ export default function ProductGrid({ selectedCat, onMeta, search }: ProductGrid
                   onClick={(e) => {
                     e.preventDefault();
                     e.stopPropagation();
-                    setSelectedProduct({
-                      ...p,
-                      images: all,
-                    });
+                    setSelectedProduct({ ...p, images: all });
                   }}
                   className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 bg-white/90 text-slate-800 px-4 py-2 rounded-full font-bold shadow-lg opacity-0 group-hover:opacity-100 transition-all duration-300 flex items-center gap-2 transform translate-y-4 group-hover:translate-y-0 hover:bg-blue-600 hover:text-white z-10"
                   aria-label="Open quick view"
+                  type="button"
                 >
                   <Eye size={16} /> <span className="text-xs">Quick View</span>
                 </button>
@@ -207,13 +281,25 @@ export default function ProductGrid({ selectedCat, onMeta, search }: ProductGrid
 
                 <div className="mt-auto">
                   <div className="flex items-baseline gap-2 mb-3">
-                    <span className="text-lg md:text-xl font-bold text-blue-700">₹{p.price}</span>
-                    {!!p.oldPrice && <span className="text-xs md:text-sm text-gray-400 line-through">₹{p.oldPrice}</span>}
+                    <span className="text-lg md:text-xl font-bold text-blue-700">₹{money(Number(p.price || 0))}</span>
+                    {!!p.oldPrice && (
+                      <span className="text-xs md:text-sm text-gray-400 line-through">₹{money(Number(p.oldPrice))}</span>
+                    )}
                   </div>
 
-                  <button className="w-full bg-[#1e40af] text-white py-2.5 rounded-lg text-[12px] md:text-[14px] font-bold flex items-center justify-center gap-2 hover:bg-[#1e3a8a] transition shadow-md active:scale-95">
-                    <ShoppingCart size={16} /> <span className="hidden md:inline">Add to Cart</span>
-                    <span className="md:hidden">Add</span>
+                  {/* ✅ Real cart toggle + Blue⇄Green */}
+                  <button
+                    type="button"
+                    onClick={() => toggleCart(p)}
+                    className={`w-full py-2.5 rounded-lg text-[12px] md:text-[14px] font-bold flex items-center justify-center gap-2 transition shadow-md active:scale-95 ${
+                      inCart
+                        ? "bg-emerald-600 hover:bg-emerald-700 text-white"
+                        : "bg-[#1e40af] hover:bg-[#1e3a8a] text-white"
+                    }`}
+                  >
+                    <ShoppingCart size={16} />
+                    <span className="hidden md:inline">{inCart ? "Remove from Cart" : "Add to Cart"}</span>
+                    <span className="md:hidden">{inCart ? "Remove" : "Add"}</span>
                   </button>
                 </div>
               </div>

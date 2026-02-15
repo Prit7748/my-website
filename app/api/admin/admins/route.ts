@@ -5,6 +5,9 @@ import bcrypt from "bcryptjs";
 import dbConnect from "@/lib/db";
 import User from "@/models/User";
 
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
 function isStrongPassword(p: string) {
   return (
     p.length >= 8 &&
@@ -16,6 +19,7 @@ function isStrongPassword(p: string) {
 }
 
 async function requireMasterAdmin() {
+  // ✅ Your Next version/types treat cookies() as async
   const cookieStore = await cookies();
   const token = cookieStore.get("token")?.value;
 

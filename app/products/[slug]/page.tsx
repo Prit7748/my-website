@@ -78,11 +78,7 @@ function bestOgImage(p: ApiProduct) {
  * This is a dynamic route, so Next needs build-time params.
  * For now we keep it empty to make build pass (safe, no other logic changed).
  */
-export const dynamic = "force-static";
-
-export function generateStaticParams() {
-  return [];
-}
+export const dynamic = "force-dynamic";
 
 // ✅ Here we make /products/[slug] noindex (because canonical should be category URL)
 export async function generateMetadata({ params }: { params: any }): Promise<Metadata> {

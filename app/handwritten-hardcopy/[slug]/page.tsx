@@ -1,7 +1,13 @@
-// ✅ FILE: app/handwritten-hardcopy/[slug]/page.tsx
+// ✅ FILE: app/handwritten-hardcopy/[slug]/page.tsx  (Complete Replace)
+// Fix 1: Next.js 16 params Promise -> always unwrap using resolveParams()
+// Fix 2: Remove internal API fetch -> DB direct read (no fetch failed / scheme issues)
+
 import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
 import ProductDetailsClient from "@/components/product/ProductDetailsClient";
+
+import dbConnect from "@/lib/db";
+import Product from "@/models/Product";
 
 type ApiProduct = {
   _id: string;
@@ -39,12 +45,20 @@ type ApiProduct = {
 };
 
 function siteUrl() {
-  const base = process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "http://localhost:3000";
+  let base = process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "http://localhost:3000";
+  base = String(base || "").trim().replace(/\/+$/, "");
+  // auto-fix scheme if missing
+  if (!/^https?:\/\//i.test(base)) {
+    if (base.startsWith("localhost") || base.startsWith("127.0.0.1")) base = `http://${base}`;
+    else base = `https://${base}`;
+  }
   return base.replace(/\/+$/, "");
 }
+
 function safeText(v: any) {
   return String(v || "").trim();
 }
+
 function stripHtml(html: string) {
   return safeText(html)
     .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, " ")
@@ -53,16 +67,11 @@ function stripHtml(html: string) {
     .replace(/\s+/g, " ")
     .trim();
 }
+
+// ✅ Next.js 16 params can be Promise
 async function resolveParams<T extends Record<string, any>>(params: any): Promise<T> {
   if (params && typeof params.then === "function") return await params;
   return params as T;
-}
-
-async function fetchProduct(slug: string) {
-  const url = `${siteUrl()}/api/products/${encodeURIComponent(slug)}`;
-  const res = await fetch(url, { cache: "no-store" });
-  const data = await res.json().catch(() => null);
-  return { product: (data?.product || null) as ApiProduct | null, status: res.status };
 }
 
 // ✅ If someone opens wrong category url, redirect to correct one (your rule)
@@ -79,23 +88,57 @@ function productCategoryToSlug(productCategory: string) {
   return "products";
 }
 
-/**
- * ✅ REQUIRED for output:"export"
- * Next.js needs to know which [slug] pages to pre-render at build time.
- * For now (safe), we generate no dynamic pages and show 404 for unknown slugs.
- * Later, you can return real slugs from a JSON/API.
- */
-export const dynamic = "force-static";
+// ✅ keep same behavior (don’t break your build mode assumptions)
+export const dynamic = "force-dynamic";
 
-export function generateStaticParams() {
-  return [];
+// ✅ DB direct fetch
+async function fetchProductFromDB(slug: string) {
+  await dbConnect();
+  const doc: any = await Product.findOne({ slug, deletedAt: null }).lean();
+
+  if (!doc) return { product: null as ApiProduct | null, status: 404 };
+
+  const product: ApiProduct = {
+    _id: String(doc._id),
+    title: safeText(doc.title),
+    slug: safeText(doc.slug),
+    sku: safeText(doc.sku),
+    category: safeText(doc.category),
+
+    subjectCode: safeText(doc.subjectCode),
+    subjectTitleHi: safeText(doc.subjectTitleHi),
+    subjectTitleEn: safeText(doc.subjectTitleEn),
+
+    courseCodes: Array.isArray(doc.courseCodes) ? doc.courseCodes.map((x: any) => safeText(x)).filter(Boolean) : [],
+    courseTitles: Array.isArray(doc.courseTitles) ? doc.courseTitles.map((x: any) => safeText(x)).filter(Boolean) : [],
+
+    session: safeText(doc.session),
+    language: safeText(doc.language),
+
+    price: Number(doc.price || 0),
+    oldPrice: doc.oldPrice === undefined || doc.oldPrice === null ? null : Number(doc.oldPrice || 0),
+
+    shortDesc: safeText(doc.shortDesc),
+    descriptionHtml: safeText(doc.descriptionHtml),
+    pages: Number(doc.pages || 0),
+    importantNote: safeText(doc.importantNote),
+
+    isDigital: Boolean(doc.isDigital ?? true),
+    pdfUrl: safeText(doc.pdfUrl),
+
+    images: Array.isArray(doc.images) ? doc.images.map((x: any) => safeText(x)).filter(Boolean) : [],
+    thumbnailUrl: safeText(doc.thumbnailUrl),
+    quickUrl: safeText(doc.quickUrl),
+  };
+
+  return { product, status: 200 };
 }
 
 export async function generateMetadata({ params }: { params: any }): Promise<Metadata> {
   const p = await resolveParams<{ slug: string }>(params);
   const slug = decodeURIComponent(p?.slug || "").trim();
 
-  const { product } = await fetchProduct(slug);
+  const { product } = await fetchProductFromDB(slug);
   if (!product) return { title: "Product Not Found", robots: { index: false, follow: false } };
 
   const base = siteUrl();
@@ -131,7 +174,7 @@ export default async function Page({ params }: { params: any }) {
   const p = await resolveParams<{ slug: string }>(params);
   const slug = decodeURIComponent(p?.slug || "").trim();
 
-  const { product } = await fetchProduct(slug);
+  const { product } = await fetchProductFromDB(slug);
   if (!product) notFound();
 
   // ✅ Redirect if product category says something else (canonical + correct category)
@@ -140,12 +183,7 @@ export default async function Page({ params }: { params: any }) {
     redirect(`/${correct}/${product.slug}`);
   }
 
-  // ✅ IMPORTANT: hardcopy variant pass karo
   return (
-    <ProductDetailsClient
-      initialProduct={product as any}
-      categorySlug="handwritten-hardcopy"
-      variant="hardcopy"
-    />
+    <ProductDetailsClient initialProduct={product as any} categorySlug="handwritten-hardcopy" variant="hardcopy" />
   );
 }

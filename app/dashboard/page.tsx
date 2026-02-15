@@ -26,6 +26,10 @@ import {
   KeyRound,
   Eye,
   EyeOff,
+  Download,
+  Clock4,
+  BadgeCheck,
+  Loader2,
 } from "lucide-react";
 
 type User = {
@@ -43,6 +47,63 @@ type Category = {
   href: string;
   icon: any;
 };
+
+type PurchasedItem = {
+  orderId: string;
+  status: "pending" | "paid" | "failed" | "refunded" | "cancelled" | string;
+  currency: string;
+  paidAt: string | null;
+  expiresAt: string | null;
+  productId: string;
+  title: string;
+  category: string;
+  price: number;
+};
+
+type DownloadResp =
+  | { ok: true; url: string; expiresIn: number }
+  | {
+      ok: false;
+      status: "processing" | "not_ready" | string;
+      availability?: "coming_soon" | "out_of_stock" | "available" | string;
+      message?: string;
+      paidAt?: string;
+      etaAt?: string;
+      remainingSeconds?: number;
+    };
+
+function safeStr(x: any) {
+  return String(x ?? "").trim();
+}
+function money(n: number) {
+  try {
+    return new Intl.NumberFormat("en-IN").format(Number(n || 0));
+  } catch {
+    return String(n);
+  }
+}
+function fmtDate(d?: string | null) {
+  if (!d) return "—";
+  try {
+    return new Date(d).toLocaleString();
+  } catch {
+    return d;
+  }
+}
+function fmtShort(d?: string | null) {
+  if (!d) return "—";
+  try {
+    return new Date(d).toLocaleDateString();
+  } catch {
+    return d;
+  }
+}
+function secToClock(sec: number) {
+  const s = Math.max(0, Math.floor(sec));
+  const m = Math.floor(s / 60);
+  const r = s % 60;
+  return `${String(m).padStart(2, "0")}:${String(r).padStart(2, "0")}`;
+}
 
 export default function DashboardPage() {
   const router = useRouter();
@@ -63,6 +124,21 @@ export default function DashboardPage() {
     confirmPassword: "",
   });
 
+  // ✅ Purchased items
+  const [purchasedLoading, setPurchasedLoading] = useState(false);
+  const [purchased, setPurchased] = useState<PurchasedItem[]>([]);
+  const [downloadingPid, setDownloadingPid] = useState<string>("");
+
+  // ✅ Processing modal (coming soon)
+  const [processingOpen, setProcessingOpen] = useState(false);
+  const [processing, setProcessing] = useState<{
+    title: string;
+    message: string;
+    availability: string;
+    etaAt?: string;
+    remainingSeconds: number;
+  } | null>(null);
+
   useEffect(() => {
     (async () => {
       try {
@@ -81,6 +157,40 @@ export default function DashboardPage() {
     })();
   }, [router]);
 
+  // ✅ Load latest purchased items
+  useEffect(() => {
+    if (loading) return;
+    (async () => {
+      setPurchasedLoading(true);
+      try {
+        const res = await fetch("/api/orders/mine?limit=10", { credentials: "include" });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          setPurchased([]);
+          return;
+        }
+        const items = Array.isArray(data?.items) ? data.items : [];
+        setPurchased(items);
+      } catch {
+        setPurchased([]);
+      } finally {
+        setPurchasedLoading(false);
+      }
+    })();
+  }, [loading]);
+
+  // ✅ Countdown ticker
+  useEffect(() => {
+    if (!processingOpen || !processing) return;
+    const t = setInterval(() => {
+      setProcessing((p) => {
+        if (!p) return p;
+        return { ...p, remainingSeconds: Math.max(0, (p.remainingSeconds || 0) - 1) };
+      });
+    }, 1000);
+    return () => clearInterval(t);
+  }, [processingOpen, processing?.remainingSeconds]);
+
   async function logout() {
     setBusyLogout(true);
     try {
@@ -95,56 +205,14 @@ export default function DashboardPage() {
   // ✅ Add all categories here (jitni chahe)
   const categories: Category[] = useMemo(
     () => [
-      {
-        title: "Solved Assignments",
-        desc: "Direct access to solved PDFs.",
-        href: "/solved-assignments",
-        icon: FileText,
-      },
-      {
-        title: "Ebooks",
-        desc: "Your ebooks & downloads.",
-        href: "/ebooks",
-        icon: BookOpen,
-      },
-      {
-        title: "Handwritten PDFs",
-        desc: "Notes & handwritten solutions.",
-        href: "/handwritten-pdfs",
-        icon: FolderOpen,
-      },
-      {
-        title: "Question Papers",
-        desc: "Previous year papers.",
-        href: "/question-papers",
-        icon: ShoppingBag,
-      },
-
-      // ✅ Examples: aapki extra categories (rename as per your site)
-      {
-        title: "Guess Papers",
-        desc: "Important guess papers.",
-        href: "/guess-papers",
-        icon: FileText,
-      },
-      {
-        title: "Combo",
-        desc: "Bundle products & packs.",
-        href: "/combo",
-        icon: Grid3X3,
-      },
-      {
-        title: "Handwritten Hardcopy",
-        desc: "Physical handwritten copies.",
-        href: "/handwritten-hardcopy",
-        icon: FolderOpen,
-      },
-      {
-        title: "projects",
-        desc: "projects reports & files.",
-        href: "/projects",
-        icon: FolderOpen,
-      },
+      { title: "Solved Assignments", desc: "Direct access to solved PDFs.", href: "/solved-assignments", icon: FileText },
+      { title: "Ebooks", desc: "Your ebooks & downloads.", href: "/ebooks", icon: BookOpen },
+      { title: "Handwritten PDFs", desc: "Notes & handwritten solutions.", href: "/handwritten-pdfs", icon: FolderOpen },
+      { title: "Question Papers", desc: "Previous year papers.", href: "/question-papers", icon: ShoppingBag },
+      { title: "Guess Papers", desc: "Important guess papers.", href: "/guess-papers", icon: FileText },
+      { title: "Combo", desc: "Bundle products & packs.", href: "/combo", icon: Grid3X3 },
+      { title: "Handwritten Hardcopy", desc: "Physical handwritten copies.", href: "/handwritten-hardcopy", icon: FolderOpen },
+      { title: "projects", desc: "projects reports & files.", href: "/projects", icon: FolderOpen },
     ],
     []
   );
@@ -175,7 +243,6 @@ export default function DashboardPage() {
 
     setPwdLoading(true);
     try {
-      // ✅ API next step me banayenge: /api/auth/change-password
       const res = await fetch("/api/auth/change-password", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -203,13 +270,51 @@ export default function DashboardPage() {
     }
   }
 
-  function CategoryCard({
-    c,
-    small,
-  }: {
-    c: Category;
-    small?: boolean;
-  }) {
+  async function handleDownload(productId: string, title: string) {
+    const pid = safeStr(productId);
+    if (!pid) return;
+
+    setDownloadingPid(pid);
+    try {
+      const res = await fetch(`/api/products/download?productId=${encodeURIComponent(pid)}&download=1`, {
+        credentials: "include",
+        cache: "no-store",
+      });
+
+      const data: DownloadResp = await res.json().catch(() => ({} as any));
+
+      // ✅ ready
+      if (res.ok && (data as any)?.ok && (data as any)?.url) {
+        window.open((data as any).url, "_blank", "noopener,noreferrer");
+        return;
+      }
+
+      // ✅ 202 processing/not_ready (UX)
+      const status = safeStr((data as any)?.status) || "not_ready";
+      const availability = safeStr((data as any)?.availability) || "available";
+      const msg =
+        safeStr((data as any)?.message) ||
+        "Your purchase is confirmed. Please try again shortly.";
+
+      const remainingSeconds = Number((data as any)?.remainingSeconds ?? 0);
+      const etaAt = safeStr((data as any)?.etaAt);
+
+      setProcessing({
+        title: safeStr(title) || "Your Material",
+        message: msg,
+        availability,
+        etaAt: etaAt || undefined,
+        remainingSeconds: Number.isFinite(remainingSeconds) ? remainingSeconds : 0,
+      });
+      setProcessingOpen(true);
+    } catch {
+      alert("Download request failed. Please try again.");
+    } finally {
+      setDownloadingPid("");
+    }
+  }
+
+  function CategoryCard({ c, small }: { c: Category; small?: boolean }) {
     const Icon = c.icon;
     return (
       <Link
@@ -228,6 +333,15 @@ export default function DashboardPage() {
         <div className="text-xs text-slate-600 mt-1">{c.desc}</div>
       </Link>
     );
+  }
+
+  function StatusPill({ status }: { status: string }) {
+    const s = safeStr(status).toLowerCase();
+    const base = "inline-flex items-center gap-2 px-3 py-1.5 rounded-full text-xs font-extrabold border";
+    if (s === "paid") return <span className={`${base} bg-emerald-50 border-emerald-200 text-emerald-800`}><BadgeCheck size={14}/> PAID</span>;
+    if (s === "pending") return <span className={`${base} bg-amber-50 border-amber-200 text-amber-800`}><Clock4 size={14}/> PENDING</span>;
+    if (s === "failed") return <span className={`${base} bg-red-50 border-red-200 text-red-700`}><X size={14}/> FAILED</span>;
+    return <span className={`${base} bg-slate-50 border-slate-200 text-slate-700`}>{s.toUpperCase()}</span>;
   }
 
   return (
@@ -250,12 +364,8 @@ export default function DashboardPage() {
                 <LayoutDashboard className="text-slate-700" />
               </div>
               <div>
-                <div className="text-2xl md:text-3xl font-extrabold tracking-tight">
-                  Dashboard
-                </div>
-                <div className="mt-1 text-slate-600">
-                  Manage your account, orders, and study content.
-                </div>
+                <div className="text-2xl md:text-3xl font-extrabold tracking-tight">Dashboard</div>
+                <div className="mt-1 text-slate-600">Manage your account, orders, and study content.</div>
               </div>
             </div>
 
@@ -288,12 +398,8 @@ export default function DashboardPage() {
                   <UserCircle2 className="text-slate-700" />
                 </div>
                 <div className="min-w-0">
-                  <div className="font-extrabold truncate">
-                    {loading ? "Loading..." : displayName}
-                  </div>
-                  <div className="text-sm text-slate-600 truncate">
-                    {loading ? "—" : user?.email}
-                  </div>
+                  <div className="font-extrabold truncate">{loading ? "Loading..." : displayName}</div>
+                  <div className="text-sm text-slate-600 truncate">{loading ? "—" : user?.email}</div>
                 </div>
               </div>
             </div>
@@ -315,9 +421,7 @@ export default function DashboardPage() {
                 <CalendarDays size={18} className="text-slate-500" />
                 <span className="text-slate-900">{loading ? "Loading..." : joined}</span>
               </div>
-              <div className="mt-2 text-sm text-slate-600">
-                Keep your profile updated for smooth support.
-              </div>
+              <div className="mt-2 text-sm text-slate-600">Keep your profile updated for smooth support.</div>
             </div>
           </div>
         </div>
@@ -325,8 +429,7 @@ export default function DashboardPage() {
 
       {/* MAIN */}
       <div className="max-w-6xl mx-auto px-4 pb-12">
-
-        {/* ✅ Your Orders (same design) + More */}
+        {/* ✅ Your Orders + Purchased Items */}
         <div className="mt-2 rounded-3xl bg-white border border-gray-200 p-6 shadow-sm">
           <div className="flex items-center justify-between gap-4 flex-wrap">
             <div>
@@ -335,12 +438,11 @@ export default function DashboardPage() {
                 Your Orders
               </div>
               <div className="text-sm text-slate-600 mt-1">
-                Click a section to access your purchased PDFs / content quickly.
+                Purchased items appear here. If a PDF is being prepared, you’ll see an automatic countdown.
               </div>
             </div>
 
             <div className="flex items-center gap-2">
-              {/* ✅ More button if extra categories exist */}
               {extraCards.length > 0 ? (
                 <button
                   onClick={() => setMoreOpen(true)}
@@ -361,6 +463,84 @@ export default function DashboardPage() {
             </div>
           </div>
 
+          {/* ✅ Purchased Items list */}
+          <div className="mt-5 rounded-2xl border border-gray-200 bg-gray-50 p-4">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div>
+                <div className="text-sm font-extrabold text-slate-900">Purchased Items</div>
+                <div className="text-xs text-slate-600 font-semibold mt-1">
+                  Download works only for PAID + active access. Coming Soon products show processing status.
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  // quick reload
+                  (async () => {
+                    setPurchasedLoading(true);
+                    try {
+                      const res = await fetch("/api/orders/mine?limit=10", { credentials: "include" });
+                      const data = await res.json().catch(() => ({}));
+                      if (res.ok) setPurchased(Array.isArray(data?.items) ? data.items : []);
+                    } catch {}
+                    setPurchasedLoading(false);
+                  })();
+                }}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-bold shadow-sm"
+              >
+                {purchasedLoading ? <Loader2 className="animate-spin" size={18} /> : <Clock4 size={18} />}
+                Refresh
+              </button>
+            </div>
+
+            {purchasedLoading ? (
+              <div className="mt-4 text-sm font-semibold text-slate-600">Loading purchases...</div>
+            ) : purchased.length === 0 ? (
+              <div className="mt-4 text-sm font-semibold text-slate-600">
+                No purchases found yet. Once you pay, your items will appear here.
+              </div>
+            ) : (
+              <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+                {purchased.slice(0, 8).map((it) => (
+                  <div key={`${it.orderId}-${it.productId}`} className="rounded-2xl bg-white border border-gray-200 p-4 shadow-sm">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="font-extrabold text-slate-900 line-clamp-2">{safeStr(it.title) || "Purchased Item"}</div>
+                        <div className="mt-1 text-xs font-bold text-slate-600">
+                          {safeStr(it.category) || "Product"} • ₹{money(Number(it.price || 0))} • Bought: {fmtShort(it.paidAt)}
+                        </div>
+                        <div className="mt-2 text-xs text-slate-500 font-semibold">
+                          Access till: <b className="text-slate-700">{fmtShort(it.expiresAt)}</b>
+                        </div>
+                      </div>
+                      <StatusPill status={it.status} />
+                    </div>
+
+                    <div className="mt-4 flex items-center gap-2 flex-wrap">
+                      <button
+                        disabled={safeStr(it.status).toLowerCase() !== "paid" || downloadingPid === it.productId}
+                        onClick={() => handleDownload(it.productId, it.title)}
+                        className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-950 text-white transition font-extrabold disabled:opacity-60"
+                      >
+                        {downloadingPid === it.productId ? <Loader2 className="animate-spin" size={18} /> : <Download size={18} />}
+                        Download
+                      </button>
+
+                      <Link
+                        href={`/product/${encodeURIComponent("x")}`.replace("/x", "")}
+                        className="hidden"
+                      />
+
+                      <div className="text-xs text-slate-500 font-semibold">
+                        Order: <span className="font-bold text-slate-700">{it.orderId.slice(-8)}</span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Categories strip (same as before) */}
           <div className="mt-5 grid grid-cols-1 md:grid-cols-4 gap-4">
             {primaryCards.map((c) => (
               <CategoryCard key={c.href} c={c} />
@@ -370,7 +550,7 @@ export default function DashboardPage() {
           <div className="mt-5 rounded-2xl bg-gray-50 border border-gray-200 p-4">
             <div className="text-xs font-bold uppercase text-slate-500">Note</div>
             <div className="mt-1 text-sm text-slate-700">
-              Next step me hum MongoDB se aapke real orders/purchased products nikaal kar yahin show karenge (order-wise).
+              Ab ye dashboard real MongoDB orders se data la raha hai. PDF “Coming Soon” hua to Download pe countdown aayega.
             </div>
           </div>
         </div>
@@ -383,12 +563,9 @@ export default function DashboardPage() {
               <div className="flex items-center justify-between gap-4 flex-wrap">
                 <div>
                   <div className="text-lg md:text-xl font-extrabold">Profile Details</div>
-                  <div className="text-sm text-slate-600 mt-1">
-                    Update your profile settings.
-                  </div>
+                  <div className="text-sm text-slate-600 mt-1">Update your profile settings.</div>
                 </div>
 
-                {/* ✅ Change password button */}
                 <button
                   onClick={() => setPwdOpen(true)}
                   className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-bold shadow-sm"
@@ -404,9 +581,7 @@ export default function DashboardPage() {
                     <Mail size={16} />
                     Email
                   </div>
-                  <div className="mt-2 font-semibold break-all">
-                    {loading ? "Loading..." : user?.email || "-"}
-                  </div>
+                  <div className="mt-2 font-semibold break-all">{loading ? "Loading..." : user?.email || "-"}</div>
                 </div>
 
                 <div className="rounded-2xl bg-gray-50 border border-gray-200 p-5">
@@ -414,9 +589,7 @@ export default function DashboardPage() {
                     <IdCard size={16} />
                     User ID
                   </div>
-                  <div className="mt-2 font-semibold break-all">
-                    {loading ? "Loading..." : displayId}
-                  </div>
+                  <div className="mt-2 font-semibold break-all">{loading ? "Loading..." : displayId}</div>
                 </div>
 
                 <div className="rounded-2xl bg-gray-50 border border-gray-200 p-5 md:col-span-2">
@@ -424,9 +597,7 @@ export default function DashboardPage() {
                     <UserCircle2 size={16} />
                     Name
                   </div>
-                  <div className="mt-2 font-semibold">
-                    {loading ? "Loading..." : displayName}
-                  </div>
+                  <div className="mt-2 font-semibold">{loading ? "Loading..." : displayName}</div>
                 </div>
               </div>
             </div>
@@ -476,13 +647,80 @@ export default function DashboardPage() {
         </div>
       </div>
 
-      {/* ✅ More Categories Modal */}
-      {moreOpen ? (
+      {/* ✅ Processing Modal (Coming Soon / Not Ready) */}
+      {processingOpen && processing ? (
         <div className="fixed inset-0 z-[999] flex items-center justify-center px-4">
           <div
             className="absolute inset-0 bg-black/40"
-            onClick={() => setMoreOpen(false)}
+            onClick={() => setProcessingOpen(false)}
           />
+          <div className="relative w-full max-w-xl rounded-3xl bg-white border border-gray-200 shadow-2xl overflow-hidden">
+            <div className="p-5 border-b border-gray-200 flex items-center justify-between">
+              <div>
+                <div className="text-lg font-extrabold">Preparing Your PDF</div>
+                <div className="text-sm text-slate-600">
+                  {processing.title}
+                </div>
+              </div>
+              <button
+                onClick={() => setProcessingOpen(false)}
+                className="h-10 w-10 rounded-xl border border-gray-200 bg-gray-50 hover:bg-white flex items-center justify-center"
+              >
+                <X />
+              </button>
+            </div>
+
+            <div className="p-5">
+              <div className="rounded-2xl border border-emerald-100 bg-gradient-to-r from-emerald-50 to-white p-4 shadow-sm">
+                <div className="flex items-start gap-3">
+                  <div className="rounded-xl bg-emerald-100 text-emerald-700 p-2">
+                    <Clock4 size={18} />
+                  </div>
+                  <div className="flex-1">
+                    <div className="text-sm font-extrabold text-slate-900">
+                      {safeStr(processing.availability) === "coming_soon"
+                        ? "Your material is being uploaded"
+                        : "Your PDF is not ready yet"}
+                    </div>
+                    <div className="mt-1 text-xs text-slate-700 font-semibold leading-relaxed">
+                      {processing.message}
+                    </div>
+
+                    {safeStr(processing.availability) === "coming_soon" ? (
+                      <div className="mt-4 flex flex-wrap items-center gap-3">
+                        <div className="inline-flex items-center gap-2 rounded-2xl bg-white border border-emerald-100 px-4 py-3 text-sm font-extrabold text-emerald-800">
+                          ETA Countdown: {secToClock(processing.remainingSeconds || 0)}
+                        </div>
+                        <div className="text-xs text-slate-600 font-semibold">
+                          ETA: <b className="text-slate-800">{processing.etaAt ? fmtDate(processing.etaAt) : "—"}</b>
+                        </div>
+                      </div>
+                    ) : null}
+
+                    <div className="mt-4 text-xs text-slate-500 font-semibold">
+                      Tip: Close this popup and try Download again after some time. It will open automatically once ready.
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-4 flex items-center justify-end gap-2">
+                <button
+                  onClick={() => setProcessingOpen(false)}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-bold"
+                >
+                  OK
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* ✅ More Categories Modal */}
+      {moreOpen ? (
+        <div className="fixed inset-0 z-[999] flex items-center justify-center px-4">
+          <div className="absolute inset-0 bg-black/40" onClick={() => setMoreOpen(false)} />
           <div className="relative w-full max-w-4xl rounded-3xl bg-white border border-gray-200 shadow-2xl overflow-hidden">
             <div className="p-5 border-b border-gray-200 flex items-center justify-between">
               <div>
@@ -511,17 +749,12 @@ export default function DashboardPage() {
       {/* ✅ Change Password Modal (UI ready) */}
       {pwdOpen ? (
         <div className="fixed inset-0 z-[999] flex items-center justify-center px-4">
-          <div
-            className="absolute inset-0 bg-black/40"
-            onClick={() => !pwdLoading && setPwdOpen(false)}
-          />
+          <div className="absolute inset-0 bg-black/40" onClick={() => !pwdLoading && setPwdOpen(false)} />
           <div className="relative w-full max-w-lg rounded-3xl bg-white border border-gray-200 shadow-2xl overflow-hidden">
             <div className="p-5 border-b border-gray-200 flex items-center justify-between">
               <div>
                 <div className="text-lg font-extrabold">Change Password</div>
-                <div className="text-sm text-slate-600">
-                  Use a strong password (min 6 characters).
-                </div>
+                <div className="text-sm text-slate-600">Use a strong password (min 6 characters).</div>
               </div>
               <button
                 onClick={() => !pwdLoading && setPwdOpen(false)}
@@ -533,44 +766,32 @@ export default function DashboardPage() {
 
             <form onSubmit={handleChangePassword} className="p-5 space-y-4">
               <div className="space-y-1">
-                <label className="text-xs font-bold text-slate-500 uppercase ml-1">
-                  Current Password
-                </label>
+                <label className="text-xs font-bold text-slate-500 uppercase ml-1">Current Password</label>
                 <input
                   type={showPwd ? "text" : "password"}
                   className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 outline-none focus:border-blue-500 transition font-medium"
                   value={pwdForm.currentPassword}
-                  onChange={(e) =>
-                    setPwdForm((p) => ({ ...p, currentPassword: e.target.value }))
-                  }
+                  onChange={(e) => setPwdForm((p) => ({ ...p, currentPassword: e.target.value }))}
                 />
               </div>
 
               <div className="space-y-1">
-                <label className="text-xs font-bold text-slate-500 uppercase ml-1">
-                  New Password
-                </label>
+                <label className="text-xs font-bold text-slate-500 uppercase ml-1">New Password</label>
                 <input
                   type={showPwd ? "text" : "password"}
                   className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 outline-none focus:border-blue-500 transition font-medium"
                   value={pwdForm.newPassword}
-                  onChange={(e) =>
-                    setPwdForm((p) => ({ ...p, newPassword: e.target.value }))
-                  }
+                  onChange={(e) => setPwdForm((p) => ({ ...p, newPassword: e.target.value }))}
                 />
               </div>
 
               <div className="space-y-1">
-                <label className="text-xs font-bold text-slate-500 uppercase ml-1">
-                  Confirm New Password
-                </label>
+                <label className="text-xs font-bold text-slate-500 uppercase ml-1">Confirm New Password</label>
                 <input
                   type={showPwd ? "text" : "password"}
                   className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 outline-none focus:border-blue-500 transition font-medium"
                   value={pwdForm.confirmPassword}
-                  onChange={(e) =>
-                    setPwdForm((p) => ({ ...p, confirmPassword: e.target.value }))
-                  }
+                  onChange={(e) => setPwdForm((p) => ({ ...p, confirmPassword: e.target.value }))}
                 />
               </div>
 
@@ -594,8 +815,7 @@ export default function DashboardPage() {
               </div>
 
               <div className="text-xs text-slate-500">
-                Note: Abhi yeh UI ready hai. Next step me hum backend route{" "}
-                <b>/api/auth/change-password</b> bana kar password update karwa denge.
+                Note: Abhi yeh UI ready hai. Next step me hum backend route <b>/api/auth/change-password</b> bana kar password update karwa denge.
               </div>
             </form>
           </div>

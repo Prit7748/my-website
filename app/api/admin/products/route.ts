@@ -1,4 +1,5 @@
-import { NextResponse } from "next/server";
+// app/api/admin/products/route.ts  (COMPLETE REPLACE) - trash filter added
+import { NextRequest, NextResponse } from "next/server";
 import dbConnect from "@/lib/db";
 import Product from "@/models/Product";
 import { getAuthUser, hasPermission } from "@/lib/auth";
@@ -27,8 +28,7 @@ function asStringArray(x: any) {
   return [];
 }
 
-// GET: list products (admin)
-export async function GET() {
+export async function GET(req: NextRequest) {
   const user = await getAuthUser();
   if (!user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
 
@@ -37,11 +37,16 @@ export async function GET() {
   }
 
   await dbConnect();
-  const products = await Product.find().sort({ createdAt: -1 }).limit(200);
+
+  const url = new URL(req.url);
+  const trash = url.searchParams.get("trash") === "1";
+
+  const query: any = trash ? { deletedAt: { $ne: null } } : { deletedAt: null };
+
+  const products = await Product.find(query).sort({ createdAt: -1 }).limit(300);
   return NextResponse.json({ products }, { status: 200 });
 }
 
-// POST: create product (admin)
 export async function POST(req: Request) {
   const user = await getAuthUser();
   if (!user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
@@ -64,7 +69,6 @@ export async function POST(req: Request) {
 
   await dbConnect();
 
-  // uniqueness checks
   const existsSlug = await Product.findOne({ slug });
   if (existsSlug) return NextResponse.json({ error: "Slug already exists" }, { status: 409 });
 
@@ -73,64 +77,56 @@ export async function POST(req: Request) {
     if (existsSku) return NextResponse.json({ error: "SKU already exists" }, { status: 409 });
   }
 
-  // images normalize + auto thumbnail/quick
   const images = asStringArray(body?.images);
   const thumbnailUrl = asString(body?.thumbnailUrl) || images[0] || "";
   const quickUrl = asString(body?.quickUrl) || images[1] || images[0] || "";
 
   const doc = await Product.create({
-    // Identity
     title,
     slug,
     sku: sku || "",
-
-    // Category
     category,
 
-    // Subject fields (if your schema has them)
     subjectCode: asString(body?.subjectCode),
     subjectTitleHi: asString(body?.subjectTitleHi),
     subjectTitleEn: asString(body?.subjectTitleEn),
 
-    // Course mapping (arrays)
     courseCodes: asStringArray(body?.courseCodes),
     courseTitles: asStringArray(body?.courseTitles),
 
-    // Session + Language
     session: asString(body?.session),
     session6: asString(body?.session6),
     language: asString(body?.language),
     lang3: asString(body?.lang3),
 
-    // Pricing
     price,
     oldPrice: asNumber(body?.oldPrice, 0),
 
-    // Extra fields
     pages: asNumber(body?.pages, 0),
     availability: asString(body?.availability) || "available",
     importantNote: asString(body?.importantNote),
 
-    // Descriptions
     shortDesc: asString(body?.shortDesc),
     descriptionHtml: asString(body?.descriptionHtml),
 
-    // Digital
     isDigital: Boolean(body?.isDigital ?? true),
+
+    pdfKey: asString(body?.pdfKey),
     pdfUrl: asString(body?.pdfUrl),
 
-    // Images system
     images,
     thumbnailUrl,
     quickUrl,
 
-    // SEO
     metaTitle: asString(body?.metaTitle),
     metaDescription: asString(body?.metaDescription),
 
-    // Publish
     isActive: Boolean(body?.isActive ?? false),
     lastModifiedAt: new Date(),
+
+    // ✅ new fields
+    deletedAt: null,
+    deletedBy: "",
   });
 
   return NextResponse.json({ message: "Product created", product: doc }, { status: 201 });

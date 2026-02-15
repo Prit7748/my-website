@@ -1,4 +1,4 @@
-// models/Blog.ts
+// ✅ REPLACE FILE: models/Blog.ts
 import mongoose, { Schema, models, model } from "mongoose";
 
 const BlogSchema = new Schema(
@@ -6,14 +6,16 @@ const BlogSchema = new Schema(
     title: { type: String, required: true, trim: true },
     slug: { type: String, required: true, unique: true, trim: true, index: true },
 
-    excerpt: { type: String, default: "", trim: true }, // short summary for SEO/cards
-    contentHtml: { type: String, default: "" }, // main blog content (HTML)
+    excerpt: { type: String, default: "", trim: true },
+    contentHtml: { type: String, default: "" },
 
-    coverUrl: { type: String, default: "", trim: true }, // OG image + hero image
+    coverUrl: { type: String, default: "", trim: true },
 
-    // Optional rich features
-    youtubeUrl: { type: String, default: "", trim: true }, // auto embedded on page
-    tags: { type: [String], default: [], index: true }, // for related blogs
+    youtubeUrl: { type: String, default: "", trim: true },
+    tags: { type: [String], default: [], index: true },
+
+    // ✅ NEW: Category reference (optional)
+    categoryId: { type: Schema.Types.ObjectId, ref: "BlogCategory", default: null, index: true },
 
     authorName: { type: String, default: "IGNOU Students Portal", trim: true },
 
@@ -25,6 +27,7 @@ const BlogSchema = new Schema(
 
 BlogSchema.index({ slug: 1, isPublished: 1 });
 BlogSchema.index({ tags: 1, isPublished: 1 });
+BlogSchema.index({ categoryId: 1, isPublished: 1 });
 
 export type BlogDoc = {
   _id: string;
@@ -35,6 +38,7 @@ export type BlogDoc = {
   coverUrl?: string;
   youtubeUrl?: string;
   tags?: string[];
+  categoryId?: any;
   authorName?: string;
   isPublished?: boolean;
   publishedAt?: Date | null;

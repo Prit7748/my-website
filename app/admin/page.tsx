@@ -3,7 +3,15 @@
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { ShieldCheck, Users, Package, ClipboardList, ArrowRight } from "lucide-react";
+import {
+  ShieldCheck,
+  Users,
+  Package,
+  ClipboardList,
+  ArrowRight,
+  FileText,
+  Settings,
+} from "lucide-react";
 
 export default function AdminPage() {
   const router = useRouter();
@@ -39,7 +47,11 @@ export default function AdminPage() {
                 Admin Panel
               </div>
               <div className="text-sm text-slate-600 mt-1">
-                {loading ? "Loading..." : isMaster ? "Master Admin Access" : "Co-Admin Access"}
+                {loading
+                  ? "Loading..."
+                  : isMaster
+                  ? "Master Admin Access"
+                  : "Co-Admin Access"}
               </div>
             </div>
 
@@ -51,7 +63,9 @@ export default function AdminPage() {
             </Link>
           </div>
 
-          <div className="mt-6 grid grid-cols-1 md:grid-cols-3 gap-4">
+          {/* ✅ 4-4 GRID LAYOUT (Row-1 + Row-2) */}
+          <div className="mt-6 grid grid-cols-1 md:grid-cols-4 gap-4">
+            {/* Products */}
             <Link
               href="/admin/products"
               className="rounded-2xl border border-gray-200 bg-gray-50 hover:bg-white transition p-5 shadow-sm"
@@ -60,11 +74,14 @@ export default function AdminPage() {
                 <Package className="text-slate-700" />
                 <div>
                   <div className="font-extrabold">Products</div>
-                  <div className="text-xs text-slate-600 mt-1">Add / edit products</div>
+                  <div className="text-xs text-slate-600 mt-1">
+                    Add / edit products
+                  </div>
                 </div>
               </div>
             </Link>
 
+            {/* Orders */}
             <Link
               href="/admin/orders"
               className="rounded-2xl border border-gray-200 bg-gray-50 hover:bg-white transition p-5 shadow-sm"
@@ -73,11 +90,30 @@ export default function AdminPage() {
                 <ClipboardList className="text-slate-700" />
                 <div>
                   <div className="font-extrabold">Orders</div>
-                  <div className="text-xs text-slate-600 mt-1">View payments & delivery</div>
+                  <div className="text-xs text-slate-600 mt-1">
+                    View payments & delivery
+                  </div>
                 </div>
               </div>
             </Link>
 
+            {/* Blogs */}
+            <Link
+              href="/admin/blogs"
+              className="rounded-2xl border border-gray-200 bg-gray-50 hover:bg-white transition p-5 shadow-sm"
+            >
+              <div className="flex items-center gap-3">
+                <FileText className="text-slate-700" />
+                <div>
+                  <div className="font-extrabold">Blogs</div>
+                  <div className="text-xs text-slate-600 mt-1">
+                    Manage blog categories & posts
+                  </div>
+                </div>
+              </div>
+            </Link>
+
+            {/* Admin Management */}
             <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 shadow-sm">
               <div className="flex items-center gap-3">
                 <Users className="text-slate-700" />
@@ -109,10 +145,46 @@ export default function AdminPage() {
                 )}
               </div>
             </div>
+
+            {/* ✅ Row 2 - Tile 1: Site Settings */}
+            <Link
+              href="/admin/site-settings"
+              className="rounded-2xl border border-gray-200 bg-gray-50 hover:bg-white transition p-5 shadow-sm"
+            >
+              <div className="flex items-center gap-3">
+                <Settings className="text-slate-700" />
+                <div>
+                  <div className="font-extrabold">Site Settings</div>
+                  <div className="text-xs text-slate-600 mt-1">
+                    Hero, FAQ, Social links, Testimonials
+                  </div>
+                </div>
+              </div>
+            </Link>
+
+            {/* ✅ Row 2 placeholders (future tiles) */}
+            <div className="rounded-2xl border border-dashed border-gray-200 bg-white p-5">
+              <div className="text-sm font-bold text-slate-500">Coming soon</div>
+              <div className="text-xs text-slate-400 mt-1">
+                Next modules will appear here
+              </div>
+            </div>
+            <div className="rounded-2xl border border-dashed border-gray-200 bg-white p-5">
+              <div className="text-sm font-bold text-slate-500">Coming soon</div>
+              <div className="text-xs text-slate-400 mt-1">
+                Next modules will appear here
+              </div>
+            </div>
+            <div className="rounded-2xl border border-dashed border-gray-200 bg-white p-5">
+              <div className="text-sm font-bold text-slate-500">Coming soon</div>
+              <div className="text-xs text-slate-400 mt-1">
+                Next modules will appear here
+              </div>
+            </div>
           </div>
 
           <div className="mt-6 text-xs text-slate-500">
-            Next step: hum admin products page banayenge jahan se products add/edit + images/pdf upload manage hoga.
+            Next step: Site Settings ke andar Hero Slider / FAQ / Social Links ka backend banayenge.
           </div>
         </div>
       </div>

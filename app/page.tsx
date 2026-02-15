@@ -1,4 +1,4 @@
-"use client";
+// ✅ COMPLETE REPLACE: app/page.tsx  (SERVER COMPONENT + cached notices + DB-driven WhatsApp + DB Testimonials)
 
 import TopBar from "@/components/TopBar";
 import Navbar from "@/components/Navbar";
@@ -7,11 +7,10 @@ import Footer from "@/components/Footer";
 import FloatingButtons from "@/components/FloatingButtons";
 import HomeTestimonials from "@/components/HomeTestimonials";
 
+import HomeHeroGridClient from "@/components/HomeHeroGridClient";
+
 import Link from "next/link";
-import Image from "next/image";
 import {
-  Download,
-  Star,
   ShieldCheck,
   Truck,
   Search,
@@ -27,7 +26,6 @@ import {
   Layers,
   ChevronRight,
   ArrowRight,
-  PenTool,
   FileSignature,
   History,
   Zap,
@@ -36,21 +34,106 @@ import {
   CheckCircle2,
 } from "lucide-react";
 
-// ✅ Updated Type for Icon based Categories
+import dbConnect from "@/lib/db";
+import Notice from "@/models/Notice";
+import SocialLink from "@/models/SocialLink";
+import Testimonial from "@/models/Testimonial";
+import type { NoticeItem } from "@/components/NotificationTicker";
+
+// ✅ Server cache (ISR)
+export const revalidate = 300; // 5 minutes
+
 type HomeCategory = {
   title: string;
   subtitle: string;
   href: string;
-  icon: any; // Lucide Icon Component
-  colorClass: string; // Text color
-  iconBgClass: string; // Icon wrapper background color
-  cardBg: string; // ✅ New: Permanent Card Background
-  borderColor: string; // Border color matching the theme
+  icon: any; // lucide icon component
+  colorClass: string;
+  iconBgClass: string;
+  cardBg: string;
+  borderColor: string;
   badge?: string;
 };
 
-export default function Home() {
-  // ✅ Categories (Permanent Soft Colors)
+function safeStr(x: any) {
+  return String(x ?? "").trim();
+}
+
+function safeNum(x: any, fallback: number) {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : fallback;
+}
+
+async function getNotices(): Promise<NoticeItem[]> {
+  await dbConnect();
+
+  const now = new Date();
+  const rows = await Notice.find({
+    isActive: true,
+    $or: [{ expiresAt: null }, { expiresAt: { $gt: now } }],
+  })
+    .sort({ order: 1, createdAt: -1, _id: 1 })
+    .limit(20)
+    .lean();
+
+  return (rows || [])
+    .map((n: any) => ({
+      id: String(n._id),
+      title: String(n.title || ""),
+      href: String(n.href || ""),
+      badge: n.badge ? String(n.badge) : undefined,
+    }))
+    .filter((x: NoticeItem) => x.id && x.title && x.href);
+}
+
+async function getWhatsAppUrl(): Promise<string> {
+  // ✅ DB-driven WhatsApp from Social Links (active)
+  await dbConnect();
+
+  const rows = await SocialLink.find({ isActive: true })
+    .sort({ sortOrder: 1, createdAt: -1, _id: 1 })
+    .limit(50)
+    .lean();
+
+  const list = Array.isArray(rows) ? rows : [];
+  const wa = list.find((it: any) => {
+    const name = safeStr(it?.name).toLowerCase();
+    const icon = safeStr(it?.icon).toLowerCase();
+    const url = safeStr(it?.url).toLowerCase();
+    return name.includes("whatsapp") || icon.includes("whatsapp") || url.includes("wa.me");
+  });
+
+  // ✅ fallback (safe)
+  return safeStr(wa?.url) || "https://wa.me/917496865680?text=Hello%20IGNOU%20Students%20Portal";
+}
+
+async function getTestimonials() {
+  await dbConnect();
+
+  const rows = await Testimonial.find({ isActive: true })
+    .sort({ sortOrder: 1, createdAt: -1, _id: 1 })
+    .limit(30)
+    .lean();
+
+  return (rows || [])
+    .map((r: any) => ({
+      _id: String(r._id),
+      name: String(r.name || ""),
+      course: String(r.course || ""),
+      text: String(r.text || ""),
+      rating: Math.min(5, Math.max(1, safeNum(r.rating, 5))),
+      avatarUrl: safeStr(r.avatarUrl),
+    }))
+    .filter((x: any) => x.name && x.course && x.text);
+}
+
+export default async function Home() {
+  const [notices, whatsappUrl, dbTestimonials] = await Promise.all([
+    getNotices(),
+    getWhatsAppUrl(),
+    getTestimonials(),
+  ]);
+
   const categories: HomeCategory[] = [
     {
       title: "Solved Assignments",
@@ -58,8 +141,8 @@ export default function Home() {
       href: "/solved-assignments",
       icon: CheckCircle2,
       colorClass: "text-blue-700",
-      iconBgClass: "bg-white", // Icon sits on white to pop against the colored card
-      cardBg: "bg-blue-50", // Permanent Soft Blue
+      iconBgClass: "bg-white",
+      cardBg: "bg-blue-50",
       borderColor: "border-blue-100",
       badge: "Most Popular",
     },
@@ -70,7 +153,7 @@ export default function Home() {
       icon: Truck,
       colorClass: "text-emerald-700",
       iconBgClass: "bg-white",
-      cardBg: "bg-emerald-50", // Permanent Soft Emerald
+      cardBg: "bg-emerald-50",
       borderColor: "border-emerald-100",
       badge: "Delivery",
     },
@@ -81,7 +164,7 @@ export default function Home() {
       icon: FileSignature,
       colorClass: "text-violet-700",
       iconBgClass: "bg-white",
-      cardBg: "bg-violet-50", // Permanent Soft Violet
+      cardBg: "bg-violet-50",
       borderColor: "border-violet-100",
       badge: "New",
     },
@@ -92,11 +175,10 @@ export default function Home() {
       icon: History,
       colorClass: "text-amber-700",
       iconBgClass: "bg-white",
-      cardBg: "bg-amber-50", // Permanent Soft Amber
+      cardBg: "bg-amber-50",
       borderColor: "border-amber-100",
       badge: "Exam Focus",
     },
-    // These last 3 will automatically center due to flex-wrap justify-center
     {
       title: "Guess Papers",
       subtitle: "Most expected questions",
@@ -104,7 +186,7 @@ export default function Home() {
       icon: Zap,
       colorClass: "text-indigo-700",
       iconBgClass: "bg-white",
-      cardBg: "bg-indigo-50", // Permanent Soft Indigo
+      cardBg: "bg-indigo-50",
       borderColor: "border-indigo-100",
       badge: "High Score",
     },
@@ -115,7 +197,7 @@ export default function Home() {
       icon: BookOpenText,
       colorClass: "text-sky-700",
       iconBgClass: "bg-white",
-      cardBg: "bg-sky-50", // Permanent Soft Sky
+      cardBg: "bg-sky-50",
       borderColor: "border-sky-100",
       badge: "Notes",
     },
@@ -126,7 +208,7 @@ export default function Home() {
       icon: Briefcase,
       colorClass: "text-rose-700",
       iconBgClass: "bg-white",
-      cardBg: "bg-rose-50", // Permanent Soft Rose
+      cardBg: "bg-rose-50",
       borderColor: "border-rose-100",
       badge: "Guaranteed",
     },
@@ -140,7 +222,6 @@ export default function Home() {
     { title: "Great Organization", desc: "Crisp & Clear Printing.", icon: Printer, bgColor: "bg-[#EA580C]" },
   ];
 
-  // ✅ Courses: click -> all products filtered by course (default)
   const courses = [
     { code: "ACE", name: "Appreciation Course On Environment" },
     { code: "ACISE", name: "Advance Certificate in Information Security" },
@@ -156,11 +237,12 @@ export default function Home() {
     { code: "BAFEDU", name: "Bachelor of Arts (Education)" },
   ];
 
+  // ✅ fallback (so home never looks empty)
   const reviews = [
-    { id: 1, name: "Rahul Kumar", course: "M.Com", text: "Great experience! The assignments were accurate and helped me score really well." },
-    { id: 2, name: "Priya Singh", course: "B.A. English", text: "Delivery was super fast. I received my handwritten notes within 2 days in Delhi." },
-    { id: 3, name: "Amit Sharma", course: "MBA", text: "projects synopsis got approved in the first go. Highly recommended service." },
-    { id: 4, name: "Sneha Gupta", course: "B.Ed", text: "Very polite customer support and genuine material. Will buy again." },
+    { id: 1, name: "Rahul Kumar", course: "M.Com", text: "Great experience! The assignments were accurate and helped me score really well.", rating: 5 },
+    { id: 2, name: "Priya Singh", course: "B.A. English", text: "Delivery was super fast. I received my handwritten notes within 2 days in Delhi.", rating: 5 },
+    { id: 3, name: "Amit Sharma", course: "MBA", text: "projects synopsis got approved in the first go. Highly recommended service.", rating: 5 },
+    { id: 4, name: "Sneha Gupta", course: "B.Ed", text: "Very polite customer support and genuine material. Will buy again.", rating: 5 },
   ];
 
   const blogs = [
@@ -184,9 +266,12 @@ export default function Home() {
     },
   ];
 
+  const testimonialList = dbTestimonials.length ? dbTestimonials : reviews;
+
   return (
     <main className="min-h-screen bg-white">
-      <style jsx global>{`
+      {/* ✅ Missing global styles added back (isp-grid / isp-floaty / isp-shimmer) */}
+      <style>{`
         @keyframes floaty {
           0% { transform: translate3d(0, 0, 0); }
           50% { transform: translate3d(0, -10px, 0); }
@@ -210,7 +295,7 @@ export default function Home() {
 
       <h1 className="sr-only">IGNOU Students Portal - Best Place for Solved Assignments and Study Material</h1>
 
-      <HeroSlider />
+      <HomeHeroGridClient offersHref="/offers" notices={notices} left={<HeroSlider />} />
 
       {/* ✅ COMBO SELL BANNER */}
       <section className="bg-white border-b border-gray-100">
@@ -335,9 +420,8 @@ export default function Home() {
         </div>
       </section>
 
-      {/* ✅ INDUSTRIAL CATEGORY SECTION (PREMIUM & OFFICIAL LOOK) */}
+      {/* ✅ INDUSTRIAL CATEGORY SECTION */}
       <section className="relative py-16 bg-[#F8FAFC] overflow-hidden">
-        {/* Subtle Background Elements */}
         <div className="absolute inset-0 isp-grid opacity-30" />
 
         <div className="relative max-w-[1600px] mx-auto px-4">
@@ -364,37 +448,27 @@ export default function Home() {
             </div>
           </div>
 
-          {/* ✅ Scalable Flex Layout for Center Alignment of Last Row */}
           <div className="flex flex-wrap justify-center gap-5">
             {categories.map((cat) => (
               <Link
                 key={cat.title}
                 href={cat.href}
                 aria-label={cat.title}
-                // ✅ Changed: cardBg is now PERMANENT (not hover). Added slightly brighter/visible BG colors.
                 className={`group relative w-full sm:w-[calc(50%-10px)] lg:w-[calc(25%-15px)] ${cat.cardBg} ${cat.borderColor} border rounded-2xl px-5 py-6 min-h-[160px] shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-300 flex items-start gap-4 overflow-hidden`}
               >
-                {/* Badge if exists */}
-                {cat.badge && (
+                {cat.badge ? (
                   <div className="absolute top-0 right-0 bg-gray-900 text-white text-[9px] font-bold px-2 py-1 rounded-bl-xl z-10 shadow-sm">
                     {cat.badge}
                   </div>
-                )}
+                ) : null}
 
-                {/* Official Icon Container (White bg to pop against color card) */}
                 <div className={`h-14 w-14 rounded-2xl flex items-center justify-center shrink-0 shadow-sm transition-transform duration-500 group-hover:scale-110 ${cat.iconBgClass}`}>
                   <cat.icon size={26} className={cat.colorClass} />
                 </div>
 
                 <div className="min-w-0 pt-1">
-                  <h3 className="text-base font-bold text-slate-900 leading-tight">
-                    {cat.title}
-                  </h3>
-                  <p className="mt-1 text-xs font-medium text-slate-600 line-clamp-2">
-                    {cat.subtitle}
-                  </p>
-
-                  {/* Link text */}
+                  <h3 className="text-base font-bold text-slate-900 leading-tight">{cat.title}</h3>
+                  <p className="mt-1 text-xs font-medium text-slate-600 line-clamp-2">{cat.subtitle}</p>
                   <div className={`mt-4 inline-flex items-center text-[11px] font-bold ${cat.colorClass} opacity-80 group-hover:opacity-100 transition-opacity`}>
                     Explore <ChevronRight size={14} className="ml-0.5" />
                   </div>
@@ -403,14 +477,13 @@ export default function Home() {
             ))}
           </div>
 
-          {/* ✅ small SEO support line */}
           <div className="mt-10 text-center text-[12px] md:text-sm text-slate-400 font-medium">
             Tip: Select a category above → then use filters to find your exact course code.
           </div>
         </div>
       </section>
 
-      {/* 3. Courses (course click -> /products?course=CODE) */}
+      {/* 3. Courses */}
       <section className="py-12 md:py-16 bg-white">
         <div className="max-w-[1600px] mx-auto px-4">
           <div className="text-center mb-10">
@@ -477,7 +550,7 @@ export default function Home() {
         </div>
       </section>
 
-      {/* 5. Latest Assignments */}
+      {/* 5. Latest Assignments (UI placeholder) */}
       <section className="py-16 bg-white">
         <div className="max-w-[1600px] mx-auto px-4">
           <div className="text-center mb-10">
@@ -527,8 +600,8 @@ export default function Home() {
         </div>
       </section>
 
-      {/* 6. Testimonials */}
-      <HomeTestimonials reviews={reviews} />
+      {/* ✅ Testimonials: DB first, fallback second */}
+      <HomeTestimonials reviews={testimonialList as any} />
 
       {/* 7. Blog */}
       <section className="py-16 bg-white">
@@ -557,7 +630,7 @@ export default function Home() {
         </div>
       </section>
 
-      {/* 8. CTA Banner (unchanged) */}
+      {/* 8. CTA Banner (✅ WhatsApp is DB-driven now) */}
       <section className="py-20 bg-[#F8FAFC]">
         <div className="max-w-[1200px] mx-auto px-4">
           <div className="bg-white rounded-3xl shadow-2xl p-8 md:p-16 text-center relative border border-gray-100 mt-8">
@@ -576,18 +649,26 @@ export default function Home() {
               </p>
 
               <div className="flex flex-col sm:flex-row justify-center gap-4 mb-10">
-                <button className="flex items-center justify-center gap-2 bg-[#25D366] text-white px-8 py-4 rounded-lg font-bold text-lg hover:bg-[#20bd5a] hover:scale-105 hover:shadow-lg hover:shadow-green-200 transition-all duration-300">
+                <a
+                  href={whatsappUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center justify-center gap-2 bg-[#25D366] text-white px-8 py-4 rounded-lg font-bold text-lg hover:bg-[#20bd5a] hover:scale-105 hover:shadow-lg hover:shadow-green-200 transition-all duration-300"
+                >
                   <svg viewBox="0 0 24 24" fill="currentColor" className="w-6 h-6">
                     <path d="M12.031 6.172c-3.181 0-5.767 2.586-5.768 5.766-.001 1.298.38 2.27 1.019 3.287l-.711 2.592 2.654-.696c1.001.574 2.146.877 3.303.877 3.18 0 5.767-2.587 5.768-5.766.001-3.181-2.584-5.761-5.765-5.761zm6.927 5.766c-.001 3.82-3.107 6.925-6.927 6.925-1.129 0-2.235-.291-3.21-.842l-3.593.942.958-3.504c-.628-1.04-1.002-2.213-1.002-3.521-.001-3.819 3.106-6.925 6.927-6.925 3.82 0 6.926 3.106 6.927 6.925z" />
                     <path d="M15.42 13.064c-.177-.089-1.047-.516-1.209-.576-.161-.059-.279-.089-.396.089-.118.178-.456.576-.559.694-.102.119-.205.133-.382.045-.178-.089-.751-.277-1.429-.882-.53-.473-.888-1.057-.992-1.235-.104-.177-.011-.273.078-.362.08-.08.178-.207.266-.31.089-.104.119-.178.178-.297.059-.118.029-.222-.015-.31-.044-.089-.396-.955-.542-1.309-.143-.343-.288-.296-.396-.301-.102-.005-.219-.005-.337-.005-.118 0-.31.044-.472.222-.162.178-.62.606-.62 1.478 0 .872.635 1.714.723 1.833.089.119 1.251 1.91 3.03 2.678 1.054.455 1.47.532 1.996.448.586-.093 1.047-.428 1.195-.841.148-.414.148-.769.104-.841-.044-.074-.162-.119-.339-.207z" />
                   </svg>
                   START WHATSAPP CHAT
-                </button>
+                </a>
 
-                <button className="flex items-center justify-center gap-2 bg-[#1E40AF] text-white px-8 py-4 rounded-lg font-bold text-lg hover:bg-[#1e3a8a] hover:scale-105 hover:shadow-lg hover:shadow-blue-200 transition-all duration-300">
+                <a
+                  href="tel:7496865680"
+                  className="flex items-center justify-center gap-2 bg-[#1E40AF] text-white px-8 py-4 rounded-lg font-bold text-lg hover:bg-[#1e3a8a] hover:scale-105 hover:shadow-lg hover:shadow-blue-200 transition-all duration-300"
+                >
                   <Phone size={24} />
                   CALL US NOW
-                </button>
+                </a>
               </div>
 
               <div className="flex flex-wrap justify-center gap-6 md:gap-12 text-slate-500 font-medium text-sm md:text-base">

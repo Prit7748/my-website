@@ -24,7 +24,6 @@ import {
   SlidersHorizontal,
   Check,
   ChevronDown,
-  ShoppingCart,
 } from "lucide-react";
 
 // --- TYPES ---
@@ -398,57 +397,7 @@ function SelectedChip({
   );
 }
 
-/** ✅ Safe Add-to-Cart handler (works with many setups; no breaking changes) */
-async function safeAddToCart(product: ApiProductCard) {
-  // 1) If your site already exposes a global cart function, use it.
-  const w = window as any;
-  if (typeof w?.addToCart === "function") {
-    w.addToCart(product);
-    return { ok: true, mode: "window.addToCart" };
-  }
-
-  // 2) Try common custom event pattern
-  try {
-    window.dispatchEvent(
-      new CustomEvent("cart:add", {
-        detail: {
-          slug: product.slug,
-          qty: 1,
-          product,
-        },
-      })
-    );
-    // If your cart listens to this event, it will work instantly.
-  } catch {}
-
-  // 3) Try /api/cart (if you have it)
-  try {
-    const res = await fetch("/api/cart", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ slug: product.slug, qty: 1 }),
-    });
-    if (res.ok) return { ok: true, mode: "/api/cart" };
-  } catch {}
-
-  // 4) Fallback localStorage cart (won't break anything; can be used later)
-  try {
-    const key = "isp_cart";
-    const raw = localStorage.getItem(key);
-    const cart = raw ? JSON.parse(raw) : { items: [] as any[] };
-    const idx = (cart.items || []).findIndex((x: any) => x?.slug === product.slug);
-    if (idx >= 0) cart.items[idx].qty = (cart.items[idx].qty || 1) + 1;
-    else cart.items.push({ slug: product.slug, qty: 1, title: product.title, price: product.price });
-    localStorage.setItem(key, JSON.stringify(cart));
-    window.dispatchEvent(new CustomEvent("cart:updated"));
-    return { ok: true, mode: "localStorage" };
-  } catch {}
-
-  // last fallback: open product page
-  return { ok: false, mode: "fallback" };
-}
-
-// ✅ MAIN COMPONENT (Renamed)
+// ✅ MAIN COMPONENT
 export default function ProductsClient() {
   const router = useRouter();
   const sp = useSearchParams();
@@ -487,10 +436,6 @@ export default function ProductsClient() {
   const [suggestions, setSuggestions] = useState<ApiProductCard[]>([]);
   const [showSuggest, setShowSuggest] = useState(false);
   const suggestBoxRef = useRef<HTMLDivElement | null>(null);
-
-  // ✅ Toast for add-to-cart
-  const [cartToast, setCartToast] = useState<{ show: boolean; text: string }>({ show: false, text: "" });
-  const toastTimerRef = useRef<any>(null);
 
   // ✅ Keep master options cached so dropdowns don't “disappear” after selection
   const cacheRef = useRef({
@@ -1028,24 +973,6 @@ export default function ProductsClient() {
     </div>
   );
 
-  const handleAdd = async (p: ApiProductCard) => {
-    const r = await safeAddToCart(p);
-
-    if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
-
-    if (r.ok) {
-      setCartToast({ show: true, text: "Added to cart ✅" });
-      toastTimerRef.current = setTimeout(() => setCartToast({ show: false, text: "" }), 1600);
-      return;
-    }
-
-    // fallback: open product page
-    setCartToast({ show: true, text: "Opening product…" });
-    toastTimerRef.current = setTimeout(() => setCartToast({ show: false, text: "" }), 900);
-    const href = `/${(p.category || "products").toString().toLowerCase().includes("solved") ? "solved-assignments" : "products"}/${p.slug}`;
-    router.push(href);
-  };
-
   return (
     <main className="min-h-screen font-sans text-slate-800 bg-white">
       <style>{`
@@ -1283,31 +1210,10 @@ export default function ProductsClient() {
                 ) : null}
               </div>
             ) : (
-              // ✅ 6 per row on lg, 12 per page (2 rows)
+              // ✅ Removed extra UI wrapping, just displaying the ProductCard
               <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
                 {items.map((p) => (
-                  <div key={p.slug} className="relative group">
-                    {/* existing product card */}
-                    <ProductCard product={p as any} />
-
-                    {/* ✅ Add to Cart button (industrial placement) */}
-                    <div className="absolute left-2 right-2 bottom-2 opacity-100 md:opacity-0 md:group-hover:opacity-100 transition pointer-events-none">
-                      <button
-                        onClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          handleAdd(p);
-                        }}
-                        className="pointer-events-auto w-full h-10 rounded-xl bg-slate-900 text-white text-xs font-extrabold flex items-center justify-center gap-2 hover:opacity-95 active:scale-[0.99]"
-                        type="button"
-                      >
-                        <ShoppingCart size={16} /> Add to Cart
-                      </button>
-                    </div>
-
-                    {/* mobile always-visible spacing support (so button doesn't overlap content too much) */}
-                    <div className="md:hidden h-12" />
-                  </div>
+                  <ProductCard key={p.slug} product={p as any} />
                 ))}
               </div>
             )}
@@ -1487,15 +1393,6 @@ export default function ProductsClient() {
           </button>
         </div>
       </div>
-
-      {/* ✅ Cart toast */}
-      {cartToast.show ? (
-        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-[10000]">
-          <div className="rounded-2xl border border-gray-200 bg-white shadow-xl px-4 py-3 text-sm font-extrabold text-slate-900">
-            {cartToast.text}
-          </div>
-        </div>
-      ) : null}
 
       <Footer />
       <FloatingButtons />

@@ -1,5 +1,6 @@
-// ✅ FILE: lib/productRouting.ts
+// ✅ FILE: lib/productRouting.ts (COMPLETE REPLACE)
 import { notFound } from "next/navigation";
+import { headers } from "next/headers";
 
 export type Product = {
   _id: string;
@@ -27,6 +28,7 @@ export type Product = {
 
   isDigital?: boolean;
   pdfUrl?: string;
+  pdfKey?: string;
 
   images?: string[];
   thumbnailUrl?: string;
@@ -43,7 +45,7 @@ export type Product = {
 };
 
 function safeStr(x: any) {
-  return String(x || "").trim();
+  return String(x ?? "").trim();
 }
 
 function normalizeCategoryName(category?: string) {
@@ -53,7 +55,6 @@ function normalizeCategoryName(category?: string) {
 export function categorySlugFromProductCategory(category?: string): string {
   const c = normalizeCategoryName(category);
 
-  // ✅ keep these aligned with your listing routes in /app
   if (c.includes("solved")) return "solved-assignments";
   if (c.includes("handwritten") && (c.includes("hardcopy") || c.includes("delivery"))) return "handwritten-hardcopy";
   if (c.includes("handwritten") && c.includes("pdf")) return "handwritten-pdfs";
@@ -63,16 +64,37 @@ export function categorySlugFromProductCategory(category?: string): string {
   if (c.includes("project") || c.includes("synopsis")) return "projects";
   if (c.includes("combo")) return "combo";
 
-  // fallback (generic)
   return "products";
 }
 
-export function variantFromCategorySlug(categorySlug: string): "digital" | "hardcopy" | "pyq" | "projects" | "combo" {
+export function variantFromCategorySlug(
+  categorySlug: string
+): "digital" | "hardcopy" | "pyq" | "projects" | "combo" {
   if (categorySlug === "handwritten-hardcopy") return "hardcopy";
   if (categorySlug === "question-papers") return "pyq";
   if (categorySlug === "projects") return "projects";
   if (categorySlug === "combo") return "combo";
   return "digital";
+}
+
+async function getBaseUrl() {
+  // ✅ Next.js (your version) headers() can be Promise
+  const h = await headers();
+
+  const host = h.get("x-forwarded-host") || h.get("host") || "localhost:3000";
+  const proto = h.get("x-forwarded-proto") || (host.includes("localhost") ? "http" : "https");
+  const dynamicBase = `${proto}://${host}`.replace(/\/+$/, "");
+
+  // ✅ If current request is localhost, ignore NEXT_PUBLIC_SITE_URL
+  if (host.includes("localhost") || host.startsWith("127.0.0.1") || host.includes(":3000")) {
+    return dynamicBase;
+  }
+
+  // ✅ Production: allow env override
+  const env = safeStr(process.env.NEXT_PUBLIC_SITE_URL);
+  if (env) return env.replace(/\/+$/, "");
+
+  return dynamicBase;
 }
 
 async function fetchJson<T>(url: string): Promise<T | null> {
@@ -89,22 +111,13 @@ export async function getProductBySlug(slug: string): Promise<Product> {
   const s = safeStr(slug);
   if (!s) notFound();
 
-  // ✅ CHANGE FIRST ONE to your REAL single-product API (most important)
-  const tries = [
-    `/api/products/${encodeURIComponent(s)}`,                 // common
-    `/api/products/slug/${encodeURIComponent(s)}`,            // common alt
-    `/api/product?slug=${encodeURIComponent(s)}`,             // common alt
-    `/api/products?slug=${encodeURIComponent(s)}&limit=1`,    // fallback if your list API supports slug filter
-  ];
+  const base = await getBaseUrl();
+  const url = `${base}/api/products/${encodeURIComponent(s)}`;
 
-  for (const u of tries) {
-    const data: any = await fetchJson<any>(u);
-    if (!data) continue;
+  const data: any = await fetchJson<any>(url);
+  const p = data?.product || null;
 
-    // handle possible shapes
-    const p = data.product || data?.data?.product || (Array.isArray(data.products) ? data.products[0] : null) || data;
-    if (p && p.slug) return p as Product;
-  }
+  if (p && p.slug) return p as Product;
 
   notFound();
 }

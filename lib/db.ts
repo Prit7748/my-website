@@ -1,39 +1,43 @@
+// lib/db.ts
 import mongoose from "mongoose";
+
+const DB_NAME = process.env.MONGODB_DB || "ignoucluster";
 
 type MongooseCache = {
   conn: typeof mongoose | null;
   promise: Promise<typeof mongoose> | null;
 };
 
-// eslint-disable-next-line no-var
 declare global {
-  var mongoose: MongooseCache | undefined;
+  // eslint-disable-next-line no-var
+  var mongooseCache: MongooseCache | undefined;
 }
 
-const globalCache = global.mongoose || (global.mongoose = { conn: null, promise: null });
+const cached =
+  global.mongooseCache || (global.mongooseCache = { conn: null, promise: null });
 
-export default async function dbConnect(): Promise<typeof mongoose> {
-  const uri = process.env.MONGODB_URI;
-  if (!uri) {
-    throw new Error(
-      "MONGODB_URI is missing. Add it to .env.local (local) and Vercel Environment Variables (prod)."
-    );
+export default async function dbConnect() {
+  if (cached.conn) return cached.conn;
+
+  // ✅ Force runtime string (no "string | undefined" left for TS)
+  const MONGODB_URI = String(process.env.MONGODB_URI || "").trim();
+  if (!MONGODB_URI) {
+    throw new Error("MONGODB_URI is not defined in environment variables");
   }
 
-  // ✅ if already connected, return
-  if (mongoose.connection.readyState === 1 && globalCache.conn) {
-    return globalCache.conn;
-  }
+  if (!cached.promise) {
+    mongoose.set("strictQuery", true);
 
-  // ✅ if a connection is in progress, wait for it
-  if (!globalCache.promise) {
-    globalCache.promise = mongoose.connect(uri, {
-      bufferCommands: false,
-      serverSelectionTimeoutMS: 10000,
+    cached.promise = mongoose.connect(MONGODB_URI, {
+      dbName: DB_NAME,
+      serverSelectionTimeoutMS: 15000,
       socketTimeoutMS: 45000,
+      maxPoolSize: 10,
+      minPoolSize: 0,
+      retryWrites: true,
     });
   }
 
-  globalCache.conn = await globalCache.promise;
-  return globalCache.conn;
+  cached.conn = await cached.promise;
+  return cached.conn;
 }
