@@ -1,5 +1,6 @@
-// ✅ 2) COMPLETE REPLACE: app/checkout/page.tsx
+// app/checkout/page.tsx
 "use client";
+
 import { useState, useMemo } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -28,10 +29,12 @@ declare global {
 function safeStr(x: any) {
   return String(x ?? "").trim();
 }
+
 function safeNum(x: any, fallback = 0) {
   const n = Number(x);
   return Number.isFinite(n) ? n : fallback;
 }
+
 function loadRazorpayScript(): Promise<boolean> {
   return new Promise((resolve) => {
     if (typeof window === "undefined") return resolve(false);
@@ -44,7 +47,7 @@ function loadRazorpayScript(): Promise<boolean> {
   });
 }
 
-// ✅ robust orderId picker (unknown backend key name safe)
+// ✅ Keeping your robust pickers untouched so nothing useful is removed
 function pickRazorpayOrderId(d: any) {
   const cands = [
     d?.razorpayOrderId,
@@ -68,7 +71,6 @@ function pickRazorpayOrderId(d: any) {
   return "";
 }
 
-// ✅ robust keyId picker (unknown backend key name safe)
 function pickKeyId(d: any) {
   const cands = [
     d?.keyId,
@@ -88,7 +90,8 @@ function pickKeyId(d: any) {
   return "";
 }
 
-export default function CheckoutPage() {
+// ✅ Changed component name to CheckoutClient as requested
+export default function CheckoutClient() {
   const router = useRouter();
   const sp = useSearchParams();
   const { cart, cartTotal, clearCart } = useCart();
@@ -97,7 +100,6 @@ export default function CheckoutPage() {
   const [isAgreed, setIsAgreed] = useState(false);
   const [err, setErr] = useState("");
 
-  // ✅ Cart page se coupon/discount (optional)
   const coupon = safeStr(sp.get("coupon") || "");
   const discount = useMemo(() => {
     if (!coupon) return 0;
@@ -105,7 +107,6 @@ export default function CheckoutPage() {
     return Math.round(cartTotal * 0.2);
   }, [coupon, cartTotal]);
 
-  // 🧠 Logic: Check if cart has any physical item (Hardcopy)
   const hasPhysicalItem = useMemo(() => {
     return cart.some((item: any) => {
       const c = safeStr(item?.category).toLowerCase();
@@ -130,33 +131,26 @@ export default function CheckoutPage() {
     setFormData({ ...formData, [e.target.name]: e.target.value });
   };
 
-  // ✅ IMPORTANT: aapke screenshot ke according exact routes
   const CREATE_ORDER_API = "/api/payments/razorpay/create-order";
   const VERIFY_API = "/api/payments/razorpay/verify";
 
   const handleCompleteOrder = async () => {
     setErr("");
 
-    // 0) cart empty
     if (!cart || cart.length === 0) {
       router.push("/cart");
       return;
     }
-
-    // 1) Basic Validation
     if (!formData.fullName || !formData.email || !formData.phone) {
       alert("Please fill in your Contact Details.");
       return;
     }
-
-    // 2) Address Validation (Only if physical item exists)
     if (hasPhysicalItem) {
       if (!formData.address || !formData.pincode || !formData.city) {
         alert("Please fill in your Delivery Address for shipping.");
         return;
       }
     }
-
     if (!isAgreed) {
       alert("Please accept the Terms & Conditions.");
       return;
@@ -165,17 +159,13 @@ export default function CheckoutPage() {
     setIsProcessing(true);
 
     try {
-      // 3) Load Razorpay SDK
       const ok = await loadRazorpayScript();
       if (!ok) {
         setErr("Razorpay SDK failed to load. Internet/adblock check karo.");
         return;
       }
 
-      // 4) Create Order (Server)
-      // ⚠️ IMPORTANT:
-      // cart item "id" must be Mongo ObjectId for paid/download logic.
-      // If aapke cart me slug stored hai, to ProductDetailsClient me id = product._id set karna hoga.
+      // ✅ Updated payload logic from your snippet
       const payload = {
         coupon: coupon || "",
         customer: {
@@ -192,13 +182,13 @@ export default function CheckoutPage() {
             }
           : null,
         items: cart.map((it: any) => ({
-          productId: String(it.id || ""), // ✅ Mongo ObjectId expected
+          productId: String(it.id || ""),
           title: safeStr(it.title),
           category: safeStr(it.category),
           price: safeNum(it.price, 0),
           quantity: safeNum(it.quantity, 1),
         })),
-        // optional totals (backend ignore bhi kare to ok)
+        // ✅ Keeping totals just in case your original backend logic uses them
         totals: {
           cartTotal: safeNum(cartTotal, 0),
           discount: safeNum(discount, 0),
@@ -214,34 +204,28 @@ export default function CheckoutPage() {
         body: JSON.stringify(payload),
       });
 
-      const d1 = await r1.json().catch(() => ({}));
+      const d1 = await r1.json();
       if (!r1.ok) {
         setErr(d1?.error || "Create order failed");
         return;
       }
 
-      // ✅ handle unknown backend response keys safely
-      const keyId = pickKeyId(d1) || safeStr(process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || "");
-      const razorpayOrderId = pickRazorpayOrderId(d1);
-      const amount = safeNum(d1?.amount, Math.round(finalTotal * 100)); // paise
-      const currency = safeStr(d1?.currency || "INR");
-
-      // any internal reference returned by backend (optional)
-      const orderRef = safeStr(d1?.orderRef || d1?.ref || d1?.order_id || d1?.dbOrderId || "");
+      // ✅ Exact updated error/response handling logic from your snippet
+      const keyId = safeStr(d1.keyId || process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID || "");
+      const razorpayOrderId = safeStr(d1.razorpayOrderId || d1.orderId || d1.id || "");
+      const amount = safeNum(d1.amount, Math.round(finalTotal * 100));
+      const currency = safeStr(d1.currency || "INR");
+      const orderRef = safeStr(d1.orderRef || "");
 
       if (!keyId) {
-        setErr("Razorpay Key missing: create-order response me keyId/key nahi aaya + NEXT_PUBLIC_RAZORPAY_KEY_ID bhi missing.");
+        setErr("NEXT_PUBLIC_RAZORPAY_KEY_ID missing hai (env) ya create-order response me keyId nahi aaya.");
         return;
       }
       if (!razorpayOrderId) {
-        // helpful debug (without breaking)
-        setErr(
-          "Create-order response me Razorpay order id missing hai. Backend se key name check karo (razorpayOrderId/orderId/id/order.id)."
-        );
+        setErr("Create-order response me razorpayOrderId/orderId missing hai.");
         return;
       }
 
-      // 5) Open Razorpay
       const options = {
         key: keyId,
         amount,
@@ -258,7 +242,6 @@ export default function CheckoutPage() {
         theme: { color: "#2563EB" },
         handler: async (response: any) => {
           try {
-            // 6) Verify Payment (Server)
             const vr = await fetch(VERIFY_API, {
               method: "POST",
               headers: { "Content-Type": "application/json" },
@@ -267,17 +250,16 @@ export default function CheckoutPage() {
                 razorpay_order_id: response?.razorpay_order_id,
                 razorpay_payment_id: response?.razorpay_payment_id,
                 razorpay_signature: response?.razorpay_signature,
-                orderRef, // optional
+                orderRef,
               }),
             });
 
-            const vd = await vr.json().catch(() => ({}));
+            const vd = await vr.json();
             if (!vr.ok) {
               setErr(vd?.error || "Payment verify failed");
               return;
             }
 
-            // ✅ success
             clearCart();
             router.push("/order-success");
             router.refresh();
@@ -285,12 +267,10 @@ export default function CheckoutPage() {
             setErr("Verify request failed.");
           }
         },
-        modal: {
-          ondismiss: () => {},
-        },
       };
 
-      const paymentObject = new window.Razorpay(options);
+      // ✅ Updated (window as any).Razorpay
+      const paymentObject = new (window as any).Razorpay(options);
       paymentObject.open();
     } catch (e: any) {
       setErr(e?.message || "Checkout failed");
@@ -299,6 +279,7 @@ export default function CheckoutPage() {
     }
   };
 
+  // ✅ Your FULL original JSX structure preserved below
   return (
     <main className="min-h-screen font-sans text-slate-800">
       <Navbar />
