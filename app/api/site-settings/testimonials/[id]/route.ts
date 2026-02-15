@@ -3,6 +3,8 @@ import dbConnect from "@/lib/db";
 import Testimonial from "@/models/Testimonial";
 import { requireAdmin } from "@/lib/adminAuth";
 
+export const runtime = "nodejs";
+
 function safeStr(x: any) {
   return String(x ?? "").trim();
 }
@@ -11,13 +13,18 @@ function safeNum(x: any, fallback: number) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-export async function PUT(req: NextRequest, ctx: { params: { id: string } }) {
+// ✅ Next.js build expects params as Promise
+type Ctx = { params: Promise<{ id: string }> };
+
+export async function PUT(req: NextRequest, context: Ctx) {
   try {
-    // ✅ 0 args
-    await requireAdmin();
+    await requireAdmin(); // ✅ 0 args
     await dbConnect();
 
-    const id = ctx?.params?.id;
+    const { id } = await context.params;
+    const docId = safeStr(id);
+    if (!docId) return NextResponse.json({ error: "Invalid id" }, { status: 400 });
+
     const body = await req.json().catch(() => ({}));
 
     const patch: any = {};
@@ -30,26 +37,28 @@ export async function PUT(req: NextRequest, ctx: { params: { id: string } }) {
     if (body?.sortOrder !== undefined) patch.sortOrder = safeNum(body.sortOrder, 1000);
     if (body?.isActive !== undefined) patch.isActive = !!body.isActive;
 
-    const updated = await Testimonial.findByIdAndUpdate(id, patch, { new: true }).lean();
+    const updated = await Testimonial.findByIdAndUpdate(docId, patch, { new: true }).lean();
     if (!updated) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-    return NextResponse.json(updated);
+    return NextResponse.json(updated, { status: 200 });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || "Failed" }, { status: 500 });
   }
 }
 
-export async function DELETE(req: NextRequest, ctx: { params: { id: string } }) {
+export async function DELETE(req: NextRequest, context: Ctx) {
   try {
-    // ✅ 0 args
-    await requireAdmin();
+    await requireAdmin(); // ✅ 0 args
     await dbConnect();
 
-    const id = ctx?.params?.id;
-    const deleted = await Testimonial.findByIdAndDelete(id).lean();
+    const { id } = await context.params;
+    const docId = safeStr(id);
+    if (!docId) return NextResponse.json({ error: "Invalid id" }, { status: 400 });
+
+    const deleted = await Testimonial.findByIdAndDelete(docId).lean();
     if (!deleted) return NextResponse.json({ error: "Not found" }, { status: 404 });
 
-    return NextResponse.json({ ok: true });
+    return NextResponse.json({ ok: true }, { status: 200 });
   } catch (e: any) {
     return NextResponse.json({ error: e?.message || "Failed" }, { status: 500 });
   }
