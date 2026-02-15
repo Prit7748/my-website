@@ -13,20 +13,17 @@ function safeStr(x: any) {
   return String(x ?? "").trim();
 }
 
-// ✅ Next.js build expects params as Promise
-type Ctx = { params: Promise<{ id: string }> };
-
-export async function GET(req: NextRequest, context: Ctx) {
+export async function GET(
+  req: NextRequest,
+  context: { params: Promise<{ id: string }> }
+) {
   try {
-    await requireAdmin(); // ✅ no args
+    await requireAdmin();
     await dbConnect();
 
-    const { id } = (context?.params ? await context.params : { id: "" }) as { id: string };
+    const { id } = await context.params;
     const faqId = safeStr(id);
-
-    if (!faqId) {
-      return NextResponse.json({ ok: false, message: "Invalid id" }, { status: 400 });
-    }
+    if (!faqId) return NextResponse.json({ ok: false, message: "Invalid id" }, { status: 400 });
 
     const item = await Faq.findById(faqId).lean();
     if (!item) return NextResponse.json({ ok: false, message: "FAQ not found" }, { status: 404 });
@@ -40,17 +37,17 @@ export async function GET(req: NextRequest, context: Ctx) {
   }
 }
 
-export async function PATCH(req: NextRequest, context: Ctx) {
+export async function PATCH(
+  req: NextRequest,
+  context: { params: Promise<{ id: string }> }
+) {
   try {
-    await requireAdmin(); // ✅ no args
+    await requireAdmin();
     await dbConnect();
 
-    const { id } = (context?.params ? await context.params : { id: "" }) as { id: string };
+    const { id } = await context.params;
     const faqId = safeStr(id);
-
-    if (!faqId) {
-      return NextResponse.json({ ok: false, message: "Invalid id" }, { status: 400 });
-    }
+    if (!faqId) return NextResponse.json({ ok: false, message: "Invalid id" }, { status: 400 });
 
     const body = await req.json().catch(() => ({}));
     const update: any = {};
@@ -78,17 +75,17 @@ export async function PATCH(req: NextRequest, context: Ctx) {
   }
 }
 
-export async function DELETE(req: NextRequest, context: Ctx) {
+export async function DELETE(
+  req: NextRequest,
+  context: { params: Promise<{ id: string }> }
+) {
   try {
-    await requireAdmin(); // ✅ no args
+    await requireAdmin();
     await dbConnect();
 
-    const { id } = (context?.params ? await context.params : { id: "" }) as { id: string };
+    const { id } = await context.params;
     const faqId = safeStr(id);
-
-    if (!faqId) {
-      return NextResponse.json({ ok: false, message: "Invalid id" }, { status: 400 });
-    }
+    if (!faqId) return NextResponse.json({ ok: false, message: "Invalid id" }, { status: 400 });
 
     const removed = await Faq.findByIdAndDelete(faqId).lean();
     if (!removed) return NextResponse.json({ ok: false, message: "FAQ not found" }, { status: 404 });
