@@ -1,9 +1,13 @@
-// ✅ FILE: app/api/products/[slug]/route.ts (COMPLETE REPLACE - params fallback safe)
-import { NextResponse } from "next/server";
+// ✅ FILE: app/api/products/[slug]/route.ts (COMPLETE REPLACE - Next.js typed params fix)
+import { NextRequest, NextResponse } from "next/server";
 import dbConnect from "@/lib/db";
 import Product from "@/models/Product";
 
 export const runtime = "nodejs";
+
+function safeStr(x: any) {
+  return String(x ?? "").trim();
+}
 
 function slugFromRequest(req: Request, params?: any) {
   // 1) params first
@@ -17,11 +21,17 @@ function slugFromRequest(req: Request, params?: any) {
   return decodeURIComponent(raw).trim();
 }
 
-export async function GET(req: Request, ctx: { params?: { slug?: string } }) {
+// ✅ Next.js build expects params as Promise
+export async function GET(
+  req: NextRequest,
+  context: { params: Promise<{ slug: string }> }
+) {
   try {
     await dbConnect();
 
-    const slug = slugFromRequest(req, ctx?.params);
+    const resolvedParams = (context && context.params) ? await context.params : undefined;
+
+    const slug = safeStr(slugFromRequest(req, resolvedParams));
     if (!slug) return NextResponse.json({ error: "Invalid slug" }, { status: 400 });
 
     const p: any = await Product.findOne({
