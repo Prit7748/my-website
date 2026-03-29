@@ -42,6 +42,10 @@ import ComboCategorySetting from "@/models/ComboCategorySetting";
 import Combo from "@/models/Combo";
 import Product from "@/models/Product";
 import Blog from "@/models/Blog";
+import {
+  buildAssignmentMasterThumbUrl,
+  buildHardcopyMasterThumbUrl,
+} from "@/lib/thumbUrls";
 import type { NoticeItem } from "@/components/NotificationTicker";
 
 export const revalidate = 300;
@@ -94,6 +98,9 @@ type LatestHomeBlog = {
   publishedAt: string;
 };
 
+const SOLVED_ASSIGNMENTS_CATEGORY = "Solved Assignments";
+const HANDWRITTEN_HARDCOPY_CATEGORY = "Handwritten Hardcopy (Delivery)";
+
 function safeStr(x: any) {
   return String(x ?? "").trim();
 }
@@ -138,39 +145,35 @@ function pickFirstProductImage(images: any) {
   return arr[0] || "";
 }
 
+function isSolvedAssignmentCategory(category: any) {
+  return safeStr(category).toLowerCase() === SOLVED_ASSIGNMENTS_CATEGORY.toLowerCase();
+}
+
+function isHardcopyCategory(category: any) {
+  return safeStr(category).toLowerCase() === HANDWRITTEN_HARDCOPY_CATEGORY.toLowerCase();
+}
+
 function buildDynamicProductThumb(product: any) {
-  const category = safeStr(product?.category).toLowerCase();
-  const subjectCode = safeStr(product?.subjectCode).toUpperCase();
-  const title =
-    safeStr(product?.subjectTitleEn) ||
-    safeStr(product?.subjectTitleHi) ||
-    safeStr(product?.title);
-  const session = safeStr(product?.session);
-  const medium = safeStr(product?.language || product?.medium);
-  const firstCourseCode =
-    Array.isArray(product?.courseCodes) && product.courseCodes[0]
-      ? safeStr(product.courseCodes[0]).toUpperCase()
-      : safeStr(product?.courseCode).toUpperCase();
-
-  const params = new URLSearchParams();
-  if (subjectCode) params.set("code", subjectCode);
-  if (title) params.set("title", title);
-  if (session) params.set("session", session);
-  if (medium) params.set("medium", medium);
-  if (firstCourseCode) params.set("course", firstCourseCode);
-
-  if (category.includes("solved assignment")) {
-    return `/api/thumb/assignment?${params.toString()}`;
+  if (isSolvedAssignmentCategory(product?.category)) {
+    return buildAssignmentMasterThumbUrl(product);
   }
 
-  if (category.includes("hardcopy")) {
-    return `/api/thumb/hardcopy?${params.toString()}`;
+  if (isHardcopyCategory(product?.category)) {
+    return buildHardcopyMasterThumbUrl(product);
   }
 
   return "";
 }
 
 function resolveLatestProductImage(product: any) {
+  if (isSolvedAssignmentCategory(product?.category)) {
+    return buildAssignmentMasterThumbUrl(product);
+  }
+
+  if (isHardcopyCategory(product?.category)) {
+    return buildHardcopyMasterThumbUrl(product);
+  }
+
   return (
     safeStr(product?.thumbnailUrl) ||
     safeStr(product?.image) ||
@@ -438,6 +441,7 @@ async function getLatestProducts(): Promise<LatestHomeProduct[]> {
       medium: 1,
       courseCodes: 1,
       courseCode: 1,
+      updatedAt: 1,
     })
     .lean();
 

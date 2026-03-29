@@ -1,6 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import dbConnect from "@/lib/db";
 import Combo from "@/models/Combo";
+import {
+  buildAssignmentMasterThumbUrl,
+  buildHardcopyMasterThumbUrl,
+  buildPyqComboThumbUrl,
+} from "@/lib/thumbUrls";
 
 function safeStr(x: any) {
   return String(x ?? "").trim();
@@ -94,33 +99,21 @@ function scoreComboForQuery(c: any, q: string) {
   return s;
 }
 
+function isSolvedAssignmentsItemCategory(category: any) {
+  return safeStr(category).toLowerCase() === "solved assignments";
+}
+
+function isHardcopyItemCategory(category: any) {
+  return safeStr(category).toLowerCase() === "handwritten hardcopy (delivery)";
+}
+
 function buildDynamicThumbFromSnapshot(item: any) {
-  const category = safeStr(item?.category);
-  const subjectCode = safeStr(item?.subjectCode).toUpperCase();
-  const title =
-    safeStr(item?.subjectTitleEn) ||
-    safeStr(item?.subjectTitleHi) ||
-    safeStr(item?.title);
-  const session = safeStr(item?.session);
-  const medium = safeStr(item?.medium);
-  const firstCourseCode =
-    Array.isArray(item?.courseCodes) && item.courseCodes[0]
-      ? safeStr(item.courseCodes[0]).toUpperCase()
-      : "";
-
-  const params = new URLSearchParams();
-  if (subjectCode) params.set("code", subjectCode);
-  if (title) params.set("title", title);
-  if (session) params.set("session", session);
-  if (medium) params.set("medium", medium);
-  if (firstCourseCode) params.set("course", firstCourseCode);
-
-  if (category === "Solved Assignments") {
-    return `/api/thumb/assignment?${params.toString()}`;
+  if (isSolvedAssignmentsItemCategory(item?.category)) {
+    return buildAssignmentMasterThumbUrl(item);
   }
 
-  if (category === "Handwritten Hardcopy (Delivery)") {
-    return `/api/thumb/hardcopy?${params.toString()}`;
+  if (isHardcopyItemCategory(item?.category)) {
+    return buildHardcopyMasterThumbUrl(item);
   }
 
   return "";
@@ -151,6 +144,25 @@ function resolveComboSessionLabel(c: any) {
 function resolveComboSessionRangeLabel(c: any) {
   if (isAutoPyqLatestCombo(c)) return "Latest";
   return safeStr(c?.sessionRangeLabel || "");
+}
+
+function resolveComboThumb(c: any, mappedItems: any[]) {
+  if (isAutoPyqLatestCombo(c)) {
+    return buildPyqComboThumbUrl({
+      years: safeStr(c?.comboKind).toLowerCase() === "pyq_5y" ? 5 : 3,
+      code: safeStr(c?.subjectCode),
+      medium: safeStr(c?.mediumLabel || c?.medium || c?.lang3),
+      slug: safeStr(c?.slug),
+      updatedAt: safeStr(c?.updatedAt),
+      id: String(c?._id || ""),
+    });
+  }
+
+  return (
+    safeStr(c?.thumbUrl) ||
+    mappedItems.find((x: any) => safeStr(x?.thumbnailUrl))?.thumbnailUrl ||
+    ""
+  );
 }
 
 function mapComboForClient(c: any) {
@@ -184,10 +196,7 @@ function mapComboForClient(c: any) {
     courseCodes: uniqueUpper(item?.courseCodes || []),
   }));
 
-  const comboThumb =
-    safeStr(c?.thumbUrl) ||
-    mappedItems.find((x: any) => safeStr(x?.thumbnailUrl))?.thumbnailUrl ||
-    "";
+  const comboThumb = resolveComboThumb(c, mappedItems);
 
   return {
     id: String(c?._id || ""),
