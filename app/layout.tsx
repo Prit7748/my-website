@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import { Suspense } from "react";
 import Script from "next/script";
 import { Outfit } from "next/font/google";
 import "./globals.css";
@@ -27,7 +28,13 @@ export const metadata: Metadata = {
   },
   description:
     "Get IGNOU Solved Assignments, Handwritten Assignments, Guess Papers, and Previous Year Questions. Best quality study material with instant download.",
-  keywords: ["IGNOU", "Solved Assignments", "Handwritten", "Guess Paper", "IGNOU Help Books"],
+  keywords: [
+    "IGNOU",
+    "Solved Assignments",
+    "Handwritten",
+    "Guess Paper",
+    "IGNOU Help Books",
+  ],
   alternates: { canonical: "/" },
   robots: {
     index: true,
@@ -41,7 +48,14 @@ export const metadata: Metadata = {
     title: "IGNOU Students Portal - Solved Assignments & Notes",
     description:
       "Get IGNOU Solved Assignments, Handwritten Assignments, Guess Papers, and Previous Year Questions. Instant download & premium quality.",
-    images: [{ url: "/og.jpg", width: 1200, height: 630, alt: "IGNOU Students Portal" }],
+    images: [
+      {
+        url: "/og.jpg",
+        width: 1200,
+        height: 630,
+        alt: "IGNOU Students Portal",
+      },
+    ],
   },
   twitter: {
     card: "summary_large_image",
@@ -52,7 +66,11 @@ export const metadata: Metadata = {
   },
 };
 
-export default function RootLayout({ children }: { children: React.ReactNode }) {
+export default function RootLayout({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
   return (
     <html lang="en" className={outfit.variable} suppressHydrationWarning>
       <body className="min-h-screen bg-white text-slate-900 antialiased">
@@ -78,7 +96,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         ) : null}
 
         <CartProvider>
-          <AnalyticsProvider />
+          <Suspense fallback={null}>
+            <AnalyticsProvider />
+          </Suspense>
           {children}
         </CartProvider>
       </body>

@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo } from "react";
-import { usePathname, useSearchParams } from "next/navigation";
+import { useEffect } from "react";
+import { usePathname } from "next/navigation";
 import { useCart } from "../context/CartContext";
 import {
   buildCheckoutFingerprint,
@@ -14,25 +14,22 @@ const CHECKOUT_FINGERPRINT_KEY = "isp_begin_checkout_fingerprint_v1";
 
 export default function AnalyticsProvider() {
   const pathname = usePathname();
-  const searchParams = useSearchParams();
   const { cart, cartReady } = useCart();
-
-  const routeWithQuery = useMemo(() => {
-    const qs = searchParams?.toString() || "";
-    return qs ? `${pathname}?${qs}` : pathname;
-  }, [pathname, searchParams]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
 
     captureAttributionFromBrowser();
 
+    const search = window.location.search || "";
+    const routeWithQuery = `${pathname || ""}${search}`;
+
     trackPageView({
       page_path: routeWithQuery,
       page_location: window.location.href,
       page_title: document.title || "IGNOU Students Portal",
     });
-  }, [routeWithQuery]);
+  }, [pathname]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;

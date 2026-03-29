@@ -10,6 +10,8 @@ import { CATEGORY_CONFIG } from "@/lib/productCatalog";
 
 export const runtime = "nodejs";
 
+const TimingRuleModel: any = OnDemandTimingRule;
+
 function safeStr(x: any) {
   return String(x ?? "").trim();
 }
@@ -46,7 +48,9 @@ function normalizeCategoryLabel(input: any) {
 
   const allowed = getAllowedCategoryLabels();
   const matched = allowed.find(
-    (label) => normalizeOnDemandTimingCategoryKey(label) === normalizeOnDemandTimingCategoryKey(value)
+    (label) =>
+      normalizeOnDemandTimingCategoryKey(label) ===
+      normalizeOnDemandTimingCategoryKey(value)
   );
 
   return matched || value;
@@ -57,7 +61,10 @@ async function resolveCourseTitle(courseCode: string, fallbackTitle = "") {
   if (!normalizedCode) return "";
 
   const row: any = await Course.findOne({
-    code: { $regex: `^${normalizedCode.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, $options: "i" },
+    code: {
+      $regex: `^${normalizedCode.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+      $options: "i",
+    },
     isActive: { $ne: false },
   })
     .select("code title name titleEn nameEn label")
@@ -100,9 +107,12 @@ export async function PATCH(
 
   await dbConnect();
 
-  const existing: any = await OnDemandTimingRule.findById(id);
+  const existing: any = await TimingRuleModel.findById(id);
   if (!existing) {
-    return NextResponse.json({ error: "Timing rule not found" }, { status: 404 });
+    return NextResponse.json(
+      { error: "Timing rule not found" },
+      { status: 404 }
+    );
   }
 
   const nextCategoryLabel =
@@ -114,14 +124,18 @@ export async function PATCH(
     return NextResponse.json({ error: "Category required" }, { status: 400 });
   }
 
-  const nextCategoryKey = normalizeOnDemandTimingCategoryKey(nextCategoryLabel);
+  const nextCategoryKey =
+    normalizeOnDemandTimingCategoryKey(nextCategoryLabel);
 
   const nextCourseCode =
     body?.courseCode !== undefined
       ? normalizeOnDemandTimingCourseCode(body?.courseCode)
       : safeStr(existing?.courseCodeKey || existing?.courseCode);
 
-  const nextRuleType = nextCourseCode ? "course_override" : "category_default";
+  const nextRuleType = nextCourseCode
+    ? "course_override"
+    : "category_default";
+
   const nextDeliverWithinMinutes =
     body?.deliverWithinMinutes !== undefined
       ? clampMinutes(body?.deliverWithinMinutes, 20)
@@ -133,17 +147,20 @@ export async function PATCH(
       : safeStr(existing?.onDemandNote);
 
   const nextIsActive =
-    body?.isActive !== undefined ? safeBool(body?.isActive, true) : safeBool(existing?.isActive, true);
+    body?.isActive !== undefined
+      ? safeBool(body?.isActive, true)
+      : safeBool(existing?.isActive, true);
 
-  const nextCourseTitle =
-    nextCourseCode
-      ? await resolveCourseTitle(
-          nextCourseCode,
-          body?.courseTitle !== undefined ? body?.courseTitle : existing?.courseTitle
-        )
-      : "";
+  const nextCourseTitle = nextCourseCode
+    ? await resolveCourseTitle(
+        nextCourseCode,
+        body?.courseTitle !== undefined
+          ? body?.courseTitle
+          : existing?.courseTitle
+      )
+    : "";
 
-  const duplicate: any = await OnDemandTimingRule.findOne({
+  const duplicate: any = await TimingRuleModel.findOne({
     _id: { $ne: id },
     categoryKey: nextCategoryKey,
     courseCodeKey: nextCourseCode,
@@ -187,13 +204,22 @@ export async function PATCH(
         courseCodeKey: safeStr(existing?.courseCodeKey),
         courseTitle: safeStr(existing?.courseTitle),
         ruleType: safeStr(existing?.ruleType),
-        deliverWithinMinutes: clampMinutes(existing?.deliverWithinMinutes, 20),
+        deliverWithinMinutes: clampMinutes(
+          existing?.deliverWithinMinutes,
+          20
+        ),
         onDemandNote: safeStr(existing?.onDemandNote),
         isActive: safeBool(existing?.isActive, true),
         updatedBy: safeStr(existing?.updatedBy),
-        createdAt: existing?.createdAt ? new Date(existing.createdAt).toISOString() : null,
-        updatedAt: existing?.updatedAt ? new Date(existing.updatedAt).toISOString() : null,
-        lastModifiedAt: existing?.lastModifiedAt ? new Date(existing.lastModifiedAt).toISOString() : null,
+        createdAt: existing?.createdAt
+          ? new Date(existing.createdAt).toISOString()
+          : null,
+        updatedAt: existing?.updatedAt
+          ? new Date(existing.updatedAt).toISOString()
+          : null,
+        lastModifiedAt: existing?.lastModifiedAt
+          ? new Date(existing.lastModifiedAt).toISOString()
+          : null,
       },
     },
     { status: 200 }
@@ -217,12 +243,15 @@ export async function DELETE(
 
   await dbConnect();
 
-  const existing: any = await OnDemandTimingRule.findById(id).lean();
+  const existing: any = await TimingRuleModel.findById(id).lean();
   if (!existing) {
-    return NextResponse.json({ error: "Timing rule not found" }, { status: 404 });
+    return NextResponse.json(
+      { error: "Timing rule not found" },
+      { status: 404 }
+    );
   }
 
-  await OnDemandTimingRule.deleteOne({ _id: id });
+  await TimingRuleModel.deleteOne({ _id: id });
 
   return NextResponse.json(
     {
