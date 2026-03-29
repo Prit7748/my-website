@@ -97,7 +97,6 @@ const PdfVaultFileSchema = new Schema(
       trim: true,
       maxlength: 2000,
       unique: true,
-      index: true,
     },
 
     mimeType: {
@@ -170,8 +169,6 @@ const PdfVaultFileSchema = new Schema(
     minimize: true,
   }
 );
-
-PdfVaultFileSchema.index({ s3Key: 1 }, { unique: true });
 
 PdfVaultFileSchema.index(
   { skuNormalized: 1 },

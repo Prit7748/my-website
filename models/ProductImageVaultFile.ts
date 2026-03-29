@@ -90,7 +90,6 @@ const ProductImageVaultFileSchema = new Schema(
       trim: true,
       maxlength: 2000,
       unique: true,
-      index: true,
     },
 
     publicUrl: {
@@ -180,7 +179,6 @@ const ProductImageVaultFileSchema = new Schema(
   }
 );
 
-ProductImageVaultFileSchema.index({ s3Key: 1 }, { unique: true });
 ProductImageVaultFileSchema.index({ folderId: 1, fileName: 1, deletedAt: 1 });
 ProductImageVaultFileSchema.index({ folderId: 1, uploadedAt: -1 });
 ProductImageVaultFileSchema.index({ folderId: 1, sortOrder: 1, uploadedAt: 1 });

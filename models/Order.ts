@@ -208,21 +208,18 @@ const ShiprocketSchema = new Schema(
       default: "",
       trim: true,
       maxlength: 100,
-      index: true,
     },
     shipmentId: {
       type: String,
       default: "",
       trim: true,
       maxlength: 100,
-      index: true,
     },
     awbCode: {
       type: String,
       default: "",
       trim: true,
       maxlength: 100,
-      index: true,
     },
     courierName: {
       type: String,

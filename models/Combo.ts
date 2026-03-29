@@ -309,7 +309,6 @@ const ComboSchema = new Schema(
       trim: true,
       lowercase: true,
       maxlength: 450,
-      index: true,
     },
 
     shortTitle: {
@@ -402,7 +401,6 @@ const ComboSchema = new Schema(
       default: "",
       trim: true,
       maxlength: 300,
-      index: true,
       sparse: true,
     },
 
