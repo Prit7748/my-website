@@ -1,14 +1,13 @@
 import { NextRequest } from "next/server";
 
-export const runtime = "edge";
+export const runtime = "nodejs";
 
-function safeStr(x: string | null | undefined, max = 300) {
+function safeStr(x: string | null, max = 140) {
   const s = String(x ?? "").trim();
   return s.length > max ? s.slice(0, max) : s;
 }
-
 function esc(s: string) {
-  return String(s)
+  return s
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -16,233 +15,207 @@ function esc(s: string) {
 }
 
 function arrayBufferToBase64(buf: ArrayBuffer) {
-  const bytes = new Uint8Array(buf);
-  let binary = "";
-  const chunk = 0x8000;
-
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  }
-
-  return btoa(binary);
+  return Buffer.from(buf).toString("base64");
 }
 
-async function toDataUri(req: NextRequest, rawPathOrUrl: string) {
-  const input = safeStr(rawPathOrUrl, 2000);
-  if (!input) return "";
-
-  try {
-    const url =
-      input.startsWith("http://") || input.startsWith("https://")
-        ? new URL(input)
-        : new URL(input.startsWith("/") ? input : `/${input}`, req.url);
-
-    const r = await fetch(url.toString(), { cache: "force-cache" });
-    if (!r.ok) return "";
-
-    const type = r.headers.get("content-type") || "image/png";
-    const buf = await r.arrayBuffer();
-    const b64 = arrayBufferToBase64(buf);
-
-    return `data:${type};base64,${b64}`;
-  } catch {
-    return "";
-  }
-}
-
-function normalizeYears(x: string) {
-  return x === "5" ? 5 : 3;
-}
-
-function formatSubjectCode(input: string) {
-  const raw = safeStr(input, 80).toUpperCase().replace(/\s+/g, "");
-  if (!raw) return "BCOS 186";
-
-  const match = raw.match(/^([A-Z]+)(\d+[A-Z0-9]*)$/);
-  if (!match) return raw;
-
-  const prefix = safeStr(match[1]);
-  const suffix = safeStr(match[2]);
-  return `${prefix} ${suffix}`.trim();
-}
-
-function normalizeMedium(input: string) {
-  const raw = safeStr(input, 80).replace(/\s+/g, " ").trim();
-  if (!raw) return "English Medium";
-
-  const clean = raw.toUpperCase().replace(/[^A-Z]/g, "");
-
-  if (clean === "HIN" || clean === "HINDI") return "Hindi Medium";
-  if (clean === "ENG" || clean === "ENGLISH") return "English Medium";
-  if (clean === "URD" || clean === "URDU") return "Urdu Medium";
-  if (clean === "PUN" || clean === "PUNJABI") return "Punjabi Medium";
-  if (clean === "MAL" || clean === "MALAYALAM") return "Malayalam Medium";
-  if (clean === "TEL" || clean === "TELUGU") return "Telugu Medium";
-  if (clean === "TAM" || clean === "TAMIL") return "Tamil Medium";
-  if (clean === "ARA" || clean === "ARABIC") return "Arabic Medium";
-  if (clean === "FRE" || clean === "FRENCH") return "French Medium";
-  if (clean === "JAP" || clean === "JAPANESE") return "Japanese Medium";
-  if (clean === "GER" || clean === "GERMAN") return "German Medium";
-  if (clean === "KOR" || clean === "KOREAN") return "Korean Medium";
-  if (clean === "MAN" || clean === "MANDARIN") return "Mandarin Medium";
-  if (clean === "PER" || clean === "PERSIAN") return "Persian Medium";
-  if (clean === "RUS" || clean === "RUSSIAN") return "Russian Medium";
-  if (clean === "SPA" || clean === "SPANISH") return "Spanish Medium";
-  if (clean === "BEN" || clean === "BENGALI") return "Bengali Medium";
-  if (clean === "SAN" || clean === "SANSKRIT") return "Sanskrit Medium";
-  if (clean === "BAN" || clean === "BANGLA") return "Bangla Medium";
-  if (clean === "ORI" || clean === "ORIYA") return "Oriya Medium";
-  if (clean === "NEP" || clean === "NEPALI") return "Nepali Medium";
-  if (clean === "MAR" || clean === "MARATHI") return "Marathi Medium";
-  if (clean === "KAN" || clean === "KANNADA") return "Kannada Medium";
-  if (clean === "KAS" || clean === "KASHMIRI") return "Kashmiri Medium";
-  if (clean === "GUJ" || clean === "GUJARATI") return "Gujarati Medium";
-  if (clean === "ASS" || clean === "ASSAMESE") return "Assamese Medium";
-
-  const lowered = raw.toLowerCase();
-
-  if (lowered === "english medium") return "English Medium";
-  if (lowered === "hindi medium") return "Hindi Medium";
-  if (lowered === "urdu medium") return "Urdu Medium";
-  if (lowered === "punjabi medium") return "Punjabi Medium";
-  if (lowered === "malayalam medium") return "Malayalam Medium";
-  if (lowered === "telugu medium") return "Telugu Medium";
-  if (lowered === "tamil medium") return "Tamil Medium";
-  if (lowered === "arabic medium") return "Arabic Medium";
-  if (lowered === "french medium") return "French Medium";
-  if (lowered === "japanese medium") return "Japanese Medium";
-  if (lowered === "german medium") return "German Medium";
-  if (lowered === "korean medium") return "Korean Medium";
-  if (lowered === "mandarin medium") return "Mandarin Medium";
-  if (lowered === "persian medium") return "Persian Medium";
-  if (lowered === "russian medium") return "Russian Medium";
-  if (lowered === "spanish medium") return "Spanish Medium";
-  if (lowered === "bengali medium") return "Bengali Medium";
-  if (lowered === "sanskrit medium") return "Sanskrit Medium";
-  if (lowered === "bangla medium") return "Bangla Medium";
-  if (lowered === "oriya medium") return "Oriya Medium";
-  if (lowered === "nepali medium") return "Nepali Medium";
-  if (lowered === "marathi medium") return "Marathi Medium";
-  if (lowered === "kannada medium") return "Kannada Medium";
-  if (lowered === "kashmiri medium") return "Kashmiri Medium";
-  if (lowered === "gujarati medium") return "Gujarati Medium";
-  if (lowered === "assamese medium") return "Assamese Medium";
-
-  return raw;
-}
-
-function fitFontSizeByLen(
-  text: string,
-  maxWidthPx: number,
-  baseSize: number,
-  minSize: number,
-  approxChar = 0.68
-) {
+function fitFontSizeByLen(text: string, maxWidthPx: number, baseSize: number, minSize: number) {
   const t = text.trim();
   if (!t) return baseSize;
-
+  const approxChar = 0.78;
   const need = t.length * baseSize * approxChar;
   if (need <= maxWidthPx) return baseSize;
-
   const ratio = maxWidthPx / need;
   const sized = Math.floor(baseSize * ratio);
-
   return Math.max(minSize, Math.min(baseSize, sized));
+}
+
+function wrapText(text: string, maxCharsPerLine: number, maxLines: number) {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let cur = "";
+  for (const w of words) {
+    const test = cur ? `${cur} ${w}` : w;
+    if (test.length <= maxCharsPerLine) cur = test;
+    else {
+      if (cur) lines.push(cur);
+      cur = w;
+      if (lines.length >= maxLines - 1) break;
+    }
+  }
+  if (cur && lines.length < maxLines) lines.push(cur);
+
+  if (!lines.length) {
+    const t = text.trim();
+    lines.push(t.slice(0, maxCharsPerLine));
+    if (maxLines > 1 && t.length > maxCharsPerLine) lines.push(t.slice(maxCharsPerLine, maxCharsPerLine * 2));
+  }
+  return lines;
 }
 
 export async function GET(req: NextRequest) {
   const { searchParams } = new URL(req.url);
 
-  const years = normalizeYears(safeStr(searchParams.get("years"), 2));
+  const sessionRaw = safeStr(searchParams.get("session"), 18) || "2025-2026";
+  const codeRaw = safeStr(searchParams.get("code"), 22) || "BCHCT 131";
+  const titleRaw =
+    safeStr(searchParams.get("title"), 120) ||
+    "IGNOU BCHCT 131 Solved Assignment 2026 | English (Copy)";
+  const courseRaw = safeStr(searchParams.get("course"), 18) || "BSCG";
+  const mediumRaw = safeStr(searchParams.get("medium"), 14) || "English";
 
-  const subjectCodeRaw = safeStr(searchParams.get("code"), 80) || "BCOS186";
-  const mediumRaw = safeStr(searchParams.get("medium"), 80) || "ENG";
+  const session = esc(sessionRaw);
+  const subjectCode = esc(codeRaw.replace(/\s+/g, " ").trim());
+  const subjectTitle = esc(titleRaw.replace(/\s+/g, " ").trim());
+  const courseCode = esc(courseRaw.replace(/\s+/g, " ").trim());
+  const medium = esc(mediumRaw.replace(/\s+/g, " ").trim());
 
-  const subjectCode = esc(formatSubjectCode(subjectCodeRaw));
-  const medium = esc(normalizeMedium(mediumRaw));
+  const site = "WWW.ISTUDENTSPORTAL.COM";
 
-  const bgPath =
-    years === 5
-      ? "/images/thumbs/pyq-combo-bg5.png"
-      : "/images/thumbs/pyq-combo-bg3.png";
+  const W = 768;
+  const H = 1024;
 
-  const bgDataUri = await toDataUri(req, bgPath);
+  let logoDataUri = "";
+  try {
+    const logoUrl = new URL("/logo.png", req.url);
+    const r = await fetch(logoUrl.toString(), { cache: "force-cache" });
+    if (r.ok) {
+      const buf = await r.arrayBuffer();
+      const b64 = arrayBufferToBase64(buf);
+      logoDataUri = `data:image/png;base64,${b64}`;
+    }
+  } catch {
+    logoDataUri = "";
+  }
 
-  const W = 900;
-  const H = 1300;
+  const LOGO_X = 28;
+  const LOGO_Y = 18;
+  const LOGO_SIZE = 92;
 
-  const SUBJECT_CENTER_X = 450;
-  const SUBJECT_CENTER_Y = 548;
+  const LEFT_MARGIN = 120;
 
-  const MEDIUM_CENTER_X = 450;
-  const MEDIUM_CENTER_Y = 650;
+  const IGNOU_FONT = 122;
+  const SOLVED_BASE = 54;
+  const SESSION_FONT = 92;
+  const CODE_BASE = 127;
+  const MED_BASE = 61;
 
-  const subjectFont = fitFontSizeByLen(subjectCode, 700, 128, 78, 0.67);
-  const mediumFont = fitFontSizeByLen(medium, 520, 54, 30, 0.66);
+  const IGNOU_Y = 180;
+  const SESSION_Y = 360;
+  const SOLVED_Y = 255;
+
+  const SOLVED_MIN = 32;
+  const solvedMaxW = W - LEFT_MARGIN - 24;
+  const solvedFont = fitFontSizeByLen("SOLVED ASSIGNMENT", solvedMaxW, SOLVED_BASE, SOLVED_MIN);
+
+  const BAND_TOP_Y = 430;
+  const BAND_TOP_H = 24;
+  const BAND_MID_Y = BAND_TOP_Y + BAND_TOP_H;
+  const BAND_MID_H = 122;
+  const BAND_BOT_Y = BAND_MID_Y + BAND_MID_H;
+  const BAND_BOT_H = 24;
+  const BAND_TOTAL_H = BAND_TOP_H + BAND_MID_H + BAND_BOT_H;
+
+  const CODE_MIN = 60;
+  const CODE_MAX_W = W - 40;
+  const codeFont = fitFontSizeByLen(subjectCode, CODE_MAX_W, CODE_BASE, CODE_MIN);
+  const CODE_CENTER_Y = BAND_MID_Y + BAND_MID_H / 2;
+
+  const TITLE_LEFT_MARGIN = 140;
+  const TITLE_TOP_Y = BAND_TOP_Y + BAND_TOTAL_H + 60;
+  const VALID_Y = 820;
+  const TITLE_BOX_H = VALID_Y - TITLE_TOP_Y - 18;
+  const TITLE_MAX_LINES = 3;
+
+  let titleLines = wrapText(subjectTitle, 28, TITLE_MAX_LINES);
+  if (titleLines.length === 3 && titleLines[2].length > 26) {
+    titleLines = wrapText(subjectTitle, 24, TITLE_MAX_LINES);
+  }
+
+  const TITLE_BASE = 40;
+  const TITLE_MIN = 24;
+  const TITLE_MAX_W = W - TITLE_LEFT_MARGIN - 70;
+  const longest = titleLines.reduce((m, s) => Math.max(m, s.length), 0);
+  const titleFontByWidth = fitFontSizeByLen("X".repeat(longest), TITLE_MAX_W, TITLE_BASE, TITLE_MIN);
+
+  let titleFont = titleFontByWidth;
+  let lineH = Math.floor(titleFont * 1.3);
+  while (titleLines.length * lineH > TITLE_BOX_H && titleFont > TITLE_MIN) {
+    titleFont -= 1;
+    lineH = Math.floor(titleFont * 1.3);
+  }
+
+  const BLACK_Y = 934;
+  const BLACK_H = H - BLACK_Y;
+
+  const PILL_H = 80;
+  const PILL_W = 540;
+  const PILL_X = (W - PILL_W) / 2;
+  const PILL_Y = BLACK_Y - PILL_H / 2;
+
+  const MED_MIN = 34;
+  const medFont = fitFontSizeByLen(medium, PILL_W - 60, MED_BASE, MED_MIN);
+
+  const WEBSITE_Y = BLACK_Y + 75;
 
   const svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
   <defs>
-    <filter id="subjectShadow" x="-20%" y="-20%" width="160%" height="160%">
-      <feDropShadow dx="0" dy="16" stdDeviation="13" flood-color="#000000" flood-opacity="0.23"/>
-    </filter>
-
-    <filter id="mediumShadow" x="-20%" y="-20%" width="160%" height="160%">
-      <feDropShadow dx="0" dy="10" stdDeviation="9" flood-color="#5b6e38" flood-opacity="0.22"/>
-    </filter>
-
     <style>
-      .subjectFont {
-        font-family: "Arial Black", Arial, Helvetica, sans-serif;
-        font-weight: 900;
-        letter-spacing: 1.5px;
-      }
-      .mediumFont {
-        font-family: Arial, Helvetica, sans-serif;
-        font-weight: 800;
-        letter-spacing: 0.2px;
-      }
+      .navy{ fill:#0b2a6b; }
+      .orange{ fill:#f28c28; }
+      .black{ fill:#000000; }
+      .muted{ fill:#1a1a1a; }
+      .white{ fill:#ffffff; }
+      .red{ fill:#e00000; }
+      .gold{ fill:#7a5a00; }
+      .fontBlack{ font-family: "Arial Black", Arial, sans-serif; font-weight: 900; }
+      .fontB{ font-family: Georgia, "Times New Roman", serif; font-weight: 700; }
     </style>
   </defs>
 
+  <rect x="0" y="0" width="${W}" height="${H}" fill="#ffffff"/>
+
   ${
-    bgDataUri
-      ? `<image href="${bgDataUri}" x="0" y="0" width="${W}" height="${H}" preserveAspectRatio="xMidYMid slice"/>`
-      : `<rect x="0" y="0" width="${W}" height="${H}" fill="#f3f3f3"/>`
+    logoDataUri
+      ? `<image x="${LOGO_X}" y="${LOGO_Y}" width="${LOGO_SIZE}" height="${LOGO_SIZE}" href="${logoDataUri}" />`
+      : `<g transform="translate(${LOGO_X},${LOGO_Y})">
+          <rect width="${LOGO_SIZE}" height="${LOGO_SIZE}" fill="none" stroke="#0b2a6b" stroke-width="3"/>
+          <text x="${Math.floor(LOGO_SIZE / 2)}" y="${Math.floor(LOGO_SIZE / 2)}" text-anchor="middle" class="navy fontBlack" font-size="18">LOGO</text>
+        </g>`
   }
 
-  <text
-    x="${SUBJECT_CENTER_X}"
-    y="${SUBJECT_CENTER_Y}"
-    text-anchor="middle"
-    dominant-baseline="middle"
-    class="subjectFont"
-    font-size="${subjectFont}"
-    fill="#ffffff"
-    filter="url(#subjectShadow)"
-  >
-    ${subjectCode}
-  </text>
+  <text x="${LEFT_MARGIN}" y="${IGNOU_Y}" class="navy fontBlack" font-size="${IGNOU_FONT}" letter-spacing="2">IGNOU</text>
+  <text x="${LEFT_MARGIN}" y="${SOLVED_Y}" class="orange fontBlack" font-size="${solvedFont}">SOLVED ASSIGNMENT</text>
+  <text x="${LEFT_MARGIN}" y="${SESSION_Y}" class="black fontBlack" font-size="${SESSION_FONT}">${session}</text>
 
-  <text
-    x="${MEDIUM_CENTER_X}"
-    y="${MEDIUM_CENTER_Y}"
-    text-anchor="middle"
-    dominant-baseline="middle"
-    class="mediumFont"
-    font-size="${mediumFont}"
-    fill="#2f73c6"
-    filter="url(#mediumShadow)"
-  >
-    ${medium}
-  </text>
+  <rect x="0" y="${BAND_TOP_Y}" width="${W}" height="${BAND_TOP_H}" fill="#b8d49a"/>
+  <rect x="0" y="${BAND_MID_Y}" width="${W}" height="${BAND_MID_H}" fill="#37ad9b"/>
+  <rect x="0" y="${BAND_BOT_Y}" width="${W}" height="${BAND_BOT_H}" fill="#0aa3df"/>
+
+  <text x="${W / 2}" y="${CODE_CENTER_Y}" text-anchor="middle" dominant-baseline="central" class="white fontBlack" font-size="${codeFont}" letter-spacing="3">${subjectCode}</text>
+
+  ${titleLines
+    .map((line, idx) => {
+      const y = TITLE_TOP_Y + idx * lineH;
+      return `<text x="${TITLE_LEFT_MARGIN}" y="${y}" class="muted fontB" font-size="${titleFont}">${esc(line)}</text>`;
+    })
+    .join("\n  ")}
+
+  <text x="${TITLE_LEFT_MARGIN}" y="${VALID_Y}" class="red fontBlack" font-size="34">VALID FOR:-</text>
+  <text x="${TITLE_LEFT_MARGIN}" y="${VALID_Y + 54}" class="gold fontBlack" font-size="32">${courseCode}</text>
+
+  <rect x="0" y="${BLACK_Y}" width="${W}" height="${BLACK_H}" fill="#000000"/>
+
+  <rect x="${PILL_X}" y="${PILL_Y}" rx="40" ry="40" width="${PILL_W}" height="${PILL_H}" fill="#f4f000" stroke="#000000" stroke-width="4"/>
+  <text x="${W / 2}" y="${PILL_Y + PILL_H / 2}" text-anchor="middle" dominant-baseline="central" class="black fontBlack" font-size="${medFont}">${medium}</text>
+
+  <text x="${W / 2}" y="${WEBSITE_Y}" text-anchor="middle" dominant-baseline="central" class="white fontBlack" font-size="26" letter-spacing="1.2">${site}</text>
 </svg>`;
 
   return new Response(svg, {
     headers: {
       "Content-Type": "image/svg+xml; charset=utf-8",
-      "Cache-Control":
-        "public, max-age=86400, s-maxage=2592000, stale-while-revalidate=86400",
+      "Cache-Control": "public, max-age=86400, s-maxage=2592000, stale-while-revalidate=86400",
     },
   });
 }

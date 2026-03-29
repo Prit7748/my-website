@@ -155,8 +155,8 @@ export async function GET(req: NextRequest) {
 
   const bgPath =
     years === 5
-      ? "/images/thumbs/pyq-combo-bg5.png"
-      : "/images/thumbs/pyq-combo-bg3.png";
+      ? "/images/thumbs/pyq-combo-bg5.PNG"
+      : "/images/thumbs/pyq-combo-bg3.PNG";
 
   const bgDataUri = await toDataUri(req, bgPath);
 
