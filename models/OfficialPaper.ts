@@ -122,7 +122,6 @@ const OfficialPaperSchema = new Schema(
       trim: true,
       maxlength: 2000,
       unique: true,
-      index: true,
     },
 
     uploadedAt: {
@@ -187,8 +186,6 @@ OfficialPaperSchema.pre("save", function () {
   doc.productExists = productExists;
   doc.titleColor = productExists ? "green" : "red";
 });
-
-OfficialPaperSchema.index({ s3Key: 1 }, { unique: true });
 
 OfficialPaperSchema.index(
   { skuNormalized: 1 },
