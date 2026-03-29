@@ -7,6 +7,14 @@ import { useSearchParams } from "next/navigation";
 import ProductQuickView from "./ProductQuickView";
 import { productHref } from "@/lib/productHref";
 import { useCart } from "@/context/CartContext";
+import {
+  buildAssignmentMasterThumbUrl,
+  buildHardcopyMasterThumbUrl,
+  extractCourseCodesText,
+  isHandwrittenHardcopyProduct,
+  isSolvedAssignmentProduct,
+  pickSortedImagePair,
+} from "@/lib/thumbUrls";
 
 type Meta = { total: number; page: number; totalPages: number; limit: number };
 
@@ -18,9 +26,6 @@ interface ProductGridProps {
   initialMeta?: Meta | null;
   initialQueryKey?: string;
 }
-
-const SOLVED_LABEL = "Solved Assignments";
-const HARDCOPY_LABEL = "Handwritten Hardcopy (Delivery)";
 
 function safeText(x: any) {
   return String(x ?? "").trim();
@@ -65,133 +70,12 @@ async function sendWantToBuyRequest(product: any) {
   }
 }
 
-function fileNameOf(path: string) {
-  const clean = (path || "").split("?")[0];
-  const parts = clean.split("/");
-  return (parts[parts.length - 1] || "").toLowerCase();
-}
-
 function money(n: number) {
   try {
     return new Intl.NumberFormat("en-IN").format(n);
   } catch {
     return String(n);
   }
-}
-
-function pickImagesSorted(images?: string[]) {
-  const arr = Array.isArray(images) ? [...images] : [];
-  const sorted = arr
-    .filter((x) => typeof x === "string" && x.trim().length > 0)
-    .sort((a, b) => fileNameOf(a).localeCompare(fileNameOf(b), undefined, { numeric: true, sensitivity: "base" }));
-  const first = sorted[0] || "";
-  const second = sorted[1] || first || "";
-  return { first, second, all: sorted };
-}
-
-function pickImagesByCategory(p: any) {
-  return pickImagesSorted(p?.images);
-}
-
-function extractSubjectTitle(p: any) {
-  const lang = safeText(p?.language).toLowerCase();
-  const hi = safeText(p?.subjectTitleHi);
-  const en = safeText(p?.subjectTitleEn);
-
-  if ((lang === "hindi" || lang.startsWith("hin")) && hi) return hi;
-  if ((lang === "english" || lang.startsWith("eng")) && en) return en;
-
-  return (
-    hi ||
-    en ||
-    safeText(p?.subjectTitle) ||
-    safeText(p?.subject_title) ||
-    safeText(p?.subjectName) ||
-    safeText(p?.subject_name) ||
-    safeText(p?.paperTitle) ||
-    safeText(p?.paper_title) ||
-    safeText(p?.subject) ||
-    ""
-  );
-}
-
-function extractSubjectCode(p: any) {
-  const direct =
-    safeText(p?.subjectCode) ||
-    safeText(p?.paperCode) ||
-    safeText(p?.code) ||
-    safeText(p?.subject_code);
-
-  if (direct) return direct;
-
-  const t = safeText(p?.title);
-  const m = t.match(/\b([A-Z]{2,6})\s*[-]?\s*(\d{2,4})\b/);
-  if (m) return `${m[1]} ${m[2]}`.trim();
-
-  return "";
-}
-
-function extractCourseCodes(p: any) {
-  const list = Array.isArray(p?.courseCodes)
-    ? p.courseCodes.map((x: any) => safeText(x)).filter(Boolean)
-    : [];
-
-  if (list.length) {
-    return Array.from(new Set(list)).join(", ");
-  }
-
-  return safeText(p?.courseCode) || safeText(p?.programmeCode) || safeText(p?.programCode) || "";
-}
-
-function extractMedium(p: any) {
-  return safeText(p?.language) || safeText(p?.medium) || "";
-}
-
-function normalizeSession(x: any) {
-  const s = safeText(x);
-  if (!s) return "";
-  return s.replace(/\s+/g, " ").trim();
-}
-
-function buildAssignmentMasterThumb(p: any) {
-  const session = normalizeSession(p?.session) || "2025-2026";
-  const code = extractSubjectCode(p) || "IGNOU";
-  const title = extractSubjectTitle(p) || "Solved Assignment";
-  const course = extractCourseCodes(p) || "IGNOU";
-  const medium = extractMedium(p) || "English";
-
-  const qs = new URLSearchParams({
-    session,
-    code,
-    title,
-    course,
-    medium,
-  });
-
-  const v = safeText(p?._id) || safeText(p?.updatedAt) || safeText(p?.slug) || "1";
-  return `/api/thumb/assignment?${qs.toString()}&v=${encodeURIComponent(v)}`;
-}
-
-function buildHardcopyMasterThumb(p: any) {
-  const session = normalizeSession(p?.session) || "2025-26";
-  const code = extractSubjectCode(p) || "IGNOU";
-  const medium = extractMedium(p) || "English";
-
-  const qs = new URLSearchParams({
-    session,
-    code,
-    medium,
-  });
-
-  const v = safeText(p?._id) || safeText(p?.updatedAt) || safeText(p?.slug) || "1";
-  return `/api/thumb/hardcopy?${qs.toString()}&v=${encodeURIComponent(v)}`;
-}
-
-function normalizeCats(arr: string[]) {
-  return (Array.isArray(arr) ? arr : [])
-    .map((x) => safeText(x))
-    .filter(Boolean)
-    .map((x) => x.toLowerCase());
 }
 
 function ProductGridSkeleton() {
@@ -294,16 +178,6 @@ export default function ProductGrid({
     kind: "add",
   });
 
-  const selectedCatsNormalized = useMemo(() => normalizeCats(selectedCat), [selectedCat]);
-
-  const enableAssignmentMasterThumb = useMemo(() => {
-    return selectedCatsNormalized.length === 1 && selectedCatsNormalized[0] === SOLVED_LABEL.toLowerCase();
-  }, [selectedCatsNormalized]);
-
-  const enableHardcopyMasterThumb = useMemo(() => {
-    return selectedCatsNormalized.length === 1 && selectedCatsNormalized[0] === HARDCOPY_LABEL.toLowerCase();
-  }, [selectedCatsNormalized]);
-
   function isInCart(productId: string) {
     return cart.some((x) => x.id === productId);
   }
@@ -338,11 +212,10 @@ export default function ProductGrid({
   }
 
   function resolveCardImage(p: any) {
-    const { first } = pickImagesByCategory(p);
+    if (isSolvedAssignmentProduct(p)) return buildAssignmentMasterThumbUrl(p);
+    if (isHandwrittenHardcopyProduct(p)) return buildHardcopyMasterThumbUrl(p);
 
-    if (enableAssignmentMasterThumb) return buildAssignmentMasterThumb(p);
-    if (enableHardcopyMasterThumb) return buildHardcopyMasterThumb(p);
-
+    const { first } = pickSortedImagePair(p?.images);
     return first || "";
   }
 
@@ -368,7 +241,7 @@ export default function ProductGrid({
       image: resolveCardImage(p),
       quantity: 1,
       category: String(p?.category || "Product"),
-      courseCode: extractCourseCodes(p),
+      courseCode: extractCourseCodesText(p),
       availability: String(p?.availability || "available"),
       canPurchase: p?.canPurchase !== false,
     } as any);
@@ -469,7 +342,7 @@ export default function ProductGrid({
 
       <div className="grid grid-cols-2 md:grid-cols-3 gap-4 md:gap-6">
         {products.map((p: any) => {
-          const { first, all } = pickImagesByCategory(p);
+          const { first, all } = pickSortedImagePair(p?.images);
 
           const isCombo = (p.category || "").toLowerCase().includes("combo");
           const href = productHref(p);
@@ -481,10 +354,10 @@ export default function ProductGrid({
           const wantLoading = !!wantLoadingMap[id];
           const wantSuccess = !!wantSuccessMap[id];
 
-          const imgSrc = enableAssignmentMasterThumb
-            ? buildAssignmentMasterThumb(p)
-            : enableHardcopyMasterThumb
-            ? buildHardcopyMasterThumb(p)
+          const imgSrc = isSolvedAssignmentProduct(p)
+            ? buildAssignmentMasterThumbUrl(p)
+            : isHandwrittenHardcopyProduct(p)
+            ? buildHardcopyMasterThumbUrl(p)
             : first || "";
 
           const productTitle = safeText(p?.title) || "Product";

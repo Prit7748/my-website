@@ -5,6 +5,12 @@ import Image from "next/image";
 import { useRouter } from "next/navigation";
 import { X, CheckCircle, CheckCircle2, FileText, Calendar, MessageCircle, ShoppingCart, Star } from "lucide-react";
 import { useCart } from "@/context/CartContext";
+import {
+  buildAssignmentMasterThumbUrl,
+  extractCourseCodesText,
+  isSolvedAssignmentProduct,
+  pickSortedImagePair,
+} from "@/lib/thumbUrls";
 
 interface QuickViewProps {
   product: any;
@@ -28,25 +34,22 @@ function isOutProduct(product: any) {
   return a === "out_of_stock" || a === "outofstock" || a === "out-of-stock" || product?.canPurchase === false;
 }
 
-function fileNameOf(path: string) {
-  const clean = (path || "").split("?")[0];
-  const parts = clean.split("/");
-  return (parts[parts.length - 1] || "").toLowerCase();
-}
-
-function sortImagesNamewise(arr: string[]) {
-  return [...(arr || [])]
-    .filter((x) => typeof x === "string" && x.trim().length > 0)
-    .sort((a, b) => fileNameOf(a).localeCompare(fileNameOf(b), undefined, { numeric: true }));
-}
-
 function isHardcopyProduct(product: any) {
   const c = String(product?.category || "").toLowerCase();
   return c.includes("handwritten hardcopy") || c.includes("delivery");
 }
 
-function extractSubjectTitle(p: any) {
+function extractDisplaySubjectTitle(p: any) {
+  const lang = safeText(p?.language).toLowerCase();
+  const hi = safeText(p?.subjectTitleHi);
+  const en = safeText(p?.subjectTitleEn);
+
+  if ((lang === "hindi" || lang.startsWith("hin")) && hi) return hi;
+  if ((lang === "english" || lang.startsWith("eng")) && en) return en;
+
   return (
+    hi ||
+    en ||
     safeText(p?.subjectTitle) ||
     safeText(p?.subject_title) ||
     safeText(p?.subjectName) ||
@@ -56,66 +59,6 @@ function extractSubjectTitle(p: any) {
     safeText(p?.subject) ||
     ""
   );
-}
-
-function extractSubjectCode(p: any) {
-  const direct =
-    safeText(p?.subjectCode) ||
-    safeText(p?.paperCode) ||
-    safeText(p?.code) ||
-    safeText(p?.subject_code);
-
-  if (direct) return direct;
-
-  const t = safeText(p?.title);
-  const m = t.match(/\b([A-Z]{2,6})\s*[-]?\s*(\d{2,4})\b/);
-  if (m) return `${m[1]} ${m[2]}`.trim();
-  return "";
-}
-
-function extractCourseCode(p: any) {
-  return (
-    safeText(p?.courseCode) ||
-    (Array.isArray(p?.courseCodes) ? safeText(p?.courseCodes?.[0]) : "") ||
-    safeText(p?.programmeCode) ||
-    safeText(p?.programCode) ||
-    ""
-  );
-}
-
-function extractCourseCodesText(p: any) {
-  const list = Array.isArray(p?.courseCodes)
-    ? p.courseCodes.map((x: any) => safeText(x)).filter(Boolean)
-    : [];
-
-  if (list.length) return Array.from(new Set(list)).join(", ");
-
-  return extractCourseCode(p);
-}
-
-function extractMedium(p: any) {
-  return safeText(p?.language) || safeText(p?.medium) || "";
-}
-
-function normalizeSession(x: any) {
-  const s = safeText(x);
-  if (!s) return "";
-  return s.replace(/\s+/g, " ").trim();
-}
-
-function buildAssignmentMasterThumb(p: any) {
-  const session = normalizeSession(p?.session) || "2025-2026";
-  const code = extractSubjectCode(p) || "IGNOU";
-  const title = extractSubjectTitle(p) || "Solved Assignment";
-  const course = extractCourseCode(p) || "IGNOU";
-  const medium = extractMedium(p) || "English";
-  const qs = new URLSearchParams({ session, code, title, course, medium });
-  const v = safeText(p?._id) || safeText(p?.updatedAt) || safeText(p?.slug) || "1";
-  return `/api/thumb/assignment?${qs.toString()}&v=${encodeURIComponent(v)}`;
-}
-
-function isSolvedAssignmentProduct(product: any) {
-  return safeText(product?.category).toLowerCase() === "solved assignments";
 }
 
 async function sendWantToBuyRequest(product: any) {
@@ -556,16 +499,16 @@ export default function ProductQuickView({ product, onClose }: QuickViewProps) {
   const hardcopyMode = isHardcopyProduct(product);
   const outMode = isOutProduct(product);
 
-  const displayTitle = safeText(product?.title) || extractSubjectTitle(product) || "Product";
+  const displayTitle = safeText(product?.title) || extractDisplaySubjectTitle(product) || "Product";
 
-  const rawImages: string[] = Array.isArray(product.images) ? product.images : [];
-  const sorted = sortImagesNamewise(rawImages);
+  const pair = pickSortedImagePair(Array.isArray(product.images) ? product.images : []);
+  const sorted = pair.all;
 
   const useAssignmentMasterThumb = isSolvedAssignmentProduct(product);
-  const masterFallback = useAssignmentMasterThumb ? buildAssignmentMasterThumb(product) : "";
+  const masterFallback = useAssignmentMasterThumb ? buildAssignmentMasterThumbUrl(product) : "";
 
-  const thumb = sorted[0] || masterFallback;
-  const quick = sorted[1] || sorted[0] || masterFallback;
+  const thumb = pair.first || masterFallback;
+  const quick = pair.second || pair.first || masterFallback;
 
   const imgAlt = displayTitle ? `${displayTitle} preview` : "Product preview";
 

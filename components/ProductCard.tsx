@@ -7,6 +7,14 @@ import { FileText, Truck, Sparkles, ShoppingCart, CheckCircle2, XCircle } from "
 import { productHref } from "@/lib/productHref";
 import { useCart } from "@/context/CartContext";
 import { trackSelectItem } from "../lib/analytics";
+import {
+  buildAssignmentMasterThumbUrl,
+  buildHardcopyMasterThumbUrl,
+  extractCourseCodesText,
+  isHandwrittenHardcopyProduct,
+  isSolvedAssignmentProduct,
+  pickSortedImagePair,
+} from "@/lib/thumbUrls";
 
 type ApiProduct = {
   _id?: string;
@@ -39,10 +47,8 @@ type ApiProduct = {
   subjectTitleHi?: string;
   subjectTitleEn?: string;
   medium?: string;
+  updatedAt?: string;
 };
-
-const SOLVED_ASSIGNMENTS_CATEGORY = "Solved Assignments";
-const HANDWRITTEN_HARDCOPY_CATEGORY = "Handwritten Hardcopy (Delivery)";
 
 function money(n: number) {
   try {
@@ -111,115 +117,16 @@ async function sendWantToBuyRequest(product: ApiProduct) {
   }
 }
 
-function normalizeSession(x: any) {
-  const s = safeText(x);
-  if (!s) return "";
-  return s.replace(/\s+/g, " ").trim();
-}
-
-function extractSubjectTitle(p: ApiProduct) {
-  const lang = safeText(p?.language).toLowerCase();
-  const hi = safeText(p?.subjectTitleHi);
-  const en = safeText(p?.subjectTitleEn);
-
-  if ((lang === "hindi" || lang.startsWith("hin")) && hi) return hi;
-  if ((lang === "english" || lang.startsWith("eng")) && en) return en;
-
-  return hi || en || safeText(p?.subjectTitle) || "";
-}
-
-function extractSubjectCode(p: ApiProduct) {
-  const direct = safeText(p?.subjectCode);
-  if (direct) return direct;
-
-  const t = safeText(p?.title);
-  const m = t.match(/\b([A-Z]{2,6})\s*[-]?\s*(\d{2,4})\b/);
-  if (m) return `${m[1]} ${m[2]}`.trim();
-
-  return "";
-}
-
-function extractCourseCodesText(p: ApiProduct) {
-  const list = Array.isArray(p?.courseCodes)
-    ? p.courseCodes.map((x: any) => safeText(x)).filter(Boolean)
-    : [];
-
-  if (list.length) return Array.from(new Set(list)).join(", ");
-
-  return safeText(p?.courseCode) || "";
-}
-
-function extractMedium(p: ApiProduct) {
-  return safeText(p?.language) || safeText(p?.medium) || "";
-}
-
-function isSolvedAssignmentProduct(product: ApiProduct) {
-  return safeText(product.category).toLowerCase() === SOLVED_ASSIGNMENTS_CATEGORY.toLowerCase();
-}
-
-function isHandwrittenHardcopyProduct(product: ApiProduct) {
-  return safeText(product.category).toLowerCase() === HANDWRITTEN_HARDCOPY_CATEGORY.toLowerCase();
-}
-
-function buildAssignmentMasterThumb(p: ApiProduct) {
-  const session = normalizeSession(p?.session) || "2025-2026";
-  const code = extractSubjectCode(p) || "IGNOU";
-  const title = extractSubjectTitle(p) || "Solved Assignment";
-  const course = extractCourseCodesText(p) || "IGNOU";
-  const medium = extractMedium(p) || "English";
-
-  const qs = new URLSearchParams({
-    session,
-    code,
-    title,
-    course,
-    medium,
-  });
-
-  const v = safeText(p?._id) || safeText(p?.slug) || "1";
-  return `/api/thumb/assignment?${qs.toString()}&v=${encodeURIComponent(v)}`;
-}
-
-function buildHardcopyMasterThumb(p: ApiProduct) {
-  const session = normalizeSession(p?.session) || "2025-26";
-  const code = extractSubjectCode(p) || "IGNOU";
-  const medium = extractMedium(p) || "English";
-
-  const qs = new URLSearchParams({
-    session,
-    code,
-    medium,
-  });
-
-  const v = safeText(p?._id) || safeText(p?.slug) || "1";
-  return `/api/thumb/hardcopy?${qs.toString()}&v=${encodeURIComponent(v)}`;
-}
-
-function getSortedUploadedImages(product: ApiProduct) {
-  const arr = Array.isArray(product.images)
-    ? product.images
-        .map((x) => safeText(x))
-        .filter(Boolean)
-        .sort((a, b) => {
-          const aName = a.split("?")[0].split("/").pop() || "";
-          const bName = b.split("?")[0].split("/").pop() || "";
-          return aName.localeCompare(bName, undefined, { numeric: true, sensitivity: "base" });
-        })
-    : [];
-
-  return Array.from(new Set(arr));
-}
-
 function firstValidImage(product: ApiProduct) {
   if (isSolvedAssignmentProduct(product)) {
-    return buildAssignmentMasterThumb(product);
+    return buildAssignmentMasterThumbUrl(product);
   }
 
   if (isHandwrittenHardcopyProduct(product)) {
-    return buildHardcopyMasterThumb(product);
+    return buildHardcopyMasterThumbUrl(product);
   }
 
-  const uploaded = getSortedUploadedImages(product);
+  const uploaded = pickSortedImagePair(product.images).all;
   return uploaded[0] || "";
 }
 
@@ -228,8 +135,8 @@ function secondValidImage(product: ApiProduct, fallback: string) {
     return fallback;
   }
 
-  const uploaded = getSortedUploadedImages(product);
-  return uploaded[1] || uploaded[0] || "";
+  const pair = pickSortedImagePair(product.images);
+  return pair.second || pair.first || "";
 }
 
 export default function ProductCard({ product }: { product: ApiProduct }) {
@@ -254,6 +161,10 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
     return secondValidImage(product, imgPrimary);
   }, [product, imgPrimary]);
 
+  useEffect(() => {
+    setImgBroken(false);
+  }, [imgPrimary]);
+
   const hasDiscount = !!product.oldPrice && Number(product.oldPrice) > Number(product.price || 0);
   const discountPct = hasDiscount
     ? Math.round(((Number(product.oldPrice) - Number(product.price)) / Number(product.oldPrice)) * 100)
@@ -264,8 +175,7 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
 
   const href = productHref({ slug: product.slug, category: product.category });
 
-  const courseCodeText =
-    product.courseCode || (Array.isArray(product.courseCodes) ? product.courseCodes.join(", ") : "") || "";
+  const courseCodeText = extractCourseCodesText(product) || "";
 
   const availability = normAvail(product.availability || "available");
 

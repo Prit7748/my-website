@@ -5,6 +5,7 @@ import {
   hasValidMasterDiscountPercent,
   normalizePercentDiscountValue,
 } from "@/lib/comboPricing";
+import { buildPyqComboThumbUrl } from "@/lib/thumbUrls";
 
 export type PyqComboKind = "pyq_3y" | "pyq_5y";
 
@@ -25,6 +26,7 @@ export type PyqComboItem = {
   price: number;
   thumbUrl: string;
   sku?: string;
+  updatedAt?: string;
 };
 
 export type GeneratedPyqCombo = {
@@ -98,6 +100,7 @@ export type GeneratedPyqCombo = {
     price: number;
     thumbUrl: string;
     sku?: string;
+    updatedAt?: string;
   }>;
 
   rules: {
@@ -341,45 +344,6 @@ function buildShortTitle(subjectCode: string, medium: string, kind: PyqComboKind
   return `${subjectCode} ${medium} ${label}`.replace(/\s+/g, " ").trim();
 }
 
-function buildDiscountBadgeText(savePercent: number) {
-  const n = Math.max(0, Math.round(safeNum(savePercent, 0)));
-  return n > 0 ? `${n}% OFF` : "OFF";
-}
-
-function buildPyqComboThumbUrl(args: {
-  comboKind: PyqComboKind;
-  subjectCode: string;
-  medium: string;
-  savePercent: number;
-  items: PyqComboItem[];
-}) {
-  const years = args.comboKind === "pyq_5y" ? "5" : "3";
-  const count = args.comboKind === "pyq_5y" ? "10" : "6";
-
-  const params = new URLSearchParams();
-  params.set("years", years);
-  params.set("count", count);
-  params.set("code", safeStr(args.subjectCode).toUpperCase());
-  params.set("medium", safeStr(args.medium));
-  params.set("discount", buildDiscountBadgeText(args.savePercent));
-  params.set("v", "2");
-
-  for (const item of args.items) {
-    const thumb = safeStr(item.thumbUrl);
-    if (thumb) params.append("item", thumb);
-  }
-
-  return `/api/thumb/pyq-combo?${params.toString()}`;
-}
-
-function buildGenerationKey(subjectCode: string, lang3: string, comboKind: PyqComboKind) {
-  return `question-papers__${safeStr(subjectCode).toUpperCase()}__${safeStr(lang3).toUpperCase()}__${comboKind}`;
-}
-
-function buildGenerationGroupKey(subjectCode: string, lang3: string) {
-  return `question-papers__${safeStr(subjectCode).toUpperCase()}__${safeStr(lang3).toUpperCase()}`;
-}
-
 function buildDescription(args: {
   kind: PyqComboKind;
   subjectCode: string;
@@ -495,11 +459,12 @@ function createComboFromItems(args: {
   });
 
   const thumbUrl = buildPyqComboThumbUrl({
-    comboKind: kind,
-    subjectCode,
+    years: kind === "pyq_5y" ? 5 : 3,
+    code: subjectCode,
     medium: `${medium} Medium`,
-    savePercent: pricing.savePercent,
-    items,
+    slug: toSlug(title),
+    updatedAt: items.map((x) => safeStr(x.updatedAt)).filter(Boolean).join("|"),
+    id: items.map((x) => safeStr(x.productId)).filter(Boolean).join("|"),
   });
 
   const generationKey = buildGenerationKey(subjectCode, lang3, kind);
@@ -586,6 +551,14 @@ function createComboFromItems(args: {
   };
 }
 
+function buildGenerationKey(subjectCode: string, lang3: string, comboKind: PyqComboKind) {
+  return `question-papers__${safeStr(subjectCode).toUpperCase()}__${safeStr(lang3).toUpperCase()}__${comboKind}`;
+}
+
+function buildGenerationGroupKey(subjectCode: string, lang3: string) {
+  return `question-papers__${safeStr(subjectCode).toUpperCase()}__${safeStr(lang3).toUpperCase()}`;
+}
+
 export async function generatePyqCombosFromProducts() {
   const discountPercent = await loadPyqDiscountPercent();
 
@@ -614,6 +587,7 @@ export async function generatePyqCombosFromProducts() {
       quickUrl: 1,
       images: 1,
       availability: 1,
+      updatedAt: 1,
     })
     .lean();
 
@@ -650,6 +624,7 @@ export async function generatePyqCombosFromProducts() {
       courseTitles: uniqueStrings(p?.courseTitles || [], false),
       price: Math.max(0, safeNum(p?.price, 0)),
       thumbUrl: buildThumbUrl(p),
+      updatedAt: safeStr(p?.updatedAt),
     };
 
     const existing = grouped.get(key) || [];
