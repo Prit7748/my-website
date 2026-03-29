@@ -1,13 +1,17 @@
 import type { Metadata, Viewport } from "next";
+import Script from "next/script";
 import { Outfit } from "next/font/google";
 import "./globals.css";
 import { CartProvider } from "../context/CartContext";
+import AnalyticsProvider from "../components/AnalyticsProvider";
 
 const outfit = Outfit({
   subsets: ["latin"],
   display: "swap",
   variable: "--font-outfit",
 });
+
+const GA_ID = (process.env.NEXT_PUBLIC_GA_MEASUREMENT_ID || "").trim();
 
 export const viewport: Viewport = {
   width: "device-width",
@@ -52,7 +56,31 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="en" className={outfit.variable} suppressHydrationWarning>
       <body className="min-h-screen bg-white text-slate-900 antialiased">
-        <CartProvider>{children}</CartProvider>
+        {GA_ID ? (
+          <>
+            <Script
+              src={`https://www.googletagmanager.com/gtag/js?id=${GA_ID}`}
+              strategy="afterInteractive"
+            />
+            <Script id="ga4-init" strategy="afterInteractive">
+              {`
+                window.dataLayer = window.dataLayer || [];
+                function gtag(){window.dataLayer.push(arguments);}
+                window.gtag = window.gtag || gtag;
+                gtag('js', new Date());
+                gtag('config', '${GA_ID}', {
+                  send_page_view: false,
+                  anonymize_ip: true
+                });
+              `}
+            </Script>
+          </>
+        ) : null}
+
+        <CartProvider>
+          <AnalyticsProvider />
+          {children}
+        </CartProvider>
       </body>
     </html>
   );

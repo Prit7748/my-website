@@ -1,19 +1,46 @@
+// ✅ FILE: app/api/auth/register/route.ts (COMPLETE REPLACE)
 import { NextResponse } from "next/server";
 import bcrypt from "bcryptjs";
 import dbConnect from "@/lib/db";
 import User from "@/models/User";
 
+export const runtime = "nodejs";
+
+function safeStr(x: any) {
+  return String(x ?? "").trim();
+}
+
+function normPhone(x: any) {
+  // keep digits and + only
+  return safeStr(x).replace(/[^\d+]/g, "");
+}
+
+function isValidPhone(p: string) {
+  // minimal safe validation: 10-15 digits (optionally + at start)
+  const digits = p.startsWith("+") ? p.slice(1) : p;
+  if (!/^\d+$/.test(digits)) return false;
+  return digits.length >= 10 && digits.length <= 15;
+}
 
 export async function POST(req: Request) {
   try {
     const body = await req.json();
-    const name = (body?.name || "").toString().trim();
-    const email = (body?.email || "").toString().trim().toLowerCase();
-    const password = (body?.password || "").toString();
 
-    if (!email || !password) {
+    const name = safeStr(body?.name);
+    const email = safeStr(body?.email).toLowerCase();
+    const phone = normPhone(body?.phone);
+    const password = String(body?.password ?? "");
+
+    if (!email || !phone || !password) {
       return NextResponse.json(
-        { error: "Email and password are required" },
+        { error: "Email, phone and password are required" },
+        { status: 400 }
+      );
+    }
+
+    if (!isValidPhone(phone)) {
+      return NextResponse.json(
+        { error: "Please enter a valid phone number (10-15 digits)" },
         { status: 400 }
       );
     }
@@ -27,12 +54,14 @@ export async function POST(req: Request) {
 
     await dbConnect();
 
-    const existing = await User.findOne({ email });
-    if (existing) {
-      return NextResponse.json(
-        { error: "Email already registered" },
-        { status: 409 }
-      );
+    const existingEmail = await User.findOne({ email }).lean();
+    if (existingEmail) {
+      return NextResponse.json({ error: "Email already registered" }, { status: 409 });
+    }
+
+    const existingPhone = await User.findOne({ phone }).lean();
+    if (existingPhone) {
+      return NextResponse.json({ error: "Phone already registered" }, { status: 409 });
     }
 
     const passwordHash = await bcrypt.hash(password, 10);
@@ -40,6 +69,7 @@ export async function POST(req: Request) {
     const user = await User.create({
       name,
       email,
+      phone,
       passwordHash,
       role: "user",
     });
@@ -47,7 +77,13 @@ export async function POST(req: Request) {
     return NextResponse.json(
       {
         message: "Registered successfully",
-        user: { id: user._id.toString(), name: user.name, email: user.email, role: user.role },
+        user: {
+          id: user._id.toString(),
+          name: user.name,
+          email: user.email,
+          phone: user.phone,
+          role: user.role,
+        },
       },
       { status: 201 }
     );

@@ -1,7 +1,6 @@
-// ✅ FILE PATH: app/handwritten-hardcopy/HandwrittenHardcopyClient.tsx
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -29,25 +28,27 @@ import FloatingButtons from "@/components/FloatingButtons";
 import FilterSidebar from "@/components/solved-assignments/FilterSidebar";
 import SortBar from "@/components/solved-assignments/SortBar";
 import ProductGrid from "@/components/solved-assignments/ProductGrid";
-import Pagination from "@/components/solved-assignments/Pagination";
 
 const HARDCOPY = "Handwritten Hardcopy (Delivery)";
 
-function safeSplitComma(v: string | null) {
+function safeSplitComma(v: string | null): string[] {
   return (v || "")
     .split(",")
-    .map((x) => x.trim())
-    .filter(Boolean);
+    .map((x: string) => x.trim())
+    .filter((x: string) => Boolean(x));
 }
 
-// ✅ English policy (better tone)
 const INTEGRITY_NOTE =
   "We do not provide illegal or cheating services. We only convert the content/outline/points/data shared by the student into a neat handwritten format and deliver it. The final academic submission remains the student’s responsibility.";
 
 type SampleImg = { src: string; alt: string };
 
-// ✅ Temporary local sample images (later you can load from DB/API)
-const SAMPLE_IMAGES: SampleImg[] = [
+type HandwritingSampleApiItem = {
+  imageUrl?: string;
+  alt?: string;
+};
+
+const FALLBACK_SAMPLE_IMAGES: SampleImg[] = [
   { src: "/samples/handwriting/1.jpg", alt: "Handwriting sample page 1" },
   { src: "/samples/handwriting/2.jpg", alt: "Handwriting sample page 2" },
   { src: "/samples/handwriting/3.jpg", alt: "Handwriting sample page 3" },
@@ -59,9 +60,13 @@ function SamplesSlider({ images, href }: { images: SampleImg[]; href: string }) 
 
   useEffect(() => {
     if (!images?.length) return;
+
+    setIdx(0);
+
     const t = setInterval(() => {
       setIdx((p) => (p + 1) % images.length);
     }, 2500);
+
     return () => clearInterval(t);
   }, [images]);
 
@@ -126,6 +131,8 @@ export default function HandwrittenHardcopyClient() {
   const searchParams = useSearchParams();
 
   const [isFilterOpen, setIsFilterOpen] = useState(false);
+  const [sampleImages, setSampleImages] =
+    useState<SampleImg[]>(FALLBACK_SAMPLE_IMAGES);
 
   const [meta, setMeta] = useState({
     total: 0,
@@ -138,6 +145,7 @@ export default function HandwrittenHardcopyClient() {
   const urlCourse = (searchParams.get("course") || "").trim();
   const urlSession = (searchParams.get("session") || "").trim();
   const urlSearch = (searchParams.get("search") || "").trim();
+  const urlPage = Math.max(1, Number(searchParams.get("page") || "1") || 1);
 
   const [selectedCat, setSelectedCat] = useState<string[]>(
     urlCategory ? safeSplitComma(urlCategory) : [HARDCOPY]
@@ -181,17 +189,43 @@ export default function HandwrittenHardcopyClient() {
     params.delete("page");
 
     const qs = params.toString();
-    router.replace(`/handwritten-hardcopy${qs ? `?${qs}` : ""}`, { scroll: false });
+    router.replace(`/handwritten-hardcopy${qs ? `?${qs}` : ""}`, {
+      scroll: false,
+    });
+  };
+
+  const syncHardcopyPage = (nextPage: number) => {
+    const safePage = Math.max(1, nextPage || 1);
+    const params = new URLSearchParams(searchParams.toString());
+
+    params.set("category", HARDCOPY);
+
+    if (selectedCourse) params.set("course", selectedCourse);
+    else params.delete("course");
+
+    if (selectedSession) params.set("session", selectedSession);
+    else params.delete("session");
+
+    if (search) params.set("search", search);
+    else params.delete("search");
+
+    if (safePage > 1) params.set("page", String(safePage));
+    else params.delete("page");
+
+    const qs = params.toString();
+    router.replace(`/handwritten-hardcopy${qs ? `?${qs}` : ""}`, {
+      scroll: false,
+    });
   };
 
   const handleToggleCategory = (cat: string) => {
     const current = Array.isArray(selectedCat) ? selectedCat : [HARDCOPY];
     const next = current.includes(cat)
-      ? current.filter((c) => c !== cat)
+      ? current.filter((c: string) => c !== cat)
       : [...current, cat];
     const normalized = next.length === 0 ? [HARDCOPY] : next;
 
-    const hasOther = normalized.some((c) => c !== HARDCOPY);
+    const hasOther = normalized.some((c: string) => c !== HARDCOPY);
     const isMultiple = normalized.length > 1;
 
     if (hasOther || isMultiple) {
@@ -208,8 +242,9 @@ export default function HandwrittenHardcopyClient() {
     const course = (searchParams.get("course") || "").trim();
     const session = (searchParams.get("session") || "").trim();
     const qSearch = (searchParams.get("search") || "").trim();
+    const page = Math.max(1, Number(searchParams.get("page") || "1") || 1);
 
-    const hasOther = c.some((x) => x !== HARDCOPY);
+    const hasOther = c.some((x: string) => x !== HARDCOPY);
     const isMultiple = c.length > 1;
 
     if (hasOther || isMultiple) {
@@ -224,6 +259,7 @@ export default function HandwrittenHardcopyClient() {
     setSelectedSession(session);
     setSearchInput(qSearch);
     setSearch(qSearch);
+    setMeta((prev) => ({ ...prev, page }));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
 
@@ -238,7 +274,45 @@ export default function HandwrittenHardcopyClient() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchInput]);
 
-  const breadcrumbText = useMemo(() => HARDCOPY, []);
+  useEffect(() => {
+    let active = true;
+
+    async function loadSamples() {
+      try {
+        const res = await fetch("/api/site-settings/handwriting-samples", {
+          cache: "no-store",
+        });
+
+        if (!res.ok) throw new Error("Failed to load samples");
+
+        const data = await res.json();
+        const items: HandwritingSampleApiItem[] = Array.isArray(data?.items)
+          ? (data.items as HandwritingSampleApiItem[])
+          : [];
+
+        const next: SampleImg[] = items
+          .map((item: HandwritingSampleApiItem): SampleImg => ({
+            src: String(item?.imageUrl || "").trim(),
+            alt: String(item?.alt || "Handwriting sample").trim(),
+          }))
+          .filter((x: SampleImg) => Boolean(x.src));
+
+        if (!active) return;
+
+        if (next.length > 0) setSampleImages(next);
+        else setSampleImages(FALLBACK_SAMPLE_IMAGES);
+      } catch (error) {
+        console.error("Failed to load handwriting samples:", error);
+        if (active) setSampleImages(FALLBACK_SAMPLE_IMAGES);
+      }
+    }
+
+    loadSamples();
+
+    return () => {
+      active = false;
+    };
+  }, []);
 
   useEffect(() => {
     document.body.style.overflow = isFilterOpen ? "hidden" : "auto";
@@ -248,21 +322,42 @@ export default function HandwrittenHardcopyClient() {
     <main className="min-h-screen font-sans text-slate-800 bg-white">
       <style jsx global>{`
         @keyframes floaty {
-          0% { transform: translate3d(0, 0, 0); }
-          50% { transform: translate3d(0, -10px, 0); }
-          100% { transform: translate3d(0, 0, 0); }
+          0% {
+            transform: translate3d(0, 0, 0);
+          }
+          50% {
+            transform: translate3d(0, -10px, 0);
+          }
+          100% {
+            transform: translate3d(0, 0, 0);
+          }
         }
         @keyframes shimmer {
-          0% { background-position: 0% 50%; }
-          50% { background-position: 100% 50%; }
-          100% { background-position: 0% 50%; }
+          0% {
+            background-position: 0% 50%;
+          }
+          50% {
+            background-position: 100% 50%;
+          }
+          100% {
+            background-position: 0% 50%;
+          }
         }
         .isp-grid {
-          background-image: radial-gradient(circle at 1px 1px, rgba(15, 23, 42, 0.07) 1px, transparent 0);
+          background-image: radial-gradient(
+            circle at 1px 1px,
+            rgba(15, 23, 42, 0.07) 1px,
+            transparent 0
+          );
           background-size: 22px 22px;
         }
-        .isp-floaty { animation: floaty 6s ease-in-out infinite; }
-        .isp-shimmer { background-size: 200% 200%; animation: shimmer 10s ease-in-out infinite; }
+        .isp-floaty {
+          animation: floaty 6s ease-in-out infinite;
+        }
+        .isp-shimmer {
+          background-size: 200% 200%;
+          animation: shimmer 10s ease-in-out infinite;
+        }
       `}</style>
 
       <TopBar />
@@ -274,7 +369,9 @@ export default function HandwrittenHardcopyClient() {
             Home
           </Link>
           <ChevronRight size={14} className="text-gray-300" />
-          <span className="text-blue-700 font-extrabold">Handwritten Hardcopy (Delivery)</span>
+          <span className="text-blue-700 font-extrabold">
+            Handwritten Hardcopy (Delivery)
+          </span>
         </div>
       </div>
 
@@ -313,6 +410,11 @@ export default function HandwrittenHardcopyClient() {
                     Session: {selectedSession}
                   </span>
                 )}
+                {search && (
+                  <span className="px-3 py-1 rounded-full bg-white/85 backdrop-blur border border-gray-200 text-gray-700 text-xs md:text-sm font-bold shadow-sm">
+                    Search: {search}
+                  </span>
+                )}
               </div>
 
               <div className="mt-5 grid grid-cols-2 md:grid-cols-4 gap-2">
@@ -327,14 +429,15 @@ export default function HandwrittenHardcopyClient() {
                     className="rounded-2xl border border-gray-200 bg-white/90 backdrop-blur shadow-sm px-3 py-2 flex items-center gap-2"
                   >
                     {x.i}
-                    <div className="text-[11px] md:text-xs font-extrabold text-slate-800">{x.t}</div>
+                    <div className="text-[11px] md:text-xs font-extrabold text-slate-800">
+                      {x.t}
+                    </div>
                   </div>
                 ))}
               </div>
 
-              {/* ✅ Samples slider: placed in HERO after key trust points (noticeable + SEO-friendly, but not overpowering) */}
               <div className="mt-5">
-                <SamplesSlider images={SAMPLE_IMAGES} href="/handwriting-samples" />
+                <SamplesSlider images={sampleImages} href="/handwriting-samples" />
               </div>
 
               <div className="mt-5 md:hidden space-y-3">
@@ -479,19 +582,51 @@ export default function HandwrittenHardcopyClient() {
                 <ProductGrid selectedCat={[HARDCOPY]} onMeta={setMeta} />
               </div>
 
-              <div className="mt-6">
-                <Pagination page={meta.page} totalPages={meta.totalPages} />
-              </div>
+              {meta.totalPages > 1 ? (
+                <div className="mt-6 flex items-center justify-center gap-3">
+                  <button
+                    disabled={meta.page <= 1}
+                    onClick={() => syncHardcopyPage(Math.max(1, meta.page - 1))}
+                    className={`px-4 py-2 rounded-xl border text-xs font-extrabold ${
+                      meta.page <= 1
+                        ? "border-gray-200 text-gray-400 bg-gray-100"
+                        : "border-gray-200 bg-white hover:bg-gray-50 text-slate-800"
+                    }`}
+                    type="button"
+                  >
+                    Prev
+                  </button>
 
-              {/* ✅ Subtle policy box */}
+                  <div className="text-xs font-extrabold text-slate-700">
+                    Page {meta.page} / {meta.totalPages}
+                  </div>
+
+                  <button
+                    disabled={meta.page >= meta.totalPages}
+                    onClick={() =>
+                      syncHardcopyPage(Math.min(meta.totalPages, meta.page + 1))
+                    }
+                    className={`px-4 py-2 rounded-xl border text-xs font-extrabold ${
+                      meta.page >= meta.totalPages
+                        ? "border-gray-200 text-gray-400 bg-gray-100"
+                        : "border-gray-200 bg-white hover:bg-gray-50 text-slate-800"
+                    }`}
+                    type="button"
+                  >
+                    Next
+                  </button>
+                </div>
+              ) : null}
+
               <div className="mt-8 rounded-2xl border border-gray-200 bg-white/90 backdrop-blur p-4">
-                <div className="text-[12px] font-extrabold text-slate-800">Academic Integrity Note</div>
+                <div className="text-[12px] font-extrabold text-slate-800">
+                  Academic Integrity Note
+                </div>
                 <div className="mt-1 text-[12px] text-slate-600 font-semibold leading-relaxed">
                   {INTEGRITY_NOTE}
                 </div>
               </div>
 
-              {/* ✅ Delivery info SEO */}
               <div className="mt-4 rounded-2xl border border-gray-200 bg-gray-50 p-4">
                 <div className="text-sm font-extrabold text-slate-900">Delivery & Packing</div>
                 <div className="mt-1 text-sm text-slate-600 font-semibold leading-relaxed">
@@ -499,7 +634,6 @@ export default function HandwrittenHardcopyClient() {
                 </div>
               </div>
 
-              {/* ✅ Sample product testing tip (no fake product injected; shows what to test) */}
               <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-4">
                 <div className="text-sm font-extrabold text-slate-900">Test Product Tip</div>
                 <div className="mt-1 text-sm text-slate-600 font-semibold leading-relaxed">
@@ -516,7 +650,9 @@ export default function HandwrittenHardcopyClient() {
         <div className="max-w-[1600px] mx-auto px-4 pt-10">
           <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 md:p-6 flex flex-col md:flex-row items-start md:items-center justify-between gap-4">
             <div className="min-w-0">
-              <div className="text-lg font-extrabold text-slate-900">Want to browse everything?</div>
+              <div className="text-lg font-extrabold text-slate-900">
+                Want to browse everything?
+              </div>
               <div className="mt-1 text-sm font-semibold text-slate-600">
                 Explore all categories in one place (Solved Assignments, PYQ, Guess Papers, Ebooks, Projects, Combo, etc).
               </div>
@@ -531,7 +667,9 @@ export default function HandwrittenHardcopyClient() {
         </div>
 
         <div className="max-w-[1600px] mx-auto px-4 py-12 md:py-16">
-          <h2 className="text-2xl md:text-3xl font-extrabold text-slate-900 mb-6">Why Choose Us?</h2>
+          <h2 className="text-2xl md:text-3xl font-extrabold text-slate-900 mb-6">
+            Why Choose Us?
+          </h2>
           <div className="grid md:grid-cols-3 gap-4">
             {[
               { t: "Neat Handwriting", d: "Readable, clean formatting for submission." },

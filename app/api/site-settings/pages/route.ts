@@ -119,8 +119,10 @@ const DEFAULTS: Record<
 
 async function ensureDefaults() {
   const keys = Object.keys(DEFAULTS);
+
   for (const key of keys) {
     const d = DEFAULTS[key];
+
     await PolicyPage.updateOne(
       { key },
       {
@@ -129,7 +131,7 @@ async function ensureDefaults() {
           title: d.title,
           subtitle: d.subtitle,
           contentHtml: d.contentHtml,
-          isEnabled: false, // ✅ start disabled
+          isEnabled: false,
         },
       },
       { upsert: true }
@@ -137,16 +139,25 @@ async function ensureDefaults() {
   }
 }
 
-// ✅ GET list (admin)
-export async function GET(req: NextRequest) {
+async function ensureAdminOrFail() {
+  const auth = await requireAdmin();
+
+  if (!auth.ok) {
+    return NextResponse.json({ error: auth.error }, { status: auth.status });
+  }
+
+  return null;
+}
+
+export async function GET(_req: NextRequest) {
   try {
-    await requireAdmin(); // ✅ IMPORTANT: no args (fixes “Expected 0 arguments…”)
+    const denied = await ensureAdminOrFail();
+    if (denied) return denied;
+
     await dbConnect();
     await ensureDefaults();
 
-    const rows = await PolicyPage.find({})
-      .sort({ key: 1 })
-      .lean();
+    const rows = await PolicyPage.find({}).sort({ key: 1 }).lean();
 
     return NextResponse.json(rows || []);
   } catch (e: any) {
@@ -154,16 +165,19 @@ export async function GET(req: NextRequest) {
   }
 }
 
-// ✅ POST create (optional) - mostly not needed because we auto-seed defaults,
-// but keeping for future custom pages
 export async function POST(req: NextRequest) {
   try {
-    await requireAdmin();
+    const denied = await ensureAdminOrFail();
+    if (denied) return denied;
+
     await dbConnect();
 
     const body = await req.json().catch(() => ({}));
     const key = safeStr(body?.key);
-    if (!key) return NextResponse.json({ error: "key required" }, { status: 400 });
+
+    if (!key) {
+      return NextResponse.json({ error: "key required" }, { status: 400 });
+    }
 
     const title = safeStr(body?.title) || key;
     const subtitle = safeStr(body?.subtitle || "");

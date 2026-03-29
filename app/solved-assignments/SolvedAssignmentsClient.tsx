@@ -1,13 +1,12 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef, useCallback } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   Filter,
   Check,
   Sparkles,
-  ShieldCheck,
   Zap,
   BadgeCheck,
   ChevronRight,
@@ -27,97 +26,137 @@ import Pagination from "@/components/solved-assignments/Pagination";
 
 const SOLVED = "Solved Assignments";
 
-function safeSplitComma(v: string | null) {
+function safeSplitComma(v: string | null | undefined) {
   return (v || "")
     .split(",")
     .map((x) => x.trim())
     .filter(Boolean);
 }
 
-export default function SolvedAssignmentsClient() {
+function sameStringArray(a: string[], b: string[]) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
+type SolvedAssignmentsClientProps = {
+  initialCategoryParam?: string;
+  initialCourseParam?: string;
+  initialSessionParam?: string;
+  initialSearchParam?: string;
+  initialPageParam?: string;
+};
+
+export default function SolvedAssignmentsClient({
+  initialCategoryParam = "",
+  initialCourseParam = "",
+  initialSessionParam = "",
+  initialSearchParam = "",
+  initialPageParam = "1",
+}: SolvedAssignmentsClientProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
+
+  const didInitialUrlSyncRef = useRef(false);
+
+  const initialCategories = useMemo(() => {
+    const parsed = initialCategoryParam ? safeSplitComma(initialCategoryParam) : [SOLVED];
+    return parsed.length ? parsed : [SOLVED];
+  }, [initialCategoryParam]);
+
+  const initialPageNum = useMemo(() => {
+    return Math.max(1, Number(initialPageParam || "1") || 1);
+  }, [initialPageParam]);
+
+  const solvedOnlyCat = useMemo(() => [SOLVED], []);
 
   const [isFilterOpen, setIsFilterOpen] = useState(false);
 
   const [meta, setMeta] = useState({
     total: 0,
-    page: 1,
+    page: initialPageNum,
     totalPages: 1,
     limit: 24,
   });
 
-  const urlCategory = searchParams.get("category");
-  const urlCourse = searchParams.get("course") || "";
-  const urlSession = searchParams.get("session") || "";
-  const urlSearch = (searchParams.get("search") || "").trim();
+  const [selectedCat, setSelectedCat] = useState<string[]>(initialCategories);
+  const [selectedCourse, setSelectedCourse] = useState<string>(initialCourseParam);
+  const [selectedSession, setSelectedSession] = useState<string>(initialSessionParam);
+  const [searchInput, setSearchInput] = useState<string>(initialSearchParam.trim());
+  const [search, setSearch] = useState<string>(initialSearchParam.trim());
 
-  const [selectedCat, setSelectedCat] = useState<string[]>(
-    urlCategory ? safeSplitComma(urlCategory) : [SOLVED]
+  const breadcrumbText = useMemo(() => SOLVED, []);
+
+  const redirectToProducts = useCallback(
+    (nextCat: string[]) => {
+      const params = new URLSearchParams(searchParams.toString());
+
+      if (nextCat.length > 0) params.set("category", nextCat.join(","));
+      else params.delete("category");
+
+      params.delete("page");
+
+      const qs = params.toString();
+      router.push(`/products${qs ? `?${qs}` : ""}`);
+    },
+    [router, searchParams]
   );
 
-  const [selectedCourse, setSelectedCourse] = useState<string>(urlCourse);
-  const [selectedSession, setSelectedSession] = useState<string>(urlSession);
+  const syncSolvedAssignmentsUrl = useCallback(
+    (nextCourse: string, nextSession: string, nextSearch: string) => {
+      const params = new URLSearchParams(searchParams.toString());
 
-  const [searchInput, setSearchInput] = useState<string>(urlSearch);
-  const [search, setSearch] = useState<string>(urlSearch);
+      params.set("category", SOLVED);
 
-  const redirectToProducts = (nextCat: string[]) => {
-    const params = new URLSearchParams(searchParams.toString());
+      if (nextCourse) params.set("course", nextCourse);
+      else params.delete("course");
 
-    if (nextCat.length > 0) params.set("category", nextCat.join(","));
-    else params.delete("category");
+      if (nextSession) params.set("session", nextSession);
+      else params.delete("session");
 
-    params.delete("page");
+      if (nextSearch) params.set("search", nextSearch);
+      else params.delete("search");
 
-    const qs = params.toString();
-    router.push(`/products${qs ? `?${qs}` : ""}`);
-  };
+      params.delete("page");
 
-  const syncSolvedAssignmentsUrl = (nextCourse: string, nextSession: string, nextSearch: string) => {
-    const params = new URLSearchParams(searchParams.toString());
+      const qs = params.toString();
+      router.replace(`/solved-assignments${qs ? `?${qs}` : ""}`, { scroll: false });
+    },
+    [router, searchParams]
+  );
 
-    params.set("category", SOLVED);
+  const handleToggleCategory = useCallback(
+    (cat: string) => {
+      const current = Array.isArray(selectedCat) ? selectedCat : [SOLVED];
 
-    if (nextCourse) params.set("course", nextCourse);
-    else params.delete("course");
+      const next = current.includes(cat)
+        ? current.filter((c) => c !== cat)
+        : [...current, cat];
 
-    if (nextSession) params.set("session", nextSession);
-    else params.delete("session");
+      const normalized = next.length === 0 ? [SOLVED] : next;
 
-    if (nextSearch) params.set("search", nextSearch);
-    else params.delete("search");
+      const hasOther = normalized.some((c) => c !== SOLVED);
+      const isMultiple = normalized.length > 1;
 
-    params.delete("page");
+      if (hasOther || isMultiple) {
+        redirectToProducts(normalized);
+        return;
+      }
 
-    const qs = params.toString();
-    router.replace(`/solved-assignments${qs ? `?${qs}` : ""}`, { scroll: false });
-  };
-
-  const handleToggleCategory = (cat: string) => {
-    const current = Array.isArray(selectedCat) ? selectedCat : [SOLVED];
-
-    const next = current.includes(cat) ? current.filter((c) => c !== cat) : [...current, cat];
-
-    const normalized = next.length === 0 ? [SOLVED] : next;
-
-    const hasOther = normalized.some((c) => c !== SOLVED);
-    const isMultiple = normalized.length > 1;
-
-    if (hasOther || isMultiple) {
-      redirectToProducts(normalized);
-      return;
-    }
-
-    setSelectedCat([SOLVED]);
-    syncSolvedAssignmentsUrl(selectedCourse, selectedSession, search);
-  };
+      setSelectedCat([SOLVED]);
+      syncSolvedAssignmentsUrl(selectedCourse, selectedSession, search);
+    },
+    [redirectToProducts, search, selectedCat, selectedCourse, selectedSession, syncSolvedAssignmentsUrl]
+  );
 
   useEffect(() => {
     const c = safeSplitComma(searchParams.get("category"));
     const course = (searchParams.get("course") || "").trim();
     const session = (searchParams.get("session") || "").trim();
     const qSearch = (searchParams.get("search") || "").trim();
+    const pageNum = Math.max(1, Number(searchParams.get("page") || "1") || 1);
 
     const hasOther = c.some((x) => x !== SOLVED);
     const isMultiple = c.length > 1;
@@ -129,32 +168,63 @@ export default function SolvedAssignmentsClient() {
       return;
     }
 
-    setSelectedCat([SOLVED]);
-    setSelectedCourse(course);
-    setSelectedSession(session);
+    const normalizedCats = [SOLVED];
 
-    setSearchInput(qSearch);
-    setSearch(qSearch);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchParams]);
+    if (!didInitialUrlSyncRef.current) {
+      didInitialUrlSyncRef.current = true;
+
+      const sameCats = sameStringArray(normalizedCats, selectedCat);
+      const sameCourse = course === selectedCourse;
+      const sameSession = session === selectedSession;
+      const sameSearchInput = qSearch === searchInput;
+      const sameSearch = qSearch === search;
+      const samePage = pageNum === meta.page;
+
+      if (sameCats && sameCourse && sameSession && sameSearchInput && sameSearch && samePage) {
+        return;
+      }
+    }
+
+    if (!sameStringArray(selectedCat, normalizedCats)) {
+      setSelectedCat(normalizedCats);
+    }
+
+    if (selectedCourse !== course) {
+      setSelectedCourse(course);
+    }
+
+    if (selectedSession !== session) {
+      setSelectedSession(session);
+    }
+
+    if (searchInput !== qSearch) {
+      setSearchInput(qSearch);
+    }
+
+    if (search !== qSearch) {
+      setSearch(qSearch);
+    }
+
+    setMeta((prev) => (prev.page === pageNum ? prev : { ...prev, page: pageNum }));
+  }, [searchParams, router]);
 
   useEffect(() => {
-    const t = setTimeout(() => {
+    const t = window.setTimeout(() => {
       const q = searchInput.trim();
       if (q === search) return;
       setSearch(q);
       syncSolvedAssignmentsUrl(selectedCourse, selectedSession, q);
     }, 500);
 
-    return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [searchInput]);
-
-  const breadcrumbText = useMemo(() => SOLVED, []);
+    return () => window.clearTimeout(t);
+  }, [searchInput, search, selectedCourse, selectedSession, syncSolvedAssignmentsUrl]);
 
   useEffect(() => {
-    if (isFilterOpen) document.body.style.overflow = "hidden";
-    else document.body.style.overflow = "auto";
+    document.body.style.overflow = isFilterOpen ? "hidden" : "auto";
+
+    return () => {
+      document.body.style.overflow = "auto";
+    };
   }, [isFilterOpen]);
 
   return (
@@ -238,12 +308,15 @@ export default function SolvedAssignmentsClient() {
                 <button
                   onClick={() => setIsFilterOpen(true)}
                   className="w-full rounded-2xl bg-blue-600 text-white font-extrabold py-3.5 shadow-lg active:scale-[0.99] transition flex items-center justify-center gap-2"
+                  type="button"
                 >
-                  <Filter size={18} /> Filter & Sort
+                  <Filter size={18} /> Open Filters & Search
                 </button>
 
                 <div className="w-full rounded-2xl border border-gray-200 bg-white/90 backdrop-blur shadow-sm p-3">
-                  <div className="text-[11px] font-extrabold text-slate-700 uppercase mb-2">Search assignments</div>
+                  <div className="text-[11px] font-extrabold text-slate-700 uppercase mb-2">
+                    Quick Search
+                  </div>
                   <div className="flex items-center gap-2 px-3 py-2.5 rounded-xl border border-gray-200 bg-white">
                     <Search size={18} className="text-gray-400" />
                     <input
@@ -256,6 +329,7 @@ export default function SolvedAssignmentsClient() {
                       <button
                         onClick={() => setSearchInput("")}
                         className="h-8 w-8 rounded-lg hover:bg-gray-100 flex items-center justify-center text-gray-500"
+                        type="button"
                       >
                         <X size={16} />
                       </button>
@@ -312,7 +386,7 @@ export default function SolvedAssignmentsClient() {
             <div className="hidden lg:block w-[360px] flex-shrink-0 self-start z-30">
               <FilterSidebar
                 className="border border-gray-200 rounded-2xl shadow-sm bg-white"
-                selectedCat={[SOLVED]}
+                selectedCat={solvedOnlyCat}
                 onToggleCategory={handleToggleCategory}
               />
             </div>
@@ -323,14 +397,15 @@ export default function SolvedAssignmentsClient() {
                 onClick={() => setIsFilterOpen(false)}
               />
             )}
+
             <div
-              className={`lg:hidden fixed top-0 left-0 z-[1000] h-full w-[85%] max-w-[360px] bg-white shadow-2xl transition-transform duration-300 ease-out ${
+              className={`lg:hidden fixed top-0 left-0 z-[1000] h-full w-[88%] max-w-[380px] bg-white shadow-2xl transition-transform duration-300 ease-out ${
                 isFilterOpen ? "translate-x-0" : "-translate-x-full"
               }`}
             >
               <FilterSidebar
                 closeFilter={() => setIsFilterOpen(false)}
-                selectedCat={[SOLVED]}
+                selectedCat={solvedOnlyCat}
                 onToggleCategory={handleToggleCategory}
               />
             </div>
@@ -341,7 +416,7 @@ export default function SolvedAssignmentsClient() {
               </div>
 
               <div className="mt-5">
-                <ProductGrid selectedCat={[SOLVED]} onMeta={setMeta} search={search} />
+                <ProductGrid selectedCat={solvedOnlyCat} onMeta={setMeta} search={search} />
               </div>
 
               <div className="mt-6">
@@ -357,7 +432,9 @@ export default function SolvedAssignmentsClient() {
           <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5 md:p-6 relative overflow-hidden">
             <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
               <div className="min-w-0">
-                <div className="text-lg md:text-xl font-extrabold text-slate-900">Want to browse everything?</div>
+                <div className="text-lg md:text-xl font-extrabold text-slate-900">
+                  Want to browse everything?
+                </div>
                 <div className="mt-1 text-sm font-semibold text-slate-600">
                   Explore all categories in one place (Ebooks, Projects, PYQ, Combo, etc).
                 </div>

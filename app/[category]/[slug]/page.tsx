@@ -1,6 +1,6 @@
 // ✅ FILE: app/[category]/[slug]/page.tsx  (Complete Replace)
-// NOTE: fetchProduct() is now DB-direct (NO internal API fetch).
-// Everything else kept same (SEO, JSON-LD, redirect, ProductDetailsClient).
+// NOTE: fetchProduct() is DB-direct (NO internal API fetch).
+// FIX: availability fields are now passed to ProductDetailsClient + JSON-LD offer availability is dynamic.
 
 import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
@@ -42,25 +42,23 @@ type ApiProduct = {
   thumbnailUrl?: string;
   quickUrl?: string;
 
-  // ✅ future (optional)
+  // ✅ availability support (IMPORTANT for details page)
+  availability?: string;
+  effectiveAvailability?: string;
+  comingSoonSalesEnabled?: boolean;
+
+  // optional
   videoUrl?: string;
   comboItems?: Array<{ title: string; slug: string; category?: string; price?: number; thumbUrl?: string }>;
 };
 
 function siteUrl() {
-  // ✅ Hardened: if user accidentally saves without scheme, we auto-fix
   let base = process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "http://localhost:3000";
   base = String(base || "").trim().replace(/\/+$/, "");
 
-  // If scheme missing -> auto add
   if (!/^https?:\/\//i.test(base)) {
-    // localhost/dev should be http
-    if (base.startsWith("localhost") || base.startsWith("127.0.0.1")) {
-      base = `http://${base}`;
-    } else {
-      // production domain should be https
-      base = `https://${base}`;
-    }
+    if (base.startsWith("localhost") || base.startsWith("127.0.0.1")) base = `http://${base}`;
+    else base = `https://${base}`;
   }
 
   return base.replace(/\/+$/, "");
@@ -84,12 +82,8 @@ async function resolveParams<T extends Record<string, any>>(params: any): Promis
   return params as T;
 }
 
-/**
- * ✅ Keep same (your note)
- */
 export const dynamic = "force-dynamic";
 
-// ✅ Same mapping as your ProductDetailsClient (keep consistent)
 function categoryLabelFromSlug(categorySlug: string) {
   const map: Record<string, string> = {
     "solved-assignments": "Solved Assignments",
@@ -105,10 +99,7 @@ function categoryLabelFromSlug(categorySlug: string) {
   return map[categorySlug] || categorySlug.replaceAll("-", " ");
 }
 
-// ✅ Decide variant by categorySlug
-function variantFromCategorySlug(
-  categorySlug: string
-): "digital" | "hardcopy" | "pyq" | "projects" | "combo" {
+function variantFromCategorySlug(categorySlug: string): "digital" | "hardcopy" | "pyq" | "projects" | "combo" {
   if (categorySlug === "handwritten-hardcopy") return "hardcopy";
   if (categorySlug === "combo") return "combo";
   if (categorySlug === "projects") return "projects";
@@ -116,18 +107,15 @@ function variantFromCategorySlug(
   return "digital";
 }
 
-/* =========================
-   ✅ DB DIRECT FETCH (FIX)
-   ========================= */
+function normAvail(v?: string) {
+  return safeText(v).toLowerCase();
+}
+
 async function fetchProduct(slug: string) {
   await dbConnect();
-
-  // only non-trashed products should show publicly
   const doc: any = await Product.findOne({ slug, deletedAt: null }).lean();
 
-  if (!doc) {
-    return { product: null as ApiProduct | null, status: 404 };
-  }
+  if (!doc) return { product: null as ApiProduct | null, status: 404 };
 
   const product: ApiProduct = {
     _id: String(doc._id),
@@ -155,19 +143,21 @@ async function fetchProduct(slug: string) {
     importantNote: safeText(doc.importantNote),
 
     isDigital: Boolean(doc.isDigital ?? true),
-
-    // keep legacy compatibility (client may still read pdfUrl)
     pdfUrl: safeText(doc.pdfUrl),
 
     images: Array.isArray(doc.images) ? doc.images.map((x: any) => safeText(x)).filter(Boolean) : [],
     thumbnailUrl: safeText(doc.thumbnailUrl),
     quickUrl: safeText(doc.quickUrl),
+
+    // ✅ pass availability to client (CRITICAL)
+    availability: safeText(doc.availability),
+    effectiveAvailability: safeText(doc.effectiveAvailability),
+    comingSoonSalesEnabled: Boolean(doc.comingSoonSalesEnabled ?? false),
   };
 
   return { product, status: 200 };
 }
 
-// ✅ Canonical + metadata
 export async function generateMetadata({ params }: { params: any }): Promise<Metadata> {
   const p = await resolveParams<{ category: string; slug: string }>(params);
   const categorySlug = decodeURIComponent(p?.category || "").trim();
@@ -213,7 +203,6 @@ export default async function Page({ params }: { params: any }) {
   const { product } = await fetchProduct(slug);
   if (!product) notFound();
 
-  // ✅ IMPORTANT: Wrong category URL open ho to redirect (canonical + SEO)
   const label = safeText(product.category);
 
   const expectedSlugByLabel: Record<string, string> = {
@@ -249,6 +238,13 @@ export default async function Page({ params }: { params: any }) {
     ...(Array.isArray(product.images) ? product.images : []),
   ].filter(Boolean);
 
+  // ✅ JSON-LD offer availability (SEO)
+  const rawAvail = normAvail(product.availability);
+  const schemaAvailability =
+    rawAvail === "out_of_stock" || rawAvail === "outofstock" || rawAvail === "out-of-stock"
+      ? "https://schema.org/OutOfStock"
+      : "https://schema.org/InStock";
+
   const productJsonLd: any = {
     "@context": "https://schema.org",
     "@type": "Product",
@@ -265,7 +261,7 @@ export default async function Page({ params }: { params: any }) {
       url: productUrl,
       priceCurrency: "INR",
       price: Number(product.price || 0),
-      availability: "https://schema.org/InStock",
+      availability: schemaAvailability,
       itemCondition: "https://schema.org/NewCondition",
     },
   };

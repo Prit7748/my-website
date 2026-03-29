@@ -7,31 +7,33 @@ import { X, Search, Loader2 } from "lucide-react";
 interface FilterSidebarProps {
   className?: string;
   closeFilter?: () => void;
-
-  // ✅ Parent controls categories
   selectedCat: string[];
   onToggleCategory: (cat: string) => void;
-
-  /**
-   * ✅ Primary category for this page (eg: "Solved Assignments" or "Question Papers (PYQ)")
-   * Used for:
-   * - facets fallback
-   * - reset behavior (keep primary selected)
-   */
   primaryCategory?: string;
 }
 
-/** ✅ Keep UI labels exactly same as DB category names */
 const CATEGORIES: string[] = [
   "Solved Assignments",
   "Question Papers (PYQ)",
   "Handwritten PDFs",
   "Ebooks",
-  "Projects",
+  "projects",
   "Guess Papers",
   "Combo",
   "Handwritten Hardcopy (Delivery)",
 ];
+
+function safeText(x: any) {
+  return String(x ?? "").trim();
+}
+
+function sameArray(a: string[], b: string[]) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
 
 export default function FilterSidebar({
   className = "",
@@ -42,25 +44,27 @@ export default function FilterSidebar({
 }: FilterSidebarProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const pathname = usePathname(); // ✅ current page route (fixes redirect issue)
-
-  // URL se existing selected values
-  const selectedCourseFromUrl = (searchParams.get("course") || "").trim();
-  const selectedSessionFromUrl = (searchParams.get("session") || "").trim();
-  const selectedSearchFromUrl = (searchParams.get("search") || "").trim();
+  const pathname = usePathname();
 
   const [courseSearch, setCourseSearch] = useState("");
-  const [selectedCourse, setSelectedCourse] = useState<string>(selectedCourseFromUrl);
-  const [selectedSession, setSelectedSession] = useState<string>(selectedSessionFromUrl);
-
-  // ✅ One search param everywhere (same as page + ProductGrid uses)
-  const [keyword, setKeyword] = useState<string>(selectedSearchFromUrl);
+  const [selectedCourse, setSelectedCourse] = useState<string>(safeText(searchParams.get("course")));
+  const [selectedSession, setSelectedSession] = useState<string>(safeText(searchParams.get("session")));
+  const [keyword, setKeyword] = useState<string>(safeText(searchParams.get("search")));
 
   const [courses, setCourses] = useState<string[]>([]);
   const [sessions, setSessions] = useState<string[]>([]);
   const [loadingFacets, setLoadingFacets] = useState(false);
 
-  // --- Sorting: selected categories first ---
+  useEffect(() => {
+    const nextCourse = safeText(searchParams.get("course"));
+    const nextSession = safeText(searchParams.get("session"));
+    const nextSearch = safeText(searchParams.get("search"));
+
+    setSelectedCourse((prev) => (prev === nextCourse ? prev : nextCourse));
+    setSelectedSession((prev) => (prev === nextSession ? prev : nextSession));
+    setKeyword((prev) => (prev === nextSearch ? prev : nextSearch));
+  }, [searchParams]);
+
   const sortedCategories = useMemo(() => {
     const selectedSet = new Set(selectedCat);
     return [...CATEGORIES].sort((a, b) => {
@@ -71,19 +75,21 @@ export default function FilterSidebar({
     });
   }, [selectedCat]);
 
-  // ✅ Facets scope: selected categories OR primary fallback
   const categoryScope = useMemo(() => {
-    const cats = Array.isArray(selectedCat) ? selectedCat.filter(Boolean) : [];
+    const cats = Array.isArray(selectedCat) ? selectedCat.map(safeText).filter(Boolean) : [];
     return cats.length ? cats : [primaryCategory];
   }, [selectedCat, primaryCategory]);
 
-  // ✅ Facets fetch (courses + sessions)
+  const categoryScopeKey = useMemo(() => categoryScope.join("||"), [categoryScope]);
+
   useEffect(() => {
     let active = true;
+    const controller = new AbortController();
 
     async function loadFacets() {
       try {
         setLoadingFacets(true);
+
         const qs = new URLSearchParams();
         qs.set("category", categoryScope.join(","));
         qs.set("limit", "1");
@@ -93,17 +99,25 @@ export default function FilterSidebar({
           method: "GET",
           credentials: "include",
           cache: "no-store",
+          signal: controller.signal,
         });
+
         const data = await res.json();
+        if (!res.ok) throw new Error(data?.error || data?.message || "Facets fetch failed");
 
         if (!active) return;
 
-        const nextCourses = Array.isArray(data?.facets?.courses) ? data.facets.courses : [];
-        const nextSessions = Array.isArray(data?.facets?.sessions) ? data.facets.sessions : [];
+        const nextCourses = Array.isArray(data?.facets?.courses)
+          ? data.facets.courses.map((x: any) => safeText(x)).filter(Boolean)
+          : [];
+        const nextSessions = Array.isArray(data?.facets?.sessions)
+          ? data.facets.sessions.map((x: any) => safeText(x)).filter(Boolean)
+          : [];
 
-        setCourses(nextCourses);
-        setSessions(nextSessions);
-      } catch {
+        setCourses((prev) => (sameArray(prev, nextCourses) ? prev : nextCourses));
+        setSessions((prev) => (sameArray(prev, nextSessions) ? prev : nextSessions));
+      } catch (e: any) {
+        if (e?.name === "AbortError") return;
         if (!active) return;
         setCourses([]);
         setSessions([]);
@@ -114,19 +128,22 @@ export default function FilterSidebar({
     }
 
     loadFacets();
+
     return () => {
       active = false;
+      controller.abort();
     };
-  }, [categoryScope]);
+  }, [categoryScopeKey]);
 
   const filteredCourses = useMemo(() => {
     const s = courseSearch.toLowerCase();
-    return courses.filter((c) => (c || "").toLowerCase().includes(s));
+    return courses.filter((c) => safeText(c).toLowerCase().includes(s));
   }, [courses, courseSearch]);
 
-  // ✅ URL update helper (IMPORTANT FIX: use pathname, not hardcoded route)
   const updateUrl = (next: { course?: string; session?: string; search?: string; resetPage?: boolean }) => {
     const params = new URLSearchParams(searchParams.toString());
+
+    params.set("category", categoryScope.join(","));
 
     if (typeof next.search === "string") {
       const v = next.search.trim();
@@ -153,8 +170,16 @@ export default function FilterSidebar({
   };
 
   const handleApply = () => {
-    updateUrl({ course: selectedCourse, session: selectedSession, search: keyword, resetPage: true });
-    if (closeFilter) closeFilter();
+    updateUrl({
+      course: selectedCourse,
+      session: selectedSession,
+      search: keyword,
+      resetPage: true,
+    });
+
+    if (closeFilter) {
+      requestAnimationFrame(() => closeFilter());
+    }
   };
 
   const handleReset = () => {
@@ -163,34 +188,35 @@ export default function FilterSidebar({
     setSelectedSession("");
     setKeyword("");
 
-    // ✅ keep only primaryCategory selected (page dedicated behavior)
     selectedCat.forEach((c) => {
       if (c !== primaryCategory) onToggleCategory(c);
     });
     if (!selectedCat.includes(primaryCategory)) onToggleCategory(primaryCategory);
 
     updateUrl({ course: "", session: "", search: "", resetPage: true });
-    if (closeFilter) closeFilter();
+
+    if (closeFilter) {
+      requestAnimationFrame(() => closeFilter());
+    }
   };
 
   return (
     <aside className={`bg-white flex flex-col h-full ${className}`}>
-      <div className="bg-white p-5 rounded-lg shadow-sm border border-gray-100 h-full">
-        {/* Header */}
-        <div className="flex justify-between items-center mb-4 pb-3 border-b border-gray-100">
+      <div className="bg-white p-5 rounded-lg shadow-sm border border-gray-100 h-full overflow-y-auto">
+        <div className="flex justify-between items-center mb-4 pb-3 border-b border-gray-100 sticky top-0 bg-white z-10">
           <h3 className="font-bold text-[20px] text-gray-900">Filters</h3>
           {closeFilter && (
             <button
               onClick={closeFilter}
               className="p-2 bg-gray-100 rounded-full hover:bg-red-50 text-gray-500 hover:text-red-600 transition"
               aria-label="Close"
+              type="button"
             >
               <X size={20} />
             </button>
           )}
         </div>
 
-        {/* Search (search param) */}
         <div className="mb-6">
           <label className="text-[13px] font-bold text-gray-600 block mb-2 uppercase tracking-wide">
             Search
@@ -207,7 +233,6 @@ export default function FilterSidebar({
           </div>
         </div>
 
-        {/* Category */}
         <div className="mb-6">
           <label className="text-[13px] font-bold text-gray-600 block mb-2 uppercase tracking-wide">
             Category
@@ -245,14 +270,12 @@ export default function FilterSidebar({
           </div>
         </div>
 
-        {/* Facets Loading */}
         {loadingFacets && (
           <div className="mb-6 flex items-center gap-2 text-sm text-gray-500">
             <Loader2 className="animate-spin" size={16} /> Loading courses & sessions...
           </div>
         )}
 
-        {/* Course */}
         <div className="mb-6">
           <label className="text-[13px] font-bold text-gray-600 block mb-2 uppercase tracking-wide">
             Course
@@ -300,7 +323,6 @@ export default function FilterSidebar({
           </div>
         </div>
 
-        {/* Session */}
         <div className="mb-6">
           <label className="text-[13px] font-bold text-gray-600 block mb-2 uppercase tracking-wide">
             Session
@@ -333,16 +355,17 @@ export default function FilterSidebar({
           </div>
         </div>
 
-        {/* Buttons */}
-        <div className="mt-auto pt-4 border-t border-gray-100 flex gap-3">
+        <div className="mt-auto pt-4 border-t border-gray-100 flex gap-3 sticky bottom-0 bg-white">
           <button
             onClick={handleApply}
+            type="button"
             className="flex-1 bg-blue-600 text-white py-3 rounded-xl text-sm font-bold shadow hover:bg-blue-700 transition active:scale-95"
           >
             Apply
           </button>
           <button
             onClick={handleReset}
+            type="button"
             className="flex-1 bg-gray-100 text-gray-700 py-3 rounded-xl text-sm font-bold hover:bg-gray-200 transition"
           >
             Reset

@@ -1,26 +1,40 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import Navbar from "../../components/Navbar";
 import Footer from "../../components/Footer";
 import TopBar from "../../components/TopBar";
-import { Mail, Lock, User, Eye, EyeOff, ArrowRight, Shield } from "lucide-react";
+import { Mail, Lock, User, Eye, EyeOff, ArrowRight, Shield, Phone } from "lucide-react";
+
+declare global {
+  interface Window {
+    google?: any;
+  }
+}
 
 export default function LoginPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+
+  const redirectTarget = useMemo(() => {
+    const raw = String(searchParams.get("redirect") || "").trim();
+    if (!raw) return "/dashboard";
+    if (!raw.startsWith("/")) return "/dashboard";
+    if (raw.startsWith("//")) return "/dashboard";
+    return raw;
+  }, [searchParams]);
 
   const [view, setView] = useState<"login" | "signup">("login");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
-
-  // ✅ Admin toggle + admin key
   const [isAdminLogin, setIsAdminLogin] = useState(false);
+  const [googleReady, setGoogleReady] = useState(false);
 
-  // Form States
   const [formData, setFormData] = useState({
     name: "",
     email: "",
+    phone: "",
     password: "",
     adminKey: "",
   });
@@ -29,10 +43,100 @@ export default function LoginPage() {
     setFormData({ ...formData, [e.target.name]: e.target.value });
   };
 
+  function safeStr(x: any) {
+    return String(x ?? "").trim();
+  }
+
+  function normPhone(x: any) {
+    return safeStr(x).replace(/[^\d+]/g, "");
+  }
+
   function isAdminRole(role: string) {
     const r = (role || "").toLowerCase();
     return r === "master_admin" || r === "co_admin" || r === "admin";
   }
+
+  function getPostLoginPath(role: string) {
+    if (isAdminRole(role)) return "/admin";
+    return redirectTarget || "/dashboard";
+  }
+
+  useEffect(() => {
+    const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
+    if (!clientId) return;
+
+    const existing = document.getElementById("google-gsi") as HTMLScriptElement | null;
+    if (existing) {
+      setGoogleReady(true);
+      return;
+    }
+
+    const s = document.createElement("script");
+    s.id = "google-gsi";
+    s.src = "https://accounts.google.com/gsi/client";
+    s.async = true;
+    s.defer = true;
+    s.onload = () => setGoogleReady(true);
+    document.body.appendChild(s);
+  }, []);
+
+  async function doGoogleLogin(credential: string) {
+    setLoading(true);
+    try {
+      const res = await fetch("/api/auth/google", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ credential }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        alert((data?.error || "Google login failed") + (data?.details ? "\n\nDETAILS: " + data.details : ""));
+        return;
+      }
+
+      const role = String(data?.user?.role || "");
+      alert("Welcome " + (data?.user?.name || "User") + "! 🎉");
+
+      router.push(getPostLoginPath(role));
+      router.refresh();
+    } catch {
+      alert("Google login error. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const handleGoogleClick = () => {
+    const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
+    if (!clientId) {
+      alert("NEXT_PUBLIC_GOOGLE_CLIENT_ID missing in .env.local");
+      return;
+    }
+
+    if (!googleReady || !window.google?.accounts?.id) {
+      alert("Google login is not ready yet. Please retry.");
+      return;
+    }
+
+    window.google.accounts.id.initialize({
+      client_id: clientId,
+      callback: (resp: any) => {
+        const cred = String(resp?.credential || "");
+        if (!cred) {
+          alert("Google credential missing. Try again.");
+          return;
+        }
+        doGoogleLogin(cred);
+      },
+      auto_select: false,
+      cancel_on_tap_outside: true,
+    });
+
+    window.google.accounts.id.prompt(() => {});
+  };
 
   const handleSubmit = async (e: any) => {
     e.preventDefault();
@@ -40,12 +144,19 @@ export default function LoginPage() {
 
     try {
       if (view === "signup") {
+        const phone = normPhone(formData.phone);
+        if (!phone) {
+          alert("Mobile number is required");
+          return;
+        }
+
         const res = await fetch("/api/auth/register", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             name: formData.name,
             email: formData.email,
+            phone,
             password: formData.password,
           }),
           credentials: "include",
@@ -54,17 +165,16 @@ export default function LoginPage() {
         const data = await res.json();
 
         if (res.ok) {
-          alert("अकाउंट बन गया! अब लॉगिन करें।");
+          alert("your account is created! Login Now");
           setView("login");
           setFormData((p) => ({ ...p, password: "" }));
         } else {
           alert(
-            (data?.error || data?.message || "कुछ गलत हुआ") +
-            (data?.details ? "\n\nDETAILS: " + data.details : "")
+            (data?.error || data?.message || "Something Wrong") +
+              (data?.details ? "\n\nDETAILS: " + data.details : "")
           );
         }
       } else {
-        // ✅ LOGIN
         const payload: any = {
           email: formData.email,
           password: formData.password,
@@ -84,27 +194,21 @@ export default function LoginPage() {
         const data = await res.json();
 
         if (res.ok) {
-          const role = (data?.user?.role || "").toString();
-          alert("स्वागत है " + (data?.user?.name || "User") + "! 🎉");
+          const role = String(data?.user?.role || "");
+          alert("Welcome " + (data?.user?.name || "User") + "! 🎉");
 
-          // ✅ Role-based redirect
-          if (isAdminRole(role)) {
-            router.push("/admin"); // admin landing
-          } else {
-            router.push("/dashboard"); // normal user
-          }
-
+          router.push(getPostLoginPath(role));
           router.refresh();
         } else {
           alert(
-            (data?.error || data?.message || "लॉगिन फेल हो गया") +
-            (data?.details ? "\n\nDETAILS: " + data.details : "")
+            (data?.error || data?.message || "Login Failed") +
+              (data?.details ? "\n\nDETAILS: " + data.details : "")
           );
         }
       }
     } catch (err) {
       console.error(err);
-      alert("कनेक्शन एरर! कृपया इंटरनेट चेक करें।");
+      alert("Connection Error! PLease check your internet");
     } finally {
       setLoading(false);
     }
@@ -134,7 +238,13 @@ export default function LoginPage() {
           </div>
 
           <div className="p-8">
-            <button className="w-full flex items-center justify-center gap-2 bg-white border border-gray-200 text-slate-700 font-bold py-3 rounded-xl hover:bg-gray-50 transition mb-6 shadow-sm">
+            <button
+              type="button"
+              onClick={handleGoogleClick}
+              disabled={loading}
+              className="w-full flex items-center justify-center gap-2 bg-white border border-gray-200 text-slate-700 font-bold py-3 rounded-xl hover:bg-gray-50 transition mb-6 shadow-sm disabled:opacity-60"
+              title="Login with Google (existing account)"
+            >
               <img
                 src="https://www.svgrepo.com/show/475656/google-color.svg"
                 className="w-5 h-5"
@@ -169,6 +279,29 @@ export default function LoginPage() {
                       value={formData.name}
                     />
                   </div>
+                </div>
+              )}
+
+              {view === "signup" && (
+                <div className="space-y-1 animate-in slide-in-from-left-2">
+                  <label className="text-xs font-bold text-slate-500 uppercase ml-1">
+                    Mobile Number
+                  </label>
+                  <div className="relative">
+                    <Phone className="absolute left-4 top-3.5 text-gray-400" size={18} />
+                    <input
+                      name="phone"
+                      type="tel"
+                      required
+                      placeholder="10-digit mobile number"
+                      className="w-full pl-11 pr-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-blue-500 transition font-medium"
+                      onChange={handleInputChange}
+                      value={formData.phone}
+                    />
+                  </div>
+                  <p className="text-[11px] text-slate-500 ml-1">
+                    Phone number is compulsory (for orders & support).
+                  </p>
                 </div>
               )}
 
@@ -225,7 +358,6 @@ export default function LoginPage() {
                 </div>
               </div>
 
-              {/* ✅ Admin Login Toggle (only on login view) */}
               {view === "login" && (
                 <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4">
                   <label className="flex items-center gap-3 cursor-pointer select-none">
@@ -270,7 +402,7 @@ export default function LoginPage() {
 
               <button
                 disabled={loading}
-                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-xl shadow-lg shadow-blue-200 transition active:scale-95 flex items-center justify-center gap-2 mt-4"
+                className="w-full bg-blue-600 hover:bg-blue-700 text-white font-bold py-4 rounded-xl shadow-lg shadow-blue-200 transition active:scale-95 flex items-center justify-center gap-2 mt-4 disabled:opacity-60"
               >
                 {loading ? (
                   "Processing..."
@@ -291,7 +423,7 @@ export default function LoginPage() {
                 onClick={() => {
                   const nextView = view === "login" ? "signup" : "login";
                   setView(nextView);
-                  setFormData({ name: "", email: "", password: "", adminKey: "" });
+                  setFormData({ name: "", email: "", phone: "", password: "", adminKey: "" });
                   setIsAdminLogin(false);
                   setShowPassword(false);
                 }}

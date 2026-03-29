@@ -1,4 +1,3 @@
-// ✅ FILE: app/products/ProductsClient.tsx
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -44,10 +43,21 @@ type ApiProductCard = {
 
 type ApiProductsResponse = {
   products: ApiProductCard[];
+  pagination?: { total?: number; page?: number; totalPages?: number; limit?: number };
   meta?: { total?: number; page?: number; totalPages?: number; limit?: number };
 };
 
 type SortKey = "latest" | "price_asc" | "price_desc";
+
+type ProductsClientProps = {
+  initialSearchParam?: string;
+  initialCategoryParam?: string;
+  initialCourseParam?: string;
+  initialSessionParam?: string;
+  initialLanguageParam?: string;
+  initialSortParam?: string;
+  initialPageParam?: string;
+};
 
 // --- HELPERS ---
 function safeStr(x: any) {
@@ -70,6 +80,9 @@ function toUpper(s: string) {
 }
 function isAlpha1(s: string) {
   return /^[A-Z]$/.test(s);
+}
+function isHardcopyCategory(category?: string) {
+  return safeStr(category).toLowerCase() === "handwritten hardcopy (delivery)".toLowerCase();
 }
 
 // ✅ Normalize query (search assist)
@@ -243,18 +256,23 @@ function MultiSelectDropdown({
       <button
         ref={anchorRef}
         onClick={() => setOpen((s) => !s)}
-        className={`w-full h-11 px-3 rounded-2xl border bg-white flex items-center justify-between gap-2 transition ${
-          open ? "border-blue-300 shadow-sm" : "border-gray-200 hover:border-slate-300 hover:bg-gray-50"
+        className={`w-full h-[58px] px-4 rounded-[22px] border bg-white flex items-center justify-between gap-3 transition-all duration-200 ${
+          open
+            ? "border-blue-300 shadow-[0_0_0_3px_rgba(59,130,246,0.08)]"
+            : "border-slate-200 hover:border-slate-300 hover:bg-slate-50"
         }`}
         type="button"
       >
         <div className="min-w-0 text-left">
-          <div className="text-[11px] font-extrabold text-slate-900">{label}</div>
-          <div className="text-[11px] font-semibold text-slate-600 truncate">
+          <div className="text-[11px] font-extrabold uppercase tracking-wide text-slate-500">{label}</div>
+          <div className="text-[12px] font-bold text-slate-800 truncate mt-0.5">
             {selected.length ? `${selected.length} selected • ${selectedPreview}` : placeholder || "Select"}
           </div>
         </div>
-        <ChevronDown size={16} className={`text-slate-500 flex-shrink-0 transition ${open ? "rotate-180" : ""}`} />
+        <ChevronDown
+          size={17}
+          className={`text-slate-500 flex-shrink-0 transition ${open ? "rotate-180 text-blue-700" : ""}`}
+        />
       </button>
 
       <PortalDropdown
@@ -263,8 +281,8 @@ function MultiSelectDropdown({
         width={380}
         onRequestClose={() => setOpen(false)}
       >
-        <div className="rounded-2xl border border-gray-200 bg-white shadow-2xl overflow-hidden">
-          <div className="px-4 py-3 border-b border-gray-100 bg-slate-50 flex items-center justify-between gap-3">
+        <div className="rounded-[24px] border border-slate-200 bg-white shadow-2xl overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-100 bg-gradient-to-r from-slate-50 to-blue-50/60 flex items-center justify-between gap-3">
             <div className="text-xs font-extrabold text-slate-900">{label} (multi-select)</div>
             <button
               onClick={() => {
@@ -279,20 +297,20 @@ function MultiSelectDropdown({
           </div>
 
           {searchable ? (
-            <div className="p-3 border-b border-gray-100">
-              <div className="flex items-center gap-2 px-3 py-2 rounded-xl border border-gray-200 bg-white hover:border-slate-300 focus-within:ring-2 focus-within:ring-blue-200">
-                <Search size={16} className="text-gray-400" />
+            <div className="p-3 border-b border-slate-100">
+              <div className="flex items-center gap-2 px-3 py-2 rounded-xl border border-slate-200 bg-white hover:border-slate-300">
+                <Search size={16} className="text-slate-400" />
                 <input
                   ref={searchRef}
                   value={q}
                   onChange={(e) => setQ(e.target.value)}
                   placeholder={alphaJump ? 'Type "A" / "T" for codes, or search full code…' : "Search options…"}
-                  className="w-full outline-none text-xs font-semibold text-slate-800 placeholder:text-gray-400"
+                  className="w-full outline-none text-xs font-semibold text-slate-800 placeholder:text-slate-400"
                 />
                 {q ? (
                   <button
                     onClick={() => setQ("")}
-                    className="h-8 w-8 rounded-lg hover:bg-gray-100 flex items-center justify-center text-gray-500"
+                    className="h-8 w-8 rounded-lg hover:bg-slate-100 flex items-center justify-center text-slate-500"
                     type="button"
                     aria-label="Clear dropdown search"
                   >
@@ -310,7 +328,7 @@ function MultiSelectDropdown({
                       className={`h-7 px-2 rounded-lg border text-[11px] font-extrabold transition ${
                         toUpper(q) === ch
                           ? "border-blue-600 bg-blue-50 text-blue-800"
-                          : "border-gray-200 hover:bg-gray-50 text-slate-700"
+                          : "border-slate-200 hover:bg-slate-50 text-slate-700"
                       }`}
                       type="button"
                     >
@@ -319,7 +337,7 @@ function MultiSelectDropdown({
                   ))}
                   <button
                     onClick={() => setQ("")}
-                    className="h-7 px-3 rounded-lg border border-gray-200 hover:bg-gray-50 text-[11px] font-extrabold text-slate-700"
+                    className="h-7 px-3 rounded-lg border border-slate-200 hover:bg-slate-50 text-[11px] font-extrabold text-slate-700"
                     type="button"
                   >
                     All
@@ -354,7 +372,7 @@ function MultiSelectDropdown({
                     key={v}
                     onClick={() => onToggle(v)}
                     className={`w-full px-3 py-2 rounded-xl text-left text-xs font-extrabold flex items-center justify-between gap-2 transition ${
-                      active ? "bg-blue-50 text-blue-800" : "hover:bg-gray-50 text-slate-800"
+                      active ? "bg-blue-50 text-blue-800" : "hover:bg-slate-50 text-slate-800"
                     }`}
                     type="button"
                   >
@@ -383,7 +401,7 @@ function SelectedChip({
   tone?: "blue" | "gray";
 }) {
   const base =
-    tone === "blue" ? "border-blue-200 bg-blue-50 text-blue-800" : "border-gray-200 bg-white text-slate-700";
+    tone === "blue" ? "border-blue-200 bg-blue-50 text-blue-800" : "border-slate-200 bg-white text-slate-700";
   return (
     <button
       onClick={onRemove}
@@ -397,12 +415,50 @@ function SelectedChip({
   );
 }
 
+function ProductsGridSkeleton() {
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+      {Array.from({ length: 12 }).map((_, i) => (
+        <div
+          key={i}
+          className="rounded-2xl border border-gray-200 bg-white shadow-sm overflow-hidden animate-pulse"
+        >
+          <div className="aspect-[3/4] bg-gray-200" />
+          <div className="p-3">
+            <div className="h-3 bg-gray-200 rounded w-20 mb-2" />
+            <div className="h-4 bg-gray-200 rounded w-full mb-2" />
+            <div className="h-4 bg-gray-200 rounded w-4/5 mb-3" />
+            <div className="h-5 bg-gray-200 rounded w-24" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ✅ MAIN COMPONENT
-export default function ProductsClient() {
+export default function ProductsClient({
+  initialSearchParam = "",
+  initialCategoryParam = "",
+  initialCourseParam = "",
+  initialSessionParam = "",
+  initialLanguageParam = "",
+  initialSortParam = "latest",
+  initialPageParam = "1",
+}: ProductsClientProps) {
   const router = useRouter();
   const sp = useSearchParams();
 
-  // ✅ URL state
+  const didHydrateSyncRef = useRef(false);
+
+  const initialUrlSearch = safeStr(initialSearchParam);
+  const initialUrlCategory = parseCsvParam(safeStr(initialCategoryParam));
+  const initialUrlCourse = parseCsvParam(safeStr(initialCourseParam));
+  const initialUrlSession = parseCsvParam(safeStr(initialSessionParam));
+  const initialUrlLang = parseCsvParam(safeStr(initialLanguageParam));
+  const initialUrlSort = (safeStr(initialSortParam) as SortKey) || "latest";
+  const initialUrlPage = Number(initialPageParam || "1") || 1;
+
   const urlSearch = safeStr(sp.get("search"));
   const urlCategory = parseCsvParam(safeStr(sp.get("category")));
   const urlCourse = parseCsvParam(safeStr(sp.get("course")));
@@ -413,31 +469,30 @@ export default function ProductsClient() {
 
   const [isFilterOpen, setIsFilterOpen] = useState(false);
 
-  // ✅ Unified search
-  const [searchInput, setSearchInput] = useState(urlSearch);
-  const [search, setSearch] = useState(urlSearch);
+  const [searchInput, setSearchInput] = useState(initialUrlSearch);
+  const [search, setSearch] = useState(initialUrlSearch);
 
-  // ✅ Multi-select filters
-  const [selectedCat, setSelectedCat] = useState<string[]>(urlCategory);
-  const [selectedCourse, setSelectedCourse] = useState<string[]>(urlCourse);
-  const [selectedSession, setSelectedSession] = useState<string[]>(urlSession);
-  const [selectedLang, setSelectedLang] = useState<string[]>(urlLang);
+  const [selectedCat, setSelectedCat] = useState<string[]>(initialUrlCategory);
+  const [selectedCourse, setSelectedCourse] = useState<string[]>(initialUrlCourse);
+  const [selectedSession, setSelectedSession] = useState<string[]>(initialUrlSession);
+  const [selectedLang, setSelectedLang] = useState<string[]>(initialUrlLang);
 
-  // ✅ Sort
-  const [sort, setSort] = useState<SortKey>(urlSort || "latest");
+  const [sort, setSort] = useState<SortKey>(initialUrlSort || "latest");
 
-  // Data
   const [loading, setLoading] = useState(true);
   const [items, setItems] = useState<ApiProductCard[]>([]);
-  const [meta, setMeta] = useState({ total: 0, page: urlPage, totalPages: 1, limit: 12 });
+  const [meta, setMeta] = useState({
+    total: 0,
+    page: Math.max(1, initialUrlPage),
+    totalPages: 1,
+    limit: 12,
+  });
 
-  // Typeahead suggestions
   const [suggestLoading, setSuggestLoading] = useState(false);
   const [suggestions, setSuggestions] = useState<ApiProductCard[]>([]);
   const [showSuggest, setShowSuggest] = useState(false);
   const suggestBoxRef = useRef<HTMLDivElement | null>(null);
 
-  // ✅ Keep master options cached so dropdowns don't “disappear” after selection
   const cacheRef = useRef({
     categories: new Set<string>(),
     courses: new Set<string>(),
@@ -458,13 +513,15 @@ export default function ProductsClient() {
   const defaultLanguageFallback = ["Hindi", "English", "Urdu"];
   const defaultSessionFallback = ["2025-2026", "2024-2025", "2023-2024"];
 
-  // ✅ Lock body scroll on drawer
   useEffect(() => {
     if (isFilterOpen) document.body.style.overflow = "hidden";
     else document.body.style.overflow = "auto";
+
+    return () => {
+      document.body.style.overflow = "auto";
+    };
   }, [isFilterOpen]);
 
-  // ✅ Close suggestions on outside click
   useEffect(() => {
     const onDown = (e: MouseEvent) => {
       if (!suggestBoxRef.current) return;
@@ -474,7 +531,6 @@ export default function ProductsClient() {
     return () => document.removeEventListener("mousedown", onDown);
   }, []);
 
-  // ✅ Debounce search -> sync URL
   useEffect(() => {
     const t = setTimeout(() => {
       const next = searchInput.trim();
@@ -483,11 +539,25 @@ export default function ProductsClient() {
       syncUrl({ search: next, page: 1 });
     }, 350);
     return () => clearTimeout(t);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchInput]);
 
-  // ✅ Sync local when URL changes
   useEffect(() => {
+    if (!didHydrateSyncRef.current) {
+      didHydrateSyncRef.current = true;
+
+      const sameSearch = urlSearch === initialUrlSearch;
+      const sameCat = JSON.stringify(urlCategory) === JSON.stringify(initialUrlCategory);
+      const sameCourse = JSON.stringify(urlCourse) === JSON.stringify(initialUrlCourse);
+      const sameSession = JSON.stringify(urlSession) === JSON.stringify(initialUrlSession);
+      const sameLang = JSON.stringify(urlLang) === JSON.stringify(initialUrlLang);
+      const sameSort = urlSort === initialUrlSort;
+      const samePage = (urlPage || 1) === (initialUrlPage || 1);
+
+      if (sameSearch && sameCat && sameCourse && sameSession && sameLang && sameSort && samePage) {
+        return;
+      }
+    }
+
     setSearchInput(urlSearch);
     setSearch(urlSearch);
 
@@ -499,7 +569,6 @@ export default function ProductsClient() {
     setSort((urlSort as SortKey) || "latest");
 
     setMeta((m) => ({ ...m, page: urlPage || 1 }));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sp]);
 
   function syncUrl(partial: {
@@ -538,7 +607,6 @@ export default function ProductsClient() {
     if (nextLang.length) params.set("language", nextLang.join(","));
     else params.delete("language");
 
-    // ✅ sort in URL (new)
     if (nextSort && nextSort !== "latest") params.set("sort", nextSort);
     else params.delete("sort");
 
@@ -573,7 +641,6 @@ export default function ProductsClient() {
     (selectedSession.length ? 1 : 0) +
     (selectedLang.length ? 1 : 0);
 
-  // ✅ Main fetch
   useEffect(() => {
     let cancelled = false;
 
@@ -582,9 +649,9 @@ export default function ProductsClient() {
       try {
         const params = new URLSearchParams();
         params.set("page", String(meta.page || 1));
-        params.set("limit", String(meta.limit || 12));
+        params.set("limit", "12");
+        params.set("includeFacets", "0");
 
-        // ✅ sort
         const apiSort = sort === "latest" ? "latest" : sort === "price_asc" ? "price_asc" : "price_desc";
         params.set("sort", apiSort);
 
@@ -608,7 +675,6 @@ export default function ProductsClient() {
         const list = Array.isArray(data?.products) ? data.products : [];
         setItems(list);
 
-        // ✅ Update cache so options don't vanish
         for (const p of list) {
           const c = safeStr(p.category);
           if (c) cacheRef.current.categories.add(c);
@@ -625,24 +691,23 @@ export default function ProductsClient() {
           if (l) cacheRef.current.languages.add(l);
         }
 
-        // also ensure selected values always remain present
         selectedCat.forEach((x) => cacheRef.current.categories.add(x));
         selectedCourse.forEach((x) => cacheRef.current.courses.add(toUpper(x)));
         selectedSession.forEach((x) => cacheRef.current.sessions.add(x));
         selectedLang.forEach((x) => cacheRef.current.languages.add(x));
 
-        const m = data?.meta || {};
+        const m = data?.pagination || data?.meta || {};
         setMeta((old) => ({
           ...old,
           total: Number(m.total || list.length || 0),
           totalPages: Number(m.totalPages || 1),
-          limit: Number(m.limit || old.limit || 12),
+          limit: 12,
           page: Number(m.page || old.page || 1),
         }));
       } catch {
         if (!cancelled) {
           setItems([]);
-          setMeta((m) => ({ ...m, total: 0, totalPages: 1 }));
+          setMeta((m) => ({ ...m, total: 0, totalPages: 1, limit: 12 }));
         }
       } finally {
         if (!cancelled) setLoading(false);
@@ -652,7 +717,6 @@ export default function ProductsClient() {
     return () => {
       cancelled = true;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [
     selectedCat.join(","),
     selectedCourse.join(","),
@@ -661,10 +725,8 @@ export default function ProductsClient() {
     search,
     sort,
     meta.page,
-    meta.limit,
   ]);
 
-  // ✅ Suggestions fetch
   useEffect(() => {
     if (!searchInput.trim()) {
       setSuggestions([]);
@@ -684,6 +746,7 @@ export default function ProductsClient() {
         params.set("page", "1");
         params.set("limit", "8");
         params.set("sort", "latest");
+        params.set("includeFacets", "0");
 
         if (selectedCat.length) params.set("category", selectedCat.join(","));
         if (selectedCourse.length) params.set("course", selectedCourse.join(","));
@@ -701,7 +764,6 @@ export default function ProductsClient() {
         setSuggestions(list);
         setShowSuggest(true);
 
-        // cache also from suggestions (helps course list grow)
         for (const p of list) {
           const c = safeStr(p.category);
           if (c) cacheRef.current.categories.add(c);
@@ -744,7 +806,6 @@ export default function ProductsClient() {
     return variants.slice(0, 8);
   }, [items.length, loading, search]);
 
-  // ✅ Options used in dropdowns (never disappear)
   const optionSets = useMemo(() => {
     const cats = uniq([
       ...defaultCategoryFallback,
@@ -771,9 +832,8 @@ export default function ProductsClient() {
       .filter(Boolean)
       .sort((a, b) => a.localeCompare(b));
 
-    // stable sorting for cats/sessions/langs
     cats.sort((a, b) => a.localeCompare(b));
-    sessions.sort((a, b) => b.localeCompare(a)); // latest-ish first if formatted like YYYY-YYYY
+    sessions.sort((a, b) => b.localeCompare(a));
     langs.sort((a, b) => a.localeCompare(b));
 
     return { cats, sessions, langs, courses };
@@ -782,7 +842,7 @@ export default function ProductsClient() {
   const SelectedChipsRow = ({ inDrawer = false }: { inDrawer?: boolean }) => {
     const hasAny = !!(search || activeFiltersCount);
     return (
-      <div className={`${inDrawer ? "mt-3" : "mt-4"} ${hasAny ? "" : "opacity-60"} transition`}>
+      <div className={`${inDrawer ? "mt-3" : "mt-0"} ${hasAny ? "" : "opacity-60"} transition`}>
         <div className="flex items-center justify-between gap-3 flex-wrap">
           <div className="text-xs font-extrabold text-slate-900">Selected</div>
           {hasAny ? (
@@ -867,90 +927,117 @@ export default function ProductsClient() {
   };
 
   const FiltersPanel = ({ compact = false }: { compact?: boolean }) => (
-    <div className={`${compact ? "" : "mt-3"} rounded-2xl border border-gray-200 bg-white/80 backdrop-blur shadow-sm p-4`}>
-      <div className="flex items-center justify-between gap-3 flex-wrap">
-        <div className="flex items-center gap-2">
-          <SlidersHorizontal size={16} className="text-blue-700" />
-          <div className="text-sm font-extrabold text-slate-900">Filters</div>
-          {activeFiltersCount ? (
-            <span className="text-[11px] font-extrabold text-slate-600">({activeFiltersCount} active)</span>
-          ) : null}
+    <div
+      className={`${
+        compact ? "" : "mt-4"
+      } rounded-[28px] border border-slate-200/80 bg-gradient-to-br from-white via-white to-slate-50/80 shadow-[0_12px_40px_rgba(15,23,42,0.06)] overflow-hidden`}
+    >
+      <div className="border-b border-slate-200/70 bg-gradient-to-r from-slate-50 via-blue-50/60 to-cyan-50/60 px-4 md:px-5 py-4">
+        <div className="flex items-start md:items-center justify-between gap-3 flex-col md:flex-row">
+          <div className="flex items-start gap-3">
+            <div className="h-11 w-11 rounded-2xl bg-gradient-to-br from-blue-600 via-indigo-600 to-cyan-500 text-white shadow-lg flex items-center justify-center flex-shrink-0">
+              <SlidersHorizontal size={18} />
+            </div>
+            <div>
+              <div className="flex items-center gap-2 flex-wrap">
+                <div className="text-[15px] font-extrabold text-slate-900">Smart Filters</div>
+                {activeFiltersCount ? (
+                  <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-extrabold text-blue-700">
+                    {activeFiltersCount} active
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11px] font-bold text-slate-500">
+                    Optional
+                  </span>
+                )}
+              </div>
+              <div className="mt-1 text-[12px] md:text-[13px] font-semibold text-slate-600">
+                Category, session, medium aur course code combine karke exact product dhoondhiye.
+              </div>
+            </div>
+          </div>
         </div>
       </div>
 
-      <div className="mt-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
-        <MultiSelectDropdown
-          label="Categories"
-          items={optionSets.cats}
-          selected={selectedCat}
-          onToggle={(v) => {
-            const next = toggleInArray(selectedCat, v);
-            setSelectedCat(next);
-            syncUrl({ category: next, page: 1 });
-          }}
-          onClear={() => {
-            setSelectedCat([]);
-            syncUrl({ category: [], page: 1 });
-          }}
-          placeholder="Select categories"
-          searchable
-        />
+      <div className="p-4 md:p-5">
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 md:gap-4">
+          <MultiSelectDropdown
+            label="Categories"
+            items={optionSets.cats}
+            selected={selectedCat}
+            onToggle={(v) => {
+              const next = toggleInArray(selectedCat, v);
+              setSelectedCat(next);
+              syncUrl({ category: next, page: 1 });
+            }}
+            onClear={() => {
+              setSelectedCat([]);
+              syncUrl({ category: [], page: 1 });
+            }}
+            placeholder="Select categories"
+            searchable
+          />
 
-        <MultiSelectDropdown
-          label="Session"
-          items={optionSets.sessions}
-          selected={selectedSession}
-          onToggle={(v) => {
-            const next = toggleInArray(selectedSession, v);
-            setSelectedSession(next);
-            syncUrl({ session: next, page: 1 });
-          }}
-          onClear={() => {
-            setSelectedSession([]);
-            syncUrl({ session: [], page: 1 });
-          }}
-          placeholder="Select sessions"
-          searchable
-        />
+          <MultiSelectDropdown
+            label="Session"
+            items={optionSets.sessions}
+            selected={selectedSession}
+            onToggle={(v) => {
+              const next = toggleInArray(selectedSession, v);
+              setSelectedSession(next);
+              syncUrl({ session: next, page: 1 });
+            }}
+            onClear={() => {
+              setSelectedSession([]);
+              syncUrl({ session: [], page: 1 });
+            }}
+            placeholder="Select sessions"
+            searchable
+          />
 
-        <MultiSelectDropdown
-          label="Medium"
-          items={optionSets.langs}
-          selected={selectedLang}
-          onToggle={(v) => {
-            const next = toggleInArray(selectedLang, v);
-            setSelectedLang(next);
-            syncUrl({ language: next, page: 1 });
-          }}
-          onClear={() => {
-            setSelectedLang([]);
-            syncUrl({ language: [], page: 1 });
-          }}
-          placeholder="Select medium"
-          searchable
-        />
+          <MultiSelectDropdown
+            label="Medium"
+            items={optionSets.langs}
+            selected={selectedLang}
+            onToggle={(v) => {
+              const next = toggleInArray(selectedLang, v);
+              setSelectedLang(next);
+              syncUrl({ language: next, page: 1 });
+            }}
+            onClear={() => {
+              setSelectedLang([]);
+              syncUrl({ language: [], page: 1 });
+            }}
+            placeholder="Select medium"
+            searchable
+          />
 
-        <MultiSelectDropdown
-          label="Course"
-          items={optionSets.courses.slice(0, 8000)}
-          selected={selectedCourse.map((x) => toUpper(x))}
-          onToggle={(v) => {
-            const next = toggleInArray(selectedCourse.map((x) => toUpper(x)), toUpper(v));
-            setSelectedCourse(next);
-            syncUrl({ course: next, page: 1 });
-          }}
-          onClear={() => {
-            setSelectedCourse([]);
-            syncUrl({ course: [], page: 1 });
-          }}
-          placeholder='Type "A" / "T" or search full code'
-          searchable
-          alphaJump
-          maxRender={250}
-        />
+          <MultiSelectDropdown
+            label="Course"
+            items={optionSets.courses.slice(0, 8000)}
+            selected={selectedCourse.map((x) => toUpper(x))}
+            onToggle={(v) => {
+              const next = toggleInArray(selectedCourse.map((x) => toUpper(x)), toUpper(v));
+              setSelectedCourse(next);
+              syncUrl({ course: next, page: 1 });
+            }}
+            onClear={() => {
+              setSelectedCourse([]);
+              syncUrl({ course: [], page: 1 });
+            }}
+            placeholder='Type "A" / "T" or search full code'
+            searchable
+            alphaJump
+            maxRender={250}
+          />
+        </div>
+
+        {!compact ? (
+          <div className="mt-4 rounded-2xl border border-dashed border-slate-200 bg-slate-50/70 px-4 py-3">
+            <SelectedChipsRow />
+          </div>
+        ) : null}
       </div>
-
-      {!compact ? <SelectedChipsRow /> : null}
     </div>
   );
 
@@ -964,7 +1051,7 @@ export default function ProductsClient() {
           setSort(v);
           syncUrl({ sort: v, page: 1 });
         }}
-        className="h-10 rounded-xl border border-gray-200 bg-white px-3 text-xs font-extrabold text-slate-900 outline-none hover:border-slate-300"
+        className="h-11 rounded-2xl border border-slate-200 bg-white px-4 text-xs font-extrabold text-slate-900 outline-none hover:border-slate-300 shadow-sm"
       >
         <option value="latest">Newest First</option>
         <option value="price_asc">Price: Low to High</option>
@@ -981,12 +1068,24 @@ export default function ProductsClient() {
         .isp-grid { background-image: radial-gradient(circle at 1px 1px, rgba(15,23,42,0.07) 1px, transparent 0); background-size: 22px 22px; }
         .isp-floaty { animation: floaty 6s ease-in-out infinite; }
         .isp-shimmer { background-size:200% 200%; animation: shimmer 10s ease-in-out infinite; }
+
+        .products-results-grid > .hardcopy-product-card-wrap :is(
+          .absolute.top-2.left-2,
+          .absolute.top-2.right-2,
+          .absolute.top-3.left-3,
+          .absolute.top-3.right-3,
+          .absolute.left-2.top-2,
+          .absolute.right-2.top-2,
+          .absolute.left-3.top-3,
+          .absolute.right-3.top-3
+        ) {
+          display: none !important;
+        }
       `}</style>
 
       <TopBar />
       <Navbar />
 
-      {/* Breadcrumb */}
       <div className="bg-white border-b border-gray-100">
         <div className="max-w-[1600px] mx-auto px-4 py-3 text-[13px] text-gray-500 flex items-center gap-2 overflow-x-auto whitespace-nowrap">
           <Link href="/" className="hover:text-blue-700 font-semibold">
@@ -997,7 +1096,6 @@ export default function ProductsClient() {
         </div>
       </div>
 
-      {/* HERO (kept, ribbon removed) */}
       <section className="relative overflow-hidden">
         <div className="absolute inset-0 bg-gradient-to-b from-white via-white to-[#f7f9ff]" />
         <div className="absolute inset-0 isp-grid opacity-60" />
@@ -1016,7 +1114,8 @@ export default function ProductsClient() {
               </h1>
 
               <p className="mt-2 text-sm md:text-lg font-medium text-slate-600 max-w-3xl">
-                Explore updated IGNOU solved assignments, study material, PYQ, guess papers, projects and notes—use the search and filters below to find the exact match.
+                Explore updated IGNOU solved assignments, study material, PYQ, guess papers, projects and notes—use the
+                search and filters below to find the exact match.
               </p>
             </div>
 
@@ -1065,125 +1164,147 @@ export default function ProductsClient() {
         </div>
       </section>
 
-      {/* BODY */}
-      <section className="bg-[#f7f9ff] py-6 md:py-8 border-t border-gray-100">
+      <section className="bg-[linear-gradient(180deg,#f8fbff_0%,#f5f8ff_48%,#ffffff_100%)] py-6 md:py-8 border-t border-slate-100">
         <div className="max-w-[1600px] mx-auto px-4">
-          {/* ✅ Unified Search + Sort + Filters (products ke bilkul upar) */}
-          <div className="rounded-2xl border border-gray-200 bg-white/85 backdrop-blur shadow-sm p-4">
-            <div className="flex items-center justify-between gap-3 flex-wrap">
-              <div className="text-sm font-extrabold text-slate-900">
-                Results <span className="text-slate-500 font-bold">({countText})</span>
-              </div>
-              <div className="flex items-center gap-3">
-                <SortSelect />
-              </div>
-            </div>
+          <div className="relative rounded-[30px] border border-slate-200/80 bg-white/90 backdrop-blur shadow-[0_20px_60px_rgba(15,23,42,0.07)] overflow-hidden">
+            <div className="absolute inset-0 pointer-events-none bg-[radial-gradient(circle_at_top_right,rgba(59,130,246,0.10),transparent_28%),radial-gradient(circle_at_left,rgba(6,182,212,0.08),transparent_22%)]" />
 
-            {/* Search bar + mobile filter button */}
-            <div ref={suggestBoxRef} className="mt-4 relative">
-              <div className="flex items-center gap-2 px-4 py-3 rounded-2xl border border-gray-200 bg-white shadow-sm hover:border-slate-300 focus-within:ring-2 focus-within:ring-blue-200 transition">
-                <Search size={18} className="text-gray-400" />
-                <input
-                  value={searchInput}
-                  onChange={(e) => setSearchInput(e.target.value)}
-                  onFocus={() => searchInput.trim() && setShowSuggest(true)}
-                  placeholder='Search example: "MPA036 2025-2026 Hindi solved assignment"'
-                  className="w-full outline-none text-sm md:text-base font-semibold text-slate-800 placeholder:text-gray-400"
-                />
-                {searchInput ? (
-                  <button
-                    onClick={() => {
-                      setSearchInput("");
-                      setShowSuggest(false);
-                    }}
-                    className="h-9 w-9 rounded-xl hover:bg-gray-100 flex items-center justify-center text-gray-500"
-                    aria-label="Clear search"
-                    type="button"
-                  >
-                    <X size={18} />
-                  </button>
-                ) : null}
-
-                <button
-                  onClick={() => setIsFilterOpen(true)}
-                  className="lg:hidden inline-flex items-center justify-center h-10 px-4 rounded-xl bg-slate-900 text-white font-extrabold text-xs"
-                  type="button"
-                >
-                  <Filter size={16} className="mr-2" /> Filters
-                </button>
-              </div>
-
-              {/* Suggestions dropdown */}
-              {showSuggest ? (
-                <div className="absolute z-40 mt-2 w-full rounded-2xl border border-gray-200 bg-white shadow-xl overflow-hidden">
-                  <div className="px-4 py-3 border-b border-gray-100 bg-slate-50">
-                    <div className="text-xs font-extrabold text-slate-900">
-                      {suggestLoading ? "Searching…" : suggestions.length ? "Top matches" : "No quick matches"}
-                    </div>
-                    <div className="mt-1 text-[11px] font-semibold text-slate-600">
-                      Press Enter or click a product to open it.
-                    </div>
+            <div className="relative p-4 md:p-5 lg:p-6">
+              <div className="flex items-start lg:items-center justify-between gap-4 flex-col lg:flex-row">
+                <div className="min-w-0">
+                  <div className="inline-flex items-center gap-2 rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-[11px] font-extrabold text-blue-700">
+                    <Sparkles size={13} />
+                    Smart Product Discovery
                   </div>
 
-                  {suggestions.length ? (
-                    <div className="max-h-[360px] overflow-auto">
-                      {suggestions.map((p) => (
-                        <Link
-                          key={p.slug}
-                          href={`/${(p.category || "products").toString().toLowerCase().includes("solved") ? "solved-assignments" : "products"}/${p.slug}`}
-                          className="block px-4 py-3 hover:bg-gray-50 border-b border-gray-50"
-                          onClick={() => setShowSuggest(false)}
-                        >
-                          <div className="text-sm font-extrabold text-slate-900 line-clamp-1">{p.title}</div>
-                          <div className="mt-1 text-[11px] font-bold text-slate-600">
-                            {safeStr(p.category) ? safeStr(p.category) : "Product"}
-                            {safeStr(p.session) ? ` • ${safeStr(p.session)}` : ""}
-                            {safeStr(p.language) ? ` • ${safeStr(p.language)}` : ""}
-                          </div>
-                        </Link>
-                      ))}
-                    </div>
-                  ) : (
-                    <div className="p-4">
-                      <div className="text-sm font-extrabold text-slate-900">Try these patterns</div>
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        {extractSubjectCodeVariants(searchInput).variants.slice(0, 8).map((v) => (
-                          <button
-                            key={v}
-                            onClick={() => {
-                              setSearchInput(v);
-                              setShowSuggest(false);
-                            }}
-                            className="rounded-full border border-gray-200 hover:bg-gray-50 px-3 py-1 text-[11px] font-extrabold text-slate-700"
-                            type="button"
-                          >
-                            {v}
-                          </button>
-                        ))}
+                  <div className="mt-3 flex items-center gap-3 flex-wrap">
+                    <h2 className="text-[20px] md:text-[24px] font-extrabold tracking-tight text-slate-900">
+                      Browse All Products
+                    </h2>
+                    <span className="inline-flex items-center rounded-full border border-slate-200 bg-white px-3 py-1 text-[12px] font-extrabold text-slate-700 shadow-sm">
+                      {countText}
+                    </span>
+                  </div>
+
+                  <p className="mt-2 text-sm md:text-[15px] font-medium text-slate-600 max-w-3xl">
+                    Search by code, title, session aur medium. Filters ko mix karke exact result jaldi paaiye.
+                  </p>
+                </div>
+
+                <div className="w-full lg:w-auto flex items-center gap-3 justify-between lg:justify-end">
+                  <div className="hidden md:flex items-center gap-2 rounded-2xl border border-emerald-200 bg-emerald-50 px-3 py-2 text-[12px] font-extrabold text-emerald-700">
+                    <BadgeCheck size={15} />
+                    Updated products
+                  </div>
+                  <SortSelect />
+                </div>
+              </div>
+
+              <div ref={suggestBoxRef} className="mt-5 relative">
+                <div className="group flex items-center gap-3 px-4 md:px-5 py-3.5 md:py-4 rounded-[24px] border border-slate-200 bg-white shadow-[0_8px_24px_rgba(15,23,42,0.06)] hover:border-blue-300 focus-within:border-blue-300 focus-within:shadow-[0_10px_30px_rgba(59,130,246,0.10)] focus-within:ring-0 transition-all duration-300">
+                  <div className="h-11 w-11 rounded-2xl bg-gradient-to-br from-blue-600 via-indigo-600 to-cyan-500 text-white shadow-md flex items-center justify-center flex-shrink-0">
+                    <Search size={18} />
+                  </div>
+
+                  <div className="min-w-0 flex-1">
+                    <input
+                      value={searchInput}
+                      onChange={(e) => setSearchInput(e.target.value)}
+                      onFocus={() => searchInput.trim() && setShowSuggest(true)}
+                      placeholder='Search example: "MPA036 2025-2026 Hindi solved assignment"'
+                      className="w-full bg-transparent outline-none border-0 ring-0 focus:outline-none focus:ring-0 text-sm md:text-[17px] font-semibold text-slate-800 placeholder:text-slate-400"
+                    />
+                  </div>
+
+                  {searchInput ? (
+                    <button
+                      onClick={() => {
+                        setSearchInput("");
+                        setShowSuggest(false);
+                      }}
+                      className="h-10 w-10 rounded-2xl border border-slate-200 bg-white hover:bg-slate-50 flex items-center justify-center text-slate-500 transition"
+                      aria-label="Clear search"
+                      type="button"
+                    >
+                      <X size={18} />
+                    </button>
+                  ) : null}
+
+                  <button
+                    onClick={() => setIsFilterOpen(true)}
+                    className="lg:hidden inline-flex items-center justify-center h-11 px-4 rounded-2xl bg-slate-900 text-white font-extrabold text-xs shadow-md"
+                    type="button"
+                  >
+                    <Filter size={16} className="mr-2" /> Filters
+                  </button>
+                </div>
+
+                {showSuggest ? (
+                  <div className="absolute z-40 mt-2 w-full rounded-[24px] border border-slate-200 bg-white shadow-2xl overflow-hidden">
+                    <div className="px-4 py-3 border-b border-slate-100 bg-slate-50">
+                      <div className="text-xs font-extrabold text-slate-900">
+                        {suggestLoading ? "Searching…" : suggestions.length ? "Top matches" : "No quick matches"}
+                      </div>
+                      <div className="mt-1 text-[11px] font-semibold text-slate-600">
+                        Press Enter or click a product to open it.
                       </div>
                     </div>
-                  )}
-                </div>
-              ) : null}
-            </div>
 
-            {/* Desktop filters */}
-            <div className="hidden lg:block">
-              <FiltersPanel />
-            </div>
+                    {suggestions.length ? (
+                      <div className="max-h-[360px] overflow-auto">
+                        {suggestions.map((p) => (
+                          <Link
+                            key={p.slug}
+                            href={`/${(p.category || "products").toString().toLowerCase().includes("solved") ? "solved-assignments" : "products"}/${p.slug}`}
+                            className="block px-4 py-3 hover:bg-slate-50 border-b border-slate-50"
+                            onClick={() => setShowSuggest(false)}
+                          >
+                            <div className="text-sm font-extrabold text-slate-900 line-clamp-1">{p.title}</div>
+                            <div className="mt-1 text-[11px] font-bold text-slate-600">
+                              {safeStr(p.category) ? safeStr(p.category) : "Product"}
+                              {safeStr(p.session) ? ` • ${safeStr(p.session)}` : ""}
+                              {safeStr(p.language) ? ` • ${safeStr(p.language)}` : ""}
+                            </div>
+                          </Link>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="p-4">
+                        <div className="text-sm font-extrabold text-slate-900">Try these patterns</div>
+                        <div className="mt-2 flex flex-wrap gap-2">
+                          {extractSubjectCodeVariants(searchInput).variants.slice(0, 8).map((v) => (
+                            <button
+                              key={v}
+                              onClick={() => {
+                                setSearchInput(v);
+                                setShowSuggest(false);
+                              }}
+                              className="rounded-full border border-slate-200 hover:bg-slate-50 px-3 py-1 text-[11px] font-extrabold text-slate-700"
+                              type="button"
+                            >
+                              {v}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                ) : null}
+              </div>
 
-            {/* Mobile hint */}
-            <div className="lg:hidden mt-3 text-xs font-semibold text-slate-600">
-              Use the <span className="font-extrabold">Filters</span> button to open search + filters together.
+              <div className="hidden lg:block mt-4">
+                <FiltersPanel />
+              </div>
+
+              <div className="lg:hidden mt-4 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs font-semibold text-slate-600">
+                Use the <span className="font-extrabold text-slate-900">Filters</span> button to open search + filters together.
+              </div>
             </div>
           </div>
 
-          {/* Products */}
           <div className="mt-5">
             {loading ? (
-              <div className="rounded-2xl border border-gray-200 bg-white shadow-sm p-6 font-extrabold text-slate-700">
-                Loading products...
-              </div>
+              <ProductsGridSkeleton />
             ) : items.length === 0 ? (
               <div className="rounded-2xl border border-gray-200 bg-white shadow-sm p-6">
                 <div className="text-lg font-extrabold text-slate-900">No products found</div>
@@ -1210,16 +1331,20 @@ export default function ProductsClient() {
                 ) : null}
               </div>
             ) : (
-              // ✅ Removed extra UI wrapping, just displaying the ProductCard
-              <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+              <div className="products-results-grid grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
                 {items.map((p) => (
-                  <ProductCard key={p.slug} product={p as any} />
+                  <div
+                    key={p.slug}
+                    className={isHardcopyCategory(p.category) ? "hardcopy-product-card-wrap" : ""}
+                    data-product-category={safeStr(p.category)}
+                  >
+                    <ProductCard product={p as any} />
+                  </div>
                 ))}
               </div>
             )}
           </div>
 
-          {/* Pagination */}
           {!loading && meta.totalPages > 1 ? (
             <div className="mt-8 flex items-center justify-center gap-3">
               <button
@@ -1262,7 +1387,6 @@ export default function ProductsClient() {
             </div>
           ) : null}
 
-          {/* SEO end content (kept same) */}
           <div className="mt-10 rounded-2xl border border-gray-200 bg-white shadow-sm p-6">
             <h2 className="text-lg md:text-xl font-extrabold text-slate-900">
               Find the right IGNOU material in seconds (Course • Session • Medium)
@@ -1300,35 +1424,41 @@ export default function ProductsClient() {
               <div className="text-sm font-extrabold text-slate-900">FAQ</div>
               <div className="mt-3 space-y-4">
                 <div>
-                  <div className="text-sm font-extrabold text-slate-800">Can I select multiple sessions or mediums together?</div>
+                  <div className="text-sm font-extrabold text-slate-800">
+                    Can I select multiple sessions or mediums together?
+                  </div>
                   <div className="mt-1 text-sm font-semibold text-slate-600">
-                    Yes. This page supports multi-select for session and medium—use it when you want to compare or see all available options.
+                    Yes. This page supports multi-select for session and medium—use it when you want to compare or see
+                    all available options.
                   </div>
                 </div>
                 <div>
-                  <div className="text-sm font-extrabold text-slate-800">I typed a code in a different format, will it still match?</div>
+                  <div className="text-sm font-extrabold text-slate-800">
+                    I typed a code in a different format, will it still match?
+                  </div>
                   <div className="mt-1 text-sm font-semibold text-slate-600">
-                    Yes. Search assists common code variations (like hyphen/space/leading zeros) to increase match chances.
+                    Yes. Search assists common code variations (like hyphen/space/leading zeros) to increase match
+                    chances.
                   </div>
                 </div>
                 <div>
                   <div className="text-sm font-extrabold text-slate-800">What if no products are found?</div>
                   <div className="mt-1 text-sm font-semibold text-slate-600">
-                    Try removing one filter, switching session/medium, or use the suggested code patterns shown on “No results” screen.
+                    Try removing one filter, switching session/medium, or use the suggested code patterns shown on “No
+                    results” screen.
                   </div>
                 </div>
               </div>
             </div>
 
             <div className="mt-5 text-[12px] font-semibold text-slate-500 leading-relaxed">
-              Keywords: IGNOU solved assignments, IGNOU study material, IGNOU PYQ, IGNOU guess paper, IGNOU project guide,
-              session wise assignment, medium wise material, course code wise search.
+              Keywords: IGNOU solved assignments, IGNOU study material, IGNOU PYQ, IGNOU guess paper, IGNOU project
+              guide, session wise assignment, medium wise material, course code wise search.
             </div>
           </div>
         </div>
       </section>
 
-      {/* ✅ Mobile Drawer (same search + same filters + selected chips) */}
       {isFilterOpen ? (
         <div
           className="lg:hidden fixed inset-0 z-[999] bg-black/60 backdrop-blur-sm"
@@ -1353,7 +1483,7 @@ export default function ProductsClient() {
         </div>
 
         <div className="p-4">
-          <div className="flex items-center gap-2 px-4 py-3 rounded-2xl border border-gray-200 bg-white shadow-sm hover:border-slate-300 focus-within:ring-2 focus-within:ring-blue-200 transition">
+          <div className="flex items-center gap-2 px-4 py-3 rounded-2xl border border-gray-200 bg-white shadow-sm hover:border-slate-300">
             <Search size={18} className="text-gray-400" />
             <input
               value={searchInput}

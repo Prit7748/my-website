@@ -1,4 +1,3 @@
-// ✅ FILE: components/product/ProductDetailsClient.tsx (Complete Replace - UPDATED with availability + Want to Buy flow)
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
@@ -6,6 +5,7 @@ import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useCart } from "@/context/CartContext";
+import { trackViewItem } from "../../lib/analytics";
 
 import TopBar from "@/components/TopBar";
 import Navbar from "@/components/Navbar";
@@ -67,8 +67,10 @@ type Product = {
   pages?: number;
   importantNote?: string;
 
-  // ✅ availability from API: "out_of_stock" / "available" / "coming_soon" etc.
   availability?: string;
+  effectiveAvailability?: string;
+  onDemandSalesEnabled?: boolean;
+  comingSoonSalesEnabled?: boolean;
 
   isDigital?: boolean;
   pdfUrl?: string;
@@ -77,7 +79,6 @@ type Product = {
   thumbnailUrl?: string;
   quickUrl?: string;
 
-  // ✅ optional future fields (safe)
   videoUrl?: string;
   comboItems?: Array<{
     title: string;
@@ -101,6 +102,8 @@ type ApiProductCard = {
   thumbUrl?: string;
   quickUrl?: string;
   isDigital?: boolean;
+  availability?: string;
+  canPurchase?: boolean;
 };
 
 type ApiProductsResponse = { products: ApiProductCard[] };
@@ -131,11 +134,14 @@ function isHindiLike(lang: string) {
 }
 function pickSubjectTitleByLanguage(p: Product) {
   const lang = safeStr(p.language);
-  if (isHindiLike(lang)) return safeStr(p.subjectTitleHi) || safeStr(p.subjectTitleEn) || "";
+  if (isHindiLike(lang))
+    return safeStr(p.subjectTitleHi) || safeStr(p.subjectTitleEn) || "";
   return safeStr(p.subjectTitleEn) || safeStr(p.subjectTitleHi) || "";
 }
 function pickCourseTitleByLanguage(p: Product) {
-  const titles = Array.isArray(p.courseTitles) ? p.courseTitles.filter(Boolean) : [];
+  const titles = Array.isArray(p.courseTitles)
+    ? p.courseTitles.filter(Boolean)
+    : [];
   return titles[0] ? safeStr(titles[0]) : "";
 }
 function isVideoUrl(url: string) {
@@ -172,9 +178,40 @@ async function downloadImageSmart(url: string, filenameHint?: string) {
 function normAvail(v?: string) {
   return safeStr(v).toLowerCase();
 }
+
+function resolvedAvailability(p: Product) {
+  return normAvail(p.effectiveAvailability || p.availability || "available");
+}
+
+function isWantToBuyAvailability(v?: string) {
+  const a = normAvail(v);
+  return (
+    a === "want_to_buy" ||
+    a === "wanttobuy" ||
+    a === "want-to-buy" ||
+    a === "out_of_stock" ||
+    a === "outofstock" ||
+    a === "out-of-stock"
+  );
+}
+
+function isOnDemandAvailability(v?: string) {
+  const a = normAvail(v);
+  return (
+    a === "on_demand" ||
+    a === "ondemand" ||
+    a === "on-demand" ||
+    a === "coming_soon" ||
+    a === "comingsoon" ||
+    a === "coming-soon"
+  );
+}
+
 function isOutOfStock(p: Product) {
-  const a = normAvail(p.availability);
-  return a === "out_of_stock" || a === "outofstock" || a === "out-of-stock";
+  return isWantToBuyAvailability(resolvedAvailability(p));
+}
+function isOnDemand(p: Product) {
+  return isOnDemandAvailability(resolvedAvailability(p));
 }
 
 const RV_KEY = "isp_recently_viewed_v1";
@@ -216,10 +253,8 @@ export default function ProductDetailsClient({
   const [recentlyViewed, setRecentlyViewed] = useState<ApiProductCard[]>([]);
   const [relatedLoading, setRelatedLoading] = useState(false);
 
-  // ✅ Hardcopy focus: WhatsApp text loop (EN/HI)
   const [waPulseText, setWaPulseText] = useState<"en" | "hi">("en");
 
-  // ✅ Want to Buy modal state (Out of Stock)
   const [wtbOpen, setWtbOpen] = useState(false);
   const [wtbLoading, setWtbLoading] = useState(false);
   const [wtbForm, setWtbForm] = useState({
@@ -228,7 +263,15 @@ export default function ProductDetailsClient({
     message: "",
   });
 
-  const categoryLabel = useMemo(() => categoryLabelFromSlug(categorySlug), [categorySlug]);
+  const [ctaToast, setCtaToast] = useState<{ show: boolean; text: string }>({
+    show: false,
+    text: "",
+  });
+
+  const categoryLabel = useMemo(
+    () => categoryLabelFromSlug(categorySlug),
+    [categorySlug]
+  );
 
   const isHardcopy = useMemo(() => variant === "hardcopy", [variant]);
   const qtyLocked = useMemo(() => !isHardcopy, [isHardcopy]);
@@ -237,21 +280,29 @@ export default function ProductDetailsClient({
     if (qtyLocked) setQuantity(1);
   }, [qtyLocked]);
 
-  // ✅ Media list
+  useEffect(() => {
+    if (!ctaToast.show) return;
+    const t = setTimeout(
+      () => setCtaToast({ show: false, text: "" }),
+      1400
+    );
+    return () => clearTimeout(t);
+  }, [ctaToast.show]);
+
   const media = useMemo(() => {
     const list = safeArr(product?.images);
     const thumb = product?.thumbnailUrl ? [product.thumbnailUrl] : [];
     const quick = product?.quickUrl ? [product.quickUrl] : [];
-    const vid = product?.videoUrl ? [product.videoUrl] : [];
+    const vid = (product as any)?.videoUrl ? [(product as any).videoUrl] : [];
     const merged = [...thumb, ...quick, ...vid, ...list].filter(Boolean);
     return Array.from(new Set(merged));
   }, [product]);
 
   useEffect(() => {
-    if (selectedMediaIndex > Math.max(0, media.length - 1)) setSelectedMediaIndex(0);
+    if (selectedMediaIndex > Math.max(0, media.length - 1))
+      setSelectedMediaIndex(0);
   }, [media.length, selectedMediaIndex]);
 
-  // ✅ Auto slider
   useEffect(() => {
     if (!isHardcopy) return;
     if (media.length <= 1) return;
@@ -263,20 +314,26 @@ export default function ProductDetailsClient({
     return () => clearInterval(t);
   }, [isHardcopy, media.length]);
 
-  // ✅ WhatsApp CTA loop (3 sec)
   useEffect(() => {
     if (!isHardcopy) return;
-    const t = setInterval(() => {
-      setWaPulseText((p) => (p === "en" ? "hi" : "en"));
-    }, 3000);
+    const t = setInterval(
+      () => setWaPulseText((p) => (p === "en" ? "hi" : "en")),
+      3000
+    );
     return () => clearInterval(t);
   }, [isHardcopy]);
 
-  const heroUrl = media[selectedMediaIndex] || product?.thumbnailUrl || "/images/cover1.jpg";
+  const heroUrl =
+    media[selectedMediaIndex] || product?.thumbnailUrl || "/images/cover1.jpg";
   const heroIsVideo = isVideoUrl(heroUrl);
-  const hasDiscount = !!product.oldPrice && Number(product.oldPrice) > Number(product.price || 0);
-  const subjectTitle = useMemo(() => pickSubjectTitleByLanguage(product), [product]);
-  const courseTitle = useMemo(() => pickCourseTitleByLanguage(product), [product]);
+  const hasDiscount =
+    !!product.oldPrice && Number(product.oldPrice) > Number(product.price || 0);
+  const subjectTitle = useMemo(() => pickSubjectTitleByLanguage(product), [
+    product,
+  ]);
+  const courseTitle = useMemo(() => pickCourseTitleByLanguage(product), [
+    product,
+  ]);
 
   const computedTitle = useMemo(() => {
     const t = safeStr(product.title);
@@ -285,16 +342,21 @@ export default function ProductDetailsClient({
     if (safeStr(product.subjectCode)) parts.push(safeStr(product.subjectCode));
     if (safeStr(product.session)) parts.push(safeStr(product.session));
     if (safeStr(product.language)) parts.push(safeStr(product.language));
-    return parts.length ? `IGNOU Combo (${parts.join(" • ")})` : "IGNOU Combo";
+    return parts.length
+      ? `IGNOU Combo (${parts.join(" • ")})`
+      : "IGNOU Combo";
   }, [product.title, product.subjectCode, product.session, product.language]);
 
   const computedShortDesc = useMemo(() => {
     const s = safeStr(product.shortDesc);
     if (s) return s;
     const bits: string[] = [];
-    if (safeStr(product.subjectCode)) bits.push(`Subject: ${safeStr(product.subjectCode)}`);
-    if (safeStr(product.session)) bits.push(`Session: ${safeStr(product.session)}`);
-    if (safeStr(product.language)) bits.push(`Medium: ${safeStr(product.language)}`);
+    if (safeStr(product.subjectCode))
+      bits.push(`Subject: ${safeStr(product.subjectCode)}`);
+    if (safeStr(product.session))
+      bits.push(`Session: ${safeStr(product.session)}`);
+    if (safeStr(product.language))
+      bits.push(`Medium: ${safeStr(product.language)}`);
     return bits.length
       ? `A curated combo pack for better value. ${bits.join(" | ")}`
       : `A curated combo pack for better value.`;
@@ -304,44 +366,79 @@ export default function ProductDetailsClient({
     const html = safeStr(product.descriptionHtml);
     if (html) return html;
     return `
-      <p><strong>${computedTitle}</strong> is a value combo designed for students to save money and get everything required together.</p>
+      <p><strong>${computedTitle}</strong> is designed for IGNOU students.</p>
       <ul>
         <li>✅ Verified, student-friendly format</li>
-        <li>✅ Best value vs. buying separately</li>
+        <li>✅ Best value & updated</li>
         <li>✅ Helpful for exam preparation and submissions</li>
       </ul>
       <p>For details, please contact us on WhatsApp.</p>
     `;
   }, [product.descriptionHtml, computedTitle]);
 
-  // ✅ WhatsApp Logic (Hydration Safe)
   const waNumber = "7496865680";
   const [pageUrl, setPageUrl] = useState("");
 
   useEffect(() => {
     try {
       setPageUrl(window.location.href);
-    } catch { }
+    } catch {}
   }, []);
+
+  useEffect(() => {
+    const productKey = safeStr(product?._id || product?.slug || pathname);
+    if (!productKey) return;
+
+    try {
+      const viewKey = `isp_view_item_once_v1:${productKey}:${safeStr(pathname)}`;
+      const seen = sessionStorage.getItem(viewKey);
+      if (seen) return;
+
+      trackViewItem({
+        id: safeStr(product?._id || product?.slug),
+        title: computedTitle,
+        category: safeStr(product?.category || categoryLabel || "Product"),
+        price: Number(product?.price || 0),
+        quantity: 1,
+        itemType: safeStr(product?.category).toLowerCase() === "combo" ? "combo" : "product",
+      });
+
+      sessionStorage.setItem(viewKey, new Date().toISOString());
+    } catch {}
+  }, [
+    pathname,
+    product?._id,
+    product?.slug,
+    product?.price,
+    product?.category,
+    computedTitle,
+    categoryLabel,
+  ]);
 
   useEffect(() => {
     try {
       const saved = localStorage.getItem("isp_user_email") || "";
-      if (saved && !wtbForm.email) setWtbForm((p) => ({ ...p, email: saved }));
-    } catch { }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+      if (saved && !wtbForm.email)
+        setWtbForm((p) => ({ ...p, email: saved }));
+    } catch {}
+  }, [wtbForm.email]);
 
   const waBuyMsg = encodeURIComponent(
-    `Hi! I want to buy this product:\n\n${computedTitle}\n${pageUrl || pathname}\n\nPlease share details.`
+    `Hi! I want to buy this product:\n\n${computedTitle}\n${
+      pageUrl || pathname
+    }\n\nPlease share details.`
   );
   const waSamplesMsg = encodeURIComponent(
     `Hi! Please share handwriting samples.\n\nProduct: ${computedTitle}\nSubject Code: ${safeStr(
       product.subjectCode
-    )}\nSession: ${safeStr(product.session)}\nMedium: ${safeStr(product.language)}\n\nLink: ${pageUrl || pathname}`
+    )}\nSession: ${safeStr(product.session)}\nMedium: ${safeStr(
+      product.language
+    )}\n\nLink: ${pageUrl || pathname}`
   );
   const waReviewMsg = encodeURIComponent(
-    `Hi! I purchased this product and want to share my review:\n\n${computedTitle}\n${pageUrl || pathname}\n\nRating: ⭐⭐⭐⭐⭐\nReview: `
+    `Hi! I purchased this product and want to share my review:\n\n${computedTitle}\n${
+      pageUrl || pathname
+    }\n\nRating: ⭐⭐⭐⭐⭐\nReview: `
   );
 
   const waBuyLink = `https://wa.me/91${waNumber}?text=${waBuyMsg}`;
@@ -349,18 +446,28 @@ export default function ProductDetailsClient({
   const waReviewLink = `https://wa.me/91${waNumber}?text=${waReviewMsg}`;
 
   const handleAddToCart = () => {
+    if (isOutOfStock(product)) {
+      setCtaToast({ show: true, text: "Want to Buy option available ✅" });
+      setWtbOpen(true);
+      return;
+    }
+
     addToCart({
-      id: product._id, // ✅ IMPORTANT: Mongo ObjectId
+      id: product._id,
       title: computedTitle,
       price: Number(product.price || 0),
       image: product.thumbnailUrl || media[0] || "/images/cover1.jpg",
       quantity: qtyLocked ? 1 : quantity,
       category: safeStr(product.category),
       courseCode: (product.courseCodes?.[0] || "").toString(),
-    });
+      availability: safeStr(
+        product.effectiveAvailability || product.availability || "available"
+      ),
+      canPurchase: !isOutOfStock(product),
+    } as any);
+
     alert("Item added to cart successfully!");
   };
-
 
   const handleHardcopyWhatsApp = () => {
     window.open(waBuyLink, "_blank", "noopener,noreferrer");
@@ -369,13 +476,12 @@ export default function ProductDetailsClient({
   const handleShare = async () => {
     try {
       const url = window.location.href;
-      if (navigator.share) {
-        await navigator.share({ title: computedTitle, url });
-      } else {
+      if (navigator.share) await navigator.share({ title: computedTitle, url });
+      else {
         await navigator.clipboard.writeText(url);
         alert("Link copied!");
       }
-    } catch { }
+    } catch {}
   };
 
   async function submitWantToBuy() {
@@ -383,11 +489,6 @@ export default function ProductDetailsClient({
     const email = safeStr(wtbForm.email);
     const phone = safeStr(wtbForm.phone);
     const message = safeStr(wtbForm.message);
-
-    if (!email) {
-      alert("Email is required.");
-      return;
-    }
 
     setWtbLoading(true);
     try {
@@ -399,7 +500,9 @@ export default function ProductDetailsClient({
           productId,
           email,
           phone,
-          message: message || `Interested in: ${computedTitle}\nLink: ${pageUrl || pathname}`,
+          message:
+            message ||
+            `Interested in: ${computedTitle}\nLink: ${pageUrl || pathname}`,
         }),
       });
 
@@ -411,8 +514,8 @@ export default function ProductDetailsClient({
       }
 
       try {
-        localStorage.setItem("isp_user_email", email);
-      } catch { }
+        if (email) localStorage.setItem("isp_user_email", email);
+      } catch {}
 
       alert(data?.message || "Request submitted ✅");
       setWtbOpen(false);
@@ -428,16 +531,25 @@ export default function ProductDetailsClient({
     const oos = isOutOfStock(product);
 
     return (
-      <div className={`flex gap-3 ${isMobile ? "" : "w-full"} ${isHardcopy ? "flex-col sm:flex-row" : ""}`}>
-        {/* Quantity */}
+      <div
+        className={`flex gap-3 ${isMobile ? "" : "w-full"} ${
+          isHardcopy ? "flex-col sm:flex-row" : ""
+        }`}
+      >
         <div
-          className={`flex items-center rounded-2xl bg-white h-14 border ${qtyLocked ? "border-gray-200 opacity-70" : "border-gray-200"
-            } shadow-sm`}
+          className={`flex items-center rounded-2xl bg-white h-14 border ${
+            qtyLocked
+              ? "border-gray-200 opacity-70"
+              : "border-gray-200"
+          } shadow-sm`}
         >
           <button
             onClick={() => setQuantity(Math.max(1, quantity - 1))}
-            className={`px-3 h-full rounded-l-2xl ${qtyLocked ? "cursor-not-allowed" : "hover:bg-gray-50 text-gray-800"
-              }`}
+            className={`px-3 h-full rounded-l-2xl ${
+              qtyLocked
+                ? "cursor-not-allowed"
+                : "hover:bg-gray-50 text-gray-800"
+            }`}
             disabled={qtyLocked}
             aria-label="Decrease quantity"
           >
@@ -450,8 +562,11 @@ export default function ProductDetailsClient({
 
           <button
             onClick={() => setQuantity(quantity + 1)}
-            className={`px-3 h-full rounded-r-2xl ${qtyLocked ? "cursor-not-allowed" : "hover:bg-gray-50 text-gray-800"
-              }`}
+            className={`px-3 h-full rounded-r-2xl ${
+              qtyLocked
+                ? "cursor-not-allowed"
+                : "hover:bg-gray-50 text-gray-800"
+            }`}
             disabled={qtyLocked}
             aria-label="Increase quantity"
           >
@@ -459,69 +574,103 @@ export default function ProductDetailsClient({
           </button>
         </div>
 
-        {/* CTA Buttons */}
         {isHardcopy ? (
-          <div className={`flex-1 flex gap-3 ${isMobile ? "" : ""}`}>
+          <div className="flex-1 min-w-0 flex gap-3">
+            <button
+              onClick={handleAddToCart}
+              className="
+                flex-1 min-w-0 h-14 px-4 rounded-2xl font-extrabold text-sm md:text-base
+                bg-blue-700 text-white hover:bg-blue-800 transition
+                shadow-[0_14px_35px_-18px_rgba(37,99,235,0.7)]
+                active:scale-[0.98]
+                inline-flex items-center justify-center gap-2
+              "
+              aria-label="Add to cart"
+              title="Add to cart"
+            >
+              <ShoppingCart size={20} />
+              <span className="truncate">Add to Cart</span>
+            </button>
+
             <button
               onClick={handleHardcopyWhatsApp}
               className="
                 isp-wa-pulse
-                relative flex-1 h-14 rounded-2xl font-extrabold text-sm md:text-base
+                relative h-14 rounded-2xl font-extrabold text-sm md:text-[15px]
                 bg-emerald-600 text-white
                 shadow-[0_14px_35px_-18px_rgba(16,185,129,0.85)]
                 ring-2 ring-emerald-300/60
                 hover:bg-emerald-700 transition
                 active:scale-[0.98]
                 overflow-hidden
+                shrink-0
+                px-4 sm:px-5
+                w-[44%] sm:w-[38%] lg:w-[34%]
+                min-w-[190px] sm:min-w-[210px]
+                max-w-[280px]
               "
             >
               <span className="absolute inset-0 opacity-30 bg-[radial-gradient(600px_120px_at_20%_0%,rgba(255,255,255,0.6),transparent)]" />
               <span className="relative inline-flex items-center justify-center gap-2 w-full h-full">
                 <MessageCircle size={20} />
-                <span className="grid place-items-center">
+                <span className="grid place-items-center leading-none">
                   <span
-                    className={`col-start-1 row-start-1 transition-opacity duration-500 ease-in-out ${waPulseText === "en" ? "opacity-100" : "opacity-0"
-                      }`}
+                    className={`col-start-1 row-start-1 transition-opacity duration-500 ease-in-out ${
+                      waPulseText === "en" ? "opacity-100" : "opacity-0"
+                    }`}
                   >
-                    Buy Direct from WhatsApp
+                    Buy from WhatsApp
                   </span>
                   <span
-                    className={`col-start-1 row-start-1 transition-opacity duration-500 ease-in-out ${waPulseText === "hi" ? "opacity-100" : "opacity-0"
-                      }`}
+                    className={`col-start-1 row-start-1 transition-opacity duration-500 ease-in-out ${
+                      waPulseText === "hi" ? "opacity-100" : "opacity-0"
+                    }`}
                   >
-                    सीधा व्हाट्सएप से खरीदें
+                    व्हाट्सएप से खरीदें
                   </span>
                 </span>
               </span>
             </button>
-
-            <button
-              onClick={handleAddToCart}
-              className="
-                h-14 px-4 rounded-2xl font-extrabold text-sm md:text-base
-                border border-slate-200 bg-white text-slate-900
-                hover:bg-slate-50 hover:border-slate-300 transition
-                shadow-sm active:scale-[0.99]
-                inline-flex items-center justify-center gap-2
-              "
-              aria-label="Add to cart"
-              title="Add to cart"
-            >
-              <ShoppingCart size={20} /> Add
-            </button>
           </div>
         ) : oos ? (
           <button
-            onClick={() => setWtbOpen(true)}
+            type="button"
+            onClick={() => {
+              setCtaToast({
+                show: true,
+                text: "Want to Buy request form opened ✅",
+              });
+              setWtbOpen(true);
+            }}
             className="
               flex-1 h-14 rounded-2xl font-extrabold text-base
-              bg-emerald-600 text-white hover:bg-emerald-700 transition
-              shadow-[0_14px_35px_-18px_rgba(16,185,129,0.65)]
+              !opacity-100 !text-white
+              !bg-orange-600 hover:!bg-orange-700
+              border-2 !border-orange-300
+              shadow-[0_18px_45px_-18px_rgba(234,88,12,0.95)]
+              ring-2 ring-orange-200/80
               active:scale-[0.98]
-              flex items-center justify-center gap-2
+              inline-flex items-center justify-center gap-2
+              relative overflow-hidden
             "
+            style={{
+              background:
+                "linear-gradient(90deg, #ea580c 0%, #e11d48 100%)",
+              color: "#fff",
+              opacity: 1,
+            }}
           >
-            <MessageCircle size={20} /> Want to Buy
+            <span
+              className="absolute inset-0"
+              style={{
+                background:
+                  "radial-gradient(600px 120px at 20% 0%, rgba(255,255,255,0.25), transparent 60%)",
+                opacity: 1,
+              }}
+            />
+            <span className="relative inline-flex items-center gap-2">
+              <MessageCircle size={20} /> Want to Buy
+            </span>
           </button>
         ) : (
           <button
@@ -556,7 +705,9 @@ export default function ProductDetailsClient({
       title: computedTitle,
       slug: product.slug,
       category: product.category,
-      courseCodes: Array.isArray(product.courseCodes) ? product.courseCodes : [],
+      courseCodes: Array.isArray(product.courseCodes)
+        ? product.courseCodes
+        : [],
       session: product.session || "",
       language: product.language || "",
       price: Number(product.price || 0),
@@ -565,18 +716,38 @@ export default function ProductDetailsClient({
       thumbUrl: product.thumbnailUrl || "",
       quickUrl: product.quickUrl || "",
       isDigital: !!product.isDigital,
+      availability:
+        product.effectiveAvailability || product.availability || "available",
+      canPurchase: !isOutOfStock(product),
     };
+
     try {
       const raw = localStorage.getItem(RV_KEY) || "[]";
       const prev = safeJsonParse<ApiProductCard[]>(raw, []);
-      const cleaned = Array.isArray(prev) ? prev.filter((x) => x && x.slug) : [];
+      const cleaned = Array.isArray(prev)
+        ? prev.filter((x) => x && x.slug)
+        : [];
       const withoutCurrent = cleaned.filter((x) => x.slug !== card.slug);
       const next = [card, ...withoutCurrent].slice(0, RV_MAX);
       localStorage.setItem(RV_KEY, JSON.stringify(next));
       setRecentlyViewed(next.filter((x) => x.slug !== card.slug).slice(0, 12));
-    } catch { }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [product.slug]);
+    } catch {}
+  }, [
+    product.slug,
+    computedTitle,
+    product.category,
+    product.courseCodes,
+    product.session,
+    product.language,
+    product.price,
+    product.oldPrice,
+    product.images,
+    product.thumbnailUrl,
+    product.quickUrl,
+    product.isDigital,
+    product.effectiveAvailability,
+    product.availability,
+  ]);
 
   useEffect(() => {
     (async () => {
@@ -590,7 +761,9 @@ export default function ProductDetailsClient({
         q1.set("sort", "latest");
         if (cat) q1.set("category", cat);
         if (primaryCourse) q1.set("course", primaryCourse);
-        const r1 = await fetch(`/api/products?${q1.toString()}`, { cache: "no-store" });
+        const r1 = await fetch(`/api/products?${q1.toString()}`, {
+          cache: "no-store",
+        });
         const d1: ApiProductsResponse = await r1.json();
         const list1 = Array.isArray(d1.products) ? d1.products : [];
         const uniq: ApiProductCard[] = [];
@@ -613,14 +786,16 @@ export default function ProductDetailsClient({
 
   const comboHref = useMemo(() => {
     const q = new URLSearchParams();
-    if (safeStr(product.subjectCode)) q.set("subject", safeStr(product.subjectCode));
+    if (safeStr(product.subjectCode))
+      q.set("subject", safeStr(product.subjectCode));
     if (safeStr(product.session)) q.set("session", safeStr(product.session));
     if (safeStr(product.language)) q.set("medium", safeStr(product.language));
     return `/combo?${q.toString()}`;
   }, [product.subjectCode, product.session, product.language]);
 
   const showComboBanner = categorySlug !== "combo";
-  const showSolvedHandwrittenBanner = safeStr(product.category) === "Solved Assignments";
+  const showSolvedHandwrittenBanner =
+    safeStr(product.category) === "Solved Assignments";
 
   const TrustDeliverySection = () => (
     <div className="rounded-2xl border border-emerald-100 bg-gradient-to-r from-emerald-50 to-white p-4 shadow-sm transition hover:shadow-md">
@@ -629,10 +804,13 @@ export default function ProductDetailsClient({
           <Zap size={18} />
         </div>
         <div className="flex-1">
-          <div className="text-sm font-extrabold text-slate-900">Fast Dispatch • Safe Packing • All India Delivery</div>
+          <div className="text-sm font-extrabold text-slate-900">
+            Fast Dispatch • Safe Packing • All India Delivery
+          </div>
           <div className="mt-1 text-xs text-slate-700 font-semibold leading-relaxed">
-            We pack carefully and ship fast. You’ll receive genuine handwritten hardcopy delivered to your address. For
-            quickest confirmation and tracking support, prefer WhatsApp.
+            We pack carefully and ship fast. You’ll receive genuine handwritten
+            hardcopy delivered to your address. For quickest confirmation and
+            tracking support, prefer WhatsApp.
           </div>
           <div className="mt-3 flex flex-wrap gap-2">
             <span className="inline-flex items-center gap-2 rounded-xl border border-emerald-100 bg-white px-3 py-2 text-[12px] font-extrabold text-emerald-800">
@@ -647,7 +825,6 @@ export default function ProductDetailsClient({
           </div>
 
           <div className="mt-4 flex flex-col sm:flex-row gap-3">
-            {/* ✅ Updated Safe Link: Samples */}
             <a
               href={pageUrl ? waSamplesLink : `https://wa.me/91${waNumber}`}
               target="_blank"
@@ -659,7 +836,6 @@ export default function ProductDetailsClient({
               <ExternalLink size={14} className="text-slate-500" />
             </a>
 
-            {/* ✅ Updated Safe Link: Priority Support */}
             <a
               href={pageUrl ? waBuyLink : `https://wa.me/91${waNumber}`}
               target="_blank"
@@ -678,35 +854,53 @@ export default function ProductDetailsClient({
 
   const ComboIncludedSection = () => {
     if (categorySlug !== "combo") return null;
-    const items = Array.isArray(product.comboItems) ? product.comboItems.filter((x) => x && x.slug) : [];
+    const items = Array.isArray((product as any).comboItems)
+      ? (product as any).comboItems.filter((x: any) => x && x.slug)
+      : [];
     return (
       <div className="mt-6 rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden transition hover:shadow-md">
         <div className="px-4 py-3 bg-gradient-to-r from-slate-50 to-white border-b border-slate-200">
           <div className="flex items-center gap-2">
             <Sparkles size={16} className="text-blue-700" />
-            <div className="text-sm font-extrabold text-slate-900">Included Products</div>
+            <div className="text-sm font-extrabold text-slate-900">
+              Included Products
+            </div>
           </div>
           <div className="mt-1 text-xs text-slate-600 font-semibold">
-            Combo details are shown here (auto). If you define combo items from backend, this becomes super powerful for SEO.
+            Combo details are shown here (auto).
           </div>
         </div>
 
         {items.length === 0 ? (
           <div className="p-4 text-sm text-slate-700 font-semibold">
-            No included items found yet. (Optional improvement: add <code>comboItems</code> from backend.)
+            No included items found yet.
           </div>
         ) : (
           <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-3">
-            {items.slice(0, 12).map((it) => (
-              <div key={it.slug} className="rounded-2xl border border-slate-200 bg-slate-50 p-3 flex gap-3 items-start">
+            {items.slice(0, 12).map((it: any) => (
+              <div
+                key={it.slug}
+                className="rounded-2xl border border-slate-200 bg-slate-50 p-3 flex gap-3 items-start"
+              >
                 <div className="relative w-14 h-20 rounded-xl overflow-hidden bg-white border border-slate-200 flex-shrink-0">
-                  {it.thumbUrl ? <Image src={it.thumbUrl} alt={it.title} fill className="object-cover" /> : null}
+                  {it.thumbUrl ? (
+                    <Image
+                      src={it.thumbUrl}
+                      alt={it.title}
+                      fill
+                      className="object-cover"
+                    />
+                  ) : null}
                 </div>
                 <div className="min-w-0">
-                  <div className="text-xs font-extrabold text-slate-900 line-clamp-2">{it.title}</div>
+                  <div className="text-xs font-extrabold text-slate-900 line-clamp-2">
+                    {it.title}
+                  </div>
                   <div className="mt-1 text-[11px] font-bold text-slate-600">
                     {safeStr(it.category) ? safeStr(it.category) : "Product"}
-                    {typeof it.price === "number" ? ` • ₹${money(it.price)}` : ""}
+                    {typeof it.price === "number"
+                      ? ` • ₹${money(it.price)}`
+                      : ""}
                   </div>
                   <Link
                     href={`/products/${it.slug}`}
@@ -734,15 +928,29 @@ export default function ProductDetailsClient({
             Home
           </Link>
           <ChevronRight size={12} className="text-gray-300" />
-          <Link href={`/${categorySlug}`} className="hover:text-blue-700 font-extrabold">
+          <Link
+            href={`/${categorySlug}`}
+            className="hover:text-blue-700 font-extrabold"
+          >
             {categoryLabel}
           </Link>
           <ChevronRight size={12} className="text-gray-300" />
-          <span className="text-gray-900 font-extrabold truncate">{computedTitle}</span>
+          <span className="text-gray-900 font-extrabold truncate">
+            {computedTitle}
+          </span>
         </div>
       </div>
 
       <div className="max-w-[1400px] mx-auto px-4 py-8">
+        {ctaToast.show ? (
+          <div className="fixed top-24 left-1/2 -translate-x-1/2 z-[120]">
+            <div className="inline-flex items-center gap-2 rounded-xl px-4 py-2 bg-emerald-50 text-emerald-800 border border-emerald-200 shadow-lg text-sm font-extrabold">
+              <CheckCircle2 size={16} />
+              {ctaToast.text}
+            </div>
+          </div>
+        ) : null}
+
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-12 items-start">
           <div className="lg:col-span-5 flex flex-col gap-4 lg:sticky lg:top-32">
             <div className="relative aspect-[210/297] bg-white rounded-2xl overflow-hidden border border-gray-200 shadow-md transition hover:shadow-xl hover:-translate-y-[2px]">
@@ -781,24 +989,37 @@ export default function ProductDetailsClient({
                   <div key={url + i} className="relative w-16 h-24 flex-shrink-0">
                     <button
                       onClick={() => setSelectedMediaIndex(i)}
-                      className={`relative w-16 h-24 rounded-xl overflow-hidden border-2 transition-all ${selectedMediaIndex === i
-                        ? "border-blue-700 ring-2 ring-blue-100"
-                        : "border-gray-200 hover:border-gray-300"
-                        }`}
+                      className={`relative w-16 h-24 rounded-xl overflow-hidden border-2 transition-all ${
+                        selectedMediaIndex === i
+                          ? "border-blue-700 ring-2 ring-blue-100"
+                          : "border-gray-200 hover:border-gray-300"
+                      }`}
                       aria-label={`Media ${i + 1}`}
                       title={`Media ${i + 1}`}
                     >
                       {isVideoUrl(url) ? (
                         <div className="absolute inset-0 bg-slate-900 text-white flex items-center justify-center">
-                          <span className="text-[10px] font-extrabold">VIDEO</span>
+                          <span className="text-[10px] font-extrabold">
+                            VIDEO
+                          </span>
                         </div>
                       ) : (
-                        <Image src={url} alt={`thumb-${i + 1}`} fill className="object-cover" />
+                        <Image
+                          src={url}
+                          alt={`thumb-${i + 1}`}
+                          fill
+                          className="object-cover"
+                        />
                       )}
                     </button>
                     {!isHardcopy ? (
                       <button
-                        onClick={() => downloadImageSmart(url, `${product.slug}-img-${i + 1}.jpg`)}
+                        onClick={() =>
+                          downloadImageSmart(
+                            url,
+                            `${product.slug}-img-${i + 1}.jpg`
+                          )
+                        }
                         className="absolute -top-2 -right-2 h-8 w-8 rounded-full bg-white border border-gray-200 shadow-sm flex items-center justify-center text-gray-700 hover:text-blue-700 hover:border-blue-200 transition"
                         aria-label="Download image"
                         title="Download image"
@@ -814,23 +1035,29 @@ export default function ProductDetailsClient({
             <div className="rounded-2xl border border-gray-200 bg-white p-4 shadow-sm transition hover:shadow-md">
               <div className="flex items-start gap-3">
                 <div
-                  className={`mt-0.5 rounded-xl p-2 ${isHardcopy ? "bg-orange-50 text-orange-700" : "bg-emerald-50 text-emerald-700"
-                    }`}
+                  className={`mt-0.5 rounded-xl p-2 ${
+                    isHardcopy
+                      ? "bg-orange-50 text-orange-700"
+                      : "bg-emerald-50 text-emerald-700"
+                  }`}
                 >
                   {isHardcopy ? <Truck size={18} /> : <FileText size={18} />}
                 </div>
                 <div className="flex-1">
                   <div className="text-sm font-extrabold text-slate-900">
-                    {isHardcopy ? "Hardcopy Delivery • WhatsApp Recommended" : "Digital Product • Instant Access"}
+                    {isHardcopy
+                      ? "Hardcopy Delivery • WhatsApp Recommended"
+                      : "Digital Product • Instant Access"}
                   </div>
                   <div className="mt-1 text-xs text-gray-600 font-semibold leading-relaxed">
                     {isHardcopy
-                      ? "Website order is available, but WhatsApp gives fastest confirmation, customization, and delivery support."
-                      : "Digital categories allow only 1 quantity per product. This prevents duplicate purchases by mistake."}
+                      ? "Website order is available, but WhatsApp gives fastest confirmation and delivery support."
+                      : "Digital categories allow only 1 quantity per product to avoid duplicate purchases."}
                   </div>
                   {!isHardcopy ? (
                     <div className="mt-2 inline-flex items-center gap-2 text-[11px] font-extrabold text-gray-600">
-                      <Info size={14} className="text-amber-600" /> Quantity locked to 1
+                      <Info size={14} className="text-amber-600" /> Quantity
+                      locked to 1
                     </div>
                   ) : null}
                 </div>
@@ -860,9 +1087,9 @@ export default function ProductDetailsClient({
                 <BadgeCheck size={14} className="text-blue-700" /> Verified
               </span>
 
-              {isOutOfStock(product) ? (
-                <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-red-50 text-red-700 text-xs font-extrabold rounded-full border border-red-200">
-                  <X size={14} /> Out of Stock
+              {isOnDemand(product) ? (
+                <span className="inline-flex items-center gap-1.5 px-3 py-1 bg-amber-50 text-amber-800 text-xs font-extrabold rounded-full border border-amber-100">
+                  <Zap size={14} /> On Demand
                 </span>
               ) : null}
             </div>
@@ -873,9 +1100,13 @@ export default function ProductDetailsClient({
 
             <div className="flex items-center gap-4 mb-5 pb-5 border-b border-gray-100">
               <div className="flex items-end gap-2">
-                <span className="text-4xl font-extrabold text-green-700">₹{money(product.price)}</span>
+                <span className="text-4xl font-extrabold text-green-700">
+                  ₹{money(product.price)}
+                </span>
                 {hasDiscount ? (
-                  <span className="text-lg text-gray-400 line-through mb-1">₹{money(Number(product.oldPrice))}</span>
+                  <span className="text-lg text-gray-400 line-through mb-1">
+                    ₹{money(Number(product.oldPrice))}
+                  </span>
                 ) : null}
               </div>
 
@@ -887,7 +1118,9 @@ export default function ProductDetailsClient({
                     <Star key={i} size={14} fill="currentColor" />
                   ))}
                 </div>
-                <span className="text-xs text-gray-500 font-semibold">Trusted by students</span>
+                <span className="text-xs text-gray-500 font-semibold">
+                  Trusted by students
+                </span>
               </div>
             </div>
 
@@ -925,8 +1158,12 @@ export default function ProductDetailsClient({
                       <PenTool size={20} />
                     </div>
                     <div>
-                      <h4 className="font-extrabold text-purple-900 text-sm">Need Handwritten Version?</h4>
-                      <p className="text-xs text-purple-700 font-semibold">Choose PDF or Hardcopy delivery.</p>
+                      <h4 className="font-extrabold text-purple-900 text-sm">
+                        Need Handwritten Version?
+                      </h4>
+                      <p className="text-xs text-purple-700 font-semibold">
+                        Choose PDF or Hardcopy delivery.
+                      </p>
                     </div>
                   </div>
                   <button
@@ -940,8 +1177,13 @@ export default function ProductDetailsClient({
                 {isHandwrittenOpen && (
                   <div className="absolute top-full left-0 right-0 mt-2 bg-white border border-purple-100 rounded-2xl shadow-xl z-30 overflow-hidden">
                     <div className="flex justify-between items-center bg-purple-50 px-4 py-2 border-b border-purple-100">
-                      <span className="text-xs font-extrabold text-purple-800 uppercase">Select Format</span>
-                      <button onClick={() => setIsHandwrittenOpen(false)} aria-label="Close">
+                      <span className="text-xs font-extrabold text-purple-800 uppercase">
+                        Select Format
+                      </span>
+                      <button
+                        onClick={() => setIsHandwrittenOpen(false)}
+                        aria-label="Close"
+                      >
                         <X size={14} className="text-purple-400 hover:text-purple-800" />
                       </button>
                     </div>
@@ -954,18 +1196,29 @@ export default function ProductDetailsClient({
                         <Truck size={16} />
                       </div>
                       <div>
-                        <h4 className="font-extrabold text-slate-800 text-xs">Handwritten Hardcopy</h4>
-                        <p className="text-[10px] text-gray-500 font-semibold">Delivery all over India</p>
+                        <h4 className="font-extrabold text-slate-800 text-xs">
+                          Handwritten Hardcopy
+                        </h4>
+                        <p className="text-[10px] text-gray-500 font-semibold">
+                          Delivery all over India
+                        </p>
                       </div>
                     </Link>
 
-                    <Link href={`/handwritten-pdfs`} className="flex items-center gap-3 p-3 hover:bg-gray-50">
+                    <Link
+                      href={`/handwritten-pdfs`}
+                      className="flex items-center gap-3 p-3 hover:bg-gray-50"
+                    >
                       <div className="p-2 bg-blue-100 text-blue-700 rounded-full">
                         <FileSignature size={16} />
                       </div>
                       <div>
-                        <h4 className="font-extrabold text-slate-800 text-xs">Handwritten PDF</h4>
-                        <p className="text-[10px] text-gray-500 font-semibold">Scanned PDF format</p>
+                        <h4 className="font-extrabold text-slate-800 text-xs">
+                          Handwritten PDF
+                        </h4>
+                        <p className="text-[10px] text-gray-500 font-semibold">
+                          Scanned PDF format
+                        </p>
                       </div>
                     </Link>
                   </div>
@@ -975,7 +1228,9 @@ export default function ProductDetailsClient({
 
             {safeStr(product.shortDesc) || safeStr(computedShortDesc) ? (
               <p className="text-gray-700 mb-6 leading-relaxed text-sm md:text-base font-semibold">
-                {safeStr(product.shortDesc) ? safeStr(product.shortDesc) : computedShortDesc}
+                {safeStr(product.shortDesc)
+                  ? safeStr(product.shortDesc)
+                  : computedShortDesc}
               </p>
             ) : null}
 
@@ -987,47 +1242,72 @@ export default function ProductDetailsClient({
               <div className="grid grid-cols-1 md:grid-cols-2 text-sm md:divide-x border-gray-100">
                 <div className="p-4 space-y-3">
                   <div className="flex flex-col">
-                    <span className="text-xs text-gray-400 font-extrabold">Subject Code</span>
-                    <span className="font-extrabold text-slate-900">{safeStr(product.subjectCode) || "-"}</span>
+                    <span className="text-xs text-gray-400 font-extrabold">
+                      Subject Code
+                    </span>
+                    <span className="font-extrabold text-slate-900">
+                      {safeStr(product.subjectCode) || "-"}
+                    </span>
                   </div>
 
                   <div className="flex flex-col">
                     <span className="text-xs text-gray-400 font-extrabold">
                       Subject Title ({safeStr(product.language) || "Medium"})
                     </span>
-                    <span className="font-extrabold text-slate-900">{subjectTitle || "-"}</span>
+                    <span className="font-extrabold text-slate-900">
+                      {subjectTitle || "-"}
+                    </span>
                   </div>
 
                   <div className="flex flex-col">
-                    <span className="text-xs text-gray-400 font-extrabold">Course Code</span>
+                    <span className="text-xs text-gray-400 font-extrabold">
+                      Course Code
+                    </span>
                     <span className="font-extrabold text-slate-900">
-                      {Array.isArray(product.courseCodes) && product.courseCodes.length
+                      {Array.isArray(product.courseCodes) &&
+                      product.courseCodes.length
                         ? product.courseCodes.join(", ")
                         : "-"}
                     </span>
                   </div>
 
                   <div className="flex flex-col">
-                    <span className="text-xs text-gray-400 font-extrabold">Course Title</span>
-                    <span className="font-extrabold text-slate-900">{courseTitle || "-"}</span>
+                    <span className="text-xs text-gray-400 font-extrabold">
+                      Course Title
+                    </span>
+                    <span className="font-extrabold text-slate-900">
+                      {courseTitle || "-"}
+                    </span>
                   </div>
                 </div>
 
                 <div className="p-4 space-y-3">
                   <div className="flex flex-col">
-                    <span className="text-xs text-gray-400 font-extrabold">Medium</span>
-                    <span className="font-extrabold text-slate-900">{safeStr(product.language) || "-"}</span>
+                    <span className="text-xs text-gray-400 font-extrabold">
+                      Medium
+                    </span>
+                    <span className="font-extrabold text-slate-900">
+                      {safeStr(product.language) || "-"}
+                    </span>
                   </div>
 
                   <div className="flex flex-col">
-                    <span className="text-xs text-gray-400 font-extrabold">Session</span>
-                    <span className="font-extrabold text-slate-900">{safeStr(product.session) || "-"}</span>
+                    <span className="text-xs text-gray-400 font-extrabold">
+                      Session
+                    </span>
+                    <span className="font-extrabold text-slate-900">
+                      {safeStr(product.session) || "-"}
+                    </span>
                   </div>
 
                   {!isHardcopy ? (
                     <div className="flex flex-col">
-                      <span className="text-xs text-gray-400 font-extrabold">No. of Pages</span>
-                      <span className="font-extrabold text-slate-900">{String(product.pages || 0)}</span>
+                      <span className="text-xs text-gray-400 font-extrabold">
+                        No. of Pages
+                      </span>
+                      <span className="font-extrabold text-slate-900">
+                        {String(product.pages || 0)}
+                      </span>
                     </div>
                   ) : (
                     <div className="rounded-xl border border-emerald-100 bg-emerald-50 p-3">
@@ -1036,7 +1316,7 @@ export default function ProductDetailsClient({
                           <Info size={16} />
                         </div>
                         <div className="text-xs text-emerald-900 font-semibold leading-relaxed">
-                          Hardcopy category: pages are not shown here (as per delivery workflow).
+                          Hardcopy category: pages are not shown here.
                         </div>
                       </div>
                     </div>
@@ -1055,14 +1335,30 @@ export default function ProductDetailsClient({
                     </div>
                   </div>
 
-                  {isOutOfStock(product) ? (
-                    <div className="rounded-xl border border-red-200 bg-red-50 p-3">
+                  {isOnDemand(product) ? (
+                    <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
                       <div className="flex items-start gap-2">
-                        <div className="mt-0.5 text-red-700">
-                          <X size={16} />
+                        <div className="mt-0.5 text-amber-700">
+                          <Zap size={16} />
                         </div>
-                        <div className="text-xs text-red-800 font-semibold leading-relaxed">
-                          Currently Out of Stock. Tap <b>Want to Buy</b> to request availability.
+                        <div className="text-xs text-amber-900 font-semibold leading-relaxed">
+                          This product is <b>On Demand</b>. You can place the
+                          order normally, and delivery/upload will be processed
+                          by our team.
+                        </div>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {isOutOfStock(product) ? (
+                    <div className="rounded-xl border border-orange-200 bg-orange-50 p-3">
+                      <div className="flex items-start gap-2">
+                        <div className="mt-0.5 text-orange-700">
+                          <MessageCircle size={16} />
+                        </div>
+                        <div className="text-xs text-orange-900 font-semibold leading-relaxed">
+                          This item is currently not instantly available. Tap{" "}
+                          <b>Want to Buy</b> to submit your requirement.
                         </div>
                       </div>
                     </div>
@@ -1074,7 +1370,8 @@ export default function ProductDetailsClient({
             {!!safeStr(product.importantNote) && (
               <div className="bg-amber-50 p-4 rounded-2xl border border-amber-100 shadow-sm transition hover:shadow-md">
                 <h3 className="font-extrabold text-amber-900 text-xs uppercase tracking-wide mb-2 flex items-center gap-2">
-                  <AlertCircle size={14} className="text-amber-700" /> Important Note
+                  <AlertCircle size={14} className="text-amber-700" />{" "}
+                  Important Note
                 </h3>
                 <div className="text-xs text-amber-900 whitespace-pre-line font-semibold leading-relaxed">
                   {safeStr(product.importantNote)}
@@ -1084,9 +1381,12 @@ export default function ProductDetailsClient({
 
             {isHardcopy ? (
               <div className="mt-6 rounded-2xl border border-gray-200 bg-white p-4 shadow-sm transition hover:shadow-md">
-                <div className="text-[12px] font-extrabold text-slate-800">Delivery Note</div>
+                <div className="text-[12px] font-extrabold text-slate-800">
+                  Delivery Note
+                </div>
                 <div className="mt-1 text-[12px] text-slate-600 font-semibold leading-relaxed">
-                  Dispatch & delivery time may vary by location. For quickest confirmation and delivery support, use WhatsApp.
+                  Dispatch & delivery time may vary by location. For quickest
+                  confirmation and delivery support, use WhatsApp.
                 </div>
               </div>
             ) : null}
@@ -1103,8 +1403,12 @@ export default function ProductDetailsClient({
             >
               <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
                 <div className="min-w-0">
-                  <div className="text-xs font-extrabold text-emerald-800 uppercase tracking-wide">Save More</div>
-                  <div className="text-lg md:text-xl font-extrabold text-slate-900">Purchase in Combo & Save Money</div>
+                  <div className="text-xs font-extrabold text-emerald-800 uppercase tracking-wide">
+                    Save More
+                  </div>
+                  <div className="text-lg md:text-xl font-extrabold text-slate-900">
+                    Purchase in Combo & Save Money
+                  </div>
                   <div className="mt-1 text-xs text-slate-700 font-semibold leading-relaxed">
                     Recommended: buy related products together for better value.
                   </div>
@@ -1124,7 +1428,10 @@ export default function ProductDetailsClient({
           <div
             className="prose prose-sm prose-blue max-w-none text-slate-700"
             dangerouslySetInnerHTML={{
-              __html: categorySlug === "combo" ? computedDescriptionHtml : safeStr(product.descriptionHtml) || computedDescriptionHtml,
+              __html:
+                categorySlug === "combo"
+                  ? computedDescriptionHtml
+                  : safeStr(product.descriptionHtml) || computedDescriptionHtml,
             }}
           />
         </div>
@@ -1134,7 +1441,6 @@ export default function ProductDetailsClient({
             <h2 className="text-lg md:text-xl font-extrabold text-slate-900 flex items-center gap-2">
               <Star className="text-yellow-500" size={18} /> Students Reviews
             </h2>
-            {/* ✅ Updated Safe Link: Reviews */}
             <a
               href={pageUrl ? waReviewLink : `https://wa.me/91${waNumber}`}
               target="_blank"
@@ -1146,9 +1452,11 @@ export default function ProductDetailsClient({
           </div>
 
           <div className="mt-4 rounded-2xl border border-slate-100 bg-slate-50 p-4">
-            <div className="text-sm font-extrabold text-slate-900">Your feedback helps other students</div>
+            <div className="text-sm font-extrabold text-slate-900">
+              Your feedback helps other students
+            </div>
             <div className="mt-1 text-xs text-slate-700 font-semibold leading-relaxed">
-              Students who purchased this product can submit rating & review. This improves trust and SEO naturally over time.
+              Students who purchased this product can submit rating & review.
             </div>
           </div>
         </div>
@@ -1158,7 +1466,10 @@ export default function ProductDetailsClient({
             <h2 className="text-lg md:text-xl font-extrabold text-slate-900 flex items-center gap-2">
               <Sparkles className="text-blue-700" size={18} /> Related Products
             </h2>
-            <Link href="/products" className="text-sm font-extrabold text-blue-700 hover:underline">
+            <Link
+              href="/products"
+              className="text-sm font-extrabold text-blue-700 hover:underline"
+            >
               View all →
             </Link>
           </div>
@@ -1191,7 +1502,7 @@ export default function ProductDetailsClient({
                   try {
                     localStorage.removeItem(RV_KEY);
                     setRecentlyViewed([]);
-                  } catch { }
+                  } catch {}
                 }}
                 className="text-sm font-extrabold text-gray-500 hover:text-red-600 transition"
               >
@@ -1212,16 +1523,19 @@ export default function ProductDetailsClient({
         <BuySection isMobile />
       </div>
 
-      {/* ✅ Want to Buy Modal */}
       {wtbOpen ? (
         <div className="fixed inset-0 z-[999] flex items-center justify-center px-4">
-          <div className="absolute inset-0 bg-black/40" onClick={() => !wtbLoading && setWtbOpen(false)} />
+          <div
+            className="absolute inset-0 bg-black/40"
+            onClick={() => !wtbLoading && setWtbOpen(false)}
+          />
           <div className="relative w-full max-w-lg rounded-3xl bg-white border border-gray-200 shadow-2xl overflow-hidden">
             <div className="p-5 border-b border-gray-200 flex items-center justify-between">
               <div>
                 <div className="text-lg font-extrabold">Want to Buy</div>
                 <div className="text-sm text-slate-600">
-                  This item is currently out of stock. Share details and we’ll contact you.
+                  This item is currently not instantly available. Share details
+                  and we’ll contact you.
                 </div>
               </div>
               <button
@@ -1233,65 +1547,110 @@ export default function ProductDetailsClient({
             </div>
 
             <div className="p-5 space-y-4">
-              <div className="rounded-2xl border border-emerald-100 bg-emerald-50 p-4">
-                <div className="text-xs font-extrabold text-emerald-900">Product</div>
-                <div className="mt-1 text-sm font-extrabold text-slate-900">{computedTitle}</div>
+              <div className="rounded-2xl border border-orange-100 bg-orange-50 p-4">
+                <div className="text-xs font-extrabold text-orange-900">
+                  Product
+                </div>
+                <div className="mt-1 text-sm font-extrabold text-slate-900">
+                  {computedTitle}
+                </div>
                 <div className="mt-1 text-xs text-slate-700 font-semibold">
-                  Price: ₹{money(Number(product.price || 0))} • Category: {safeStr(product.category) || categoryLabel}
+                  Price: ₹{money(Number(product.price || 0))} • Category:{" "}
+                  {safeStr(product.category) || categoryLabel}
                 </div>
               </div>
 
               <div className="space-y-1">
-                <label className="text-xs font-bold text-slate-500 uppercase ml-1">Email (required)</label>
+                <label className="text-xs font-bold text-slate-500 uppercase ml-1">
+                  Email (optional)
+                </label>
                 <input
                   value={wtbForm.email}
-                  onChange={(e) => setWtbForm((p) => ({ ...p, email: e.target.value }))}
-                  className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 outline-none focus:border-emerald-500 transition font-medium"
+                  onChange={(e) =>
+                    setWtbForm((p) => ({ ...p, email: e.target.value }))
+                  }
+                  className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 outline-none focus:border-orange-500 transition font-medium"
                   placeholder="your@email.com"
                 />
               </div>
 
               <div className="space-y-1">
-                <label className="text-xs font-bold text-slate-500 uppercase ml-1">Phone (optional)</label>
+                <label className="text-xs font-bold text-slate-500 uppercase ml-1">
+                  Phone (optional)
+                </label>
                 <input
                   value={wtbForm.phone}
-                  onChange={(e) => setWtbForm((p) => ({ ...p, phone: e.target.value }))}
-                  className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 outline-none focus:border-emerald-500 transition font-medium"
+                  onChange={(e) =>
+                    setWtbForm((p) => ({ ...p, phone: e.target.value }))
+                  }
+                  className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 outline-none focus:border-orange-500 transition font-medium"
                   placeholder="10 digit mobile"
                 />
               </div>
 
               <div className="space-y-1">
-                <label className="text-xs font-bold text-slate-500 uppercase ml-1">Message (optional)</label>
+                <label className="text-xs font-bold text-slate-500 uppercase ml-1">
+                  Message (optional)
+                </label>
                 <textarea
                   value={wtbForm.message}
-                  onChange={(e) => setWtbForm((p) => ({ ...p, message: e.target.value }))}
-                  className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 outline-none focus:border-emerald-500 transition font-medium min-h-[90px]"
+                  onChange={(e) =>
+                    setWtbForm((p) => ({ ...p, message: e.target.value }))
+                  }
+                  className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 outline-none focus:border-orange-500 transition font-medium min-h-[90px]"
                   placeholder="Any preference / urgency / quantity etc."
                 />
               </div>
 
-              <div className="flex items-center justify-end gap-2">
+              <div className="flex items-center justify-between gap-3 pt-2">
                 <button
+                  type="button"
                   onClick={() => setWtbOpen(false)}
                   disabled={wtbLoading}
-                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-bold disabled:opacity-60"
+                  className="
+                    inline-flex items-center justify-center gap-2
+                    px-5 py-2.5 rounded-xl
+                    !bg-white hover:!bg-gray-50
+                    border border-gray-200
+                    !text-slate-900 font-extrabold
+                    transition disabled:opacity-60
+                  "
+                  style={{ opacity: 1 }}
                 >
                   Cancel
                 </button>
 
                 <button
+                  type="button"
                   onClick={submitWantToBuy}
                   disabled={wtbLoading}
-                  className="inline-flex items-center gap-2 px-5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white transition font-extrabold disabled:opacity-60"
+                  className="
+                    inline-flex items-center justify-center gap-2
+                    px-6 py-2.5 rounded-xl
+                    !bg-emerald-600 hover:!bg-emerald-700
+                    !text-white font-extrabold
+                    shadow-[0_14px_35px_-18px_rgba(16,185,129,0.95)]
+                    ring-2 ring-emerald-200/80
+                    transition disabled:opacity-60
+                  "
+                  style={{
+                    background:
+                      "linear-gradient(90deg,#059669 0%,#16a34a 100%)",
+                    color: "#fff",
+                    opacity: 1,
+                  }}
                 >
-                  {wtbLoading ? <Loader2 className="animate-spin" size={18} /> : <MessageCircle size={18} />}
+                  {wtbLoading ? (
+                    <Loader2 className="animate-spin" size={18} />
+                  ) : (
+                    <MessageCircle size={18} />
+                  )}
                   Submit
                 </button>
               </div>
 
               <div className="text-xs text-slate-500 font-semibold">
-                Note: Request submit होते ही हमारी team आपको email/phone पर contact करेगी.
+                Note: Request submit होते ही हमारी team data receive कर लेगी.
               </div>
             </div>
           </div>
@@ -1308,9 +1667,7 @@ export default function ProductDetailsClient({
           70% { transform: scale(1.03); box-shadow: 0 0 0 18px rgba(16,185,129,0); }
           100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(16,185,129,0); }
         }
-        .isp-wa-pulse {
-          animation: ispWaPulse 1.6s ease-in-out infinite;
-        }
+        .isp-wa-pulse { animation: ispWaPulse 1.6s ease-in-out infinite; }
       `}</style>
     </main>
   );

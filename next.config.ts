@@ -1,3 +1,4 @@
+// ✅ FILE: next.config.ts  (COMPLETE REPLACE)
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
@@ -5,11 +6,21 @@ const nextConfig: NextConfig = {
   // output: "export",
 
   images: {
-    // ✅ If you truly need static image export behavior you can keep unoptimized,
-    // but for Vercel it's better to allow optimization.
-    // If you face image issues later, we can toggle this.
     unoptimized: false,
     formats: ["image/avif", "image/webp"],
+
+    // ✅ REQUIRED for /api/thumb/... (SVG)
+    dangerouslyAllowSVG: true,
+    contentSecurityPolicy: "default-src 'self'; script-src 'none'; sandbox;",
+
+    // ✅ Allow BOTH:
+    // 1) normal public images like /logo.png, /images/cover1.jpg, etc.
+    // 2) dynamic api thumbs like /api/thumb/assignment?... (querystring)
+    localPatterns: [
+      { pathname: "/**" },
+      { pathname: "/api/thumb/**", search: "**" },
+    ],
+
     remotePatterns: [
       { protocol: "https", hostname: "istudentsportal.com" },
       { protocol: "https", hostname: "ignoustudentsportal.com" },

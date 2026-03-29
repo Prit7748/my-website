@@ -1,7 +1,8 @@
-// ✅ FILE: app/api/products/[slug]/route.ts (COMPLETE REPLACE - Next.js typed params fix)
 import { NextRequest, NextResponse } from "next/server";
 import dbConnect from "@/lib/db";
 import Product from "@/models/Product";
+import GlobalToggle from "@/models/GlobalToggle";
+import { resolveOnDemandTimingForProduct } from "@/lib/onDemandTiming";
 
 export const runtime = "nodejs";
 
@@ -9,19 +10,57 @@ function safeStr(x: any) {
   return String(x ?? "").trim();
 }
 
+function safeNum(x: any, def = 0) {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : def;
+}
+
 function slugFromRequest(req: Request, params?: any) {
-  // 1) params first
   const pSlug = params?.slug;
   if (typeof pSlug === "string" && pSlug.trim()) return decodeURIComponent(pSlug).trim();
 
-  // 2) fallback from pathname: /api/products/<slug>
   const url = new URL(req.url);
-  const parts = url.pathname.split("/").filter(Boolean); // ["api","products","<slug>"]
+  const parts = url.pathname.split("/").filter(Boolean);
   const raw = parts[2] || "";
   return decodeURIComponent(raw).trim();
 }
 
-// ✅ Next.js build expects params as Promise
+function normAvail(v?: string) {
+  return safeStr(v).toLowerCase();
+}
+
+async function getOnDemandSalesEnabled() {
+  try {
+    const doc: any =
+      (await GlobalToggle.findOne({ key: "on_demand_sales" }).lean()) ||
+      (await GlobalToggle.findOne({ key: "coming_soon_sales" }).lean());
+
+    if (!doc) return true;
+    return Boolean(doc.enabled);
+  } catch {
+    return true;
+  }
+}
+
+function resolveAvailability(rawAvailability: string, onDemandSalesEnabled: boolean) {
+  const a = normAvail(rawAvailability);
+
+  if (a === "out_of_stock" || a === "outofstock" || a === "out-of-stock") return "want_to_buy";
+  if (a === "want_to_buy" || a === "wanttobuy" || a === "want-to-buy") return "want_to_buy";
+
+  if (a === "coming_soon" || a === "comingsoon" || a === "coming-soon") {
+    return onDemandSalesEnabled ? "on_demand" : "want_to_buy";
+  }
+
+  if (a === "on_demand" || a === "ondemand" || a === "on-demand") {
+    return onDemandSalesEnabled ? "on_demand" : "want_to_buy";
+  }
+
+  if (a === "available" || a === "in_stock" || a === "instock" || a === "") return "available";
+
+  return "available";
+}
+
 export async function GET(
   req: NextRequest,
   context: { params: Promise<{ slug: string }> }
@@ -44,6 +83,16 @@ export async function GET(
     if (!p) {
       return NextResponse.json({ error: "Not found", slug }, { status: 404 });
     }
+
+    const onDemandSalesEnabled = await getOnDemandSalesEnabled();
+    const rawAvailability = safeStr(p.availability || "");
+    const resolvedAvail = resolveAvailability(rawAvailability, onDemandSalesEnabled);
+    const resolvedTiming = await resolveOnDemandTimingForProduct({
+      category: p.category,
+      courseCodes: Array.isArray(p.courseCodes) ? p.courseCodes : [],
+      deliverWithinMinutes: p.deliverWithinMinutes,
+      onDemandNote: p.onDemandNote,
+    });
 
     return NextResponse.json(
       {
@@ -70,7 +119,25 @@ export async function GET(
           descriptionHtml: p.descriptionHtml || "",
 
           pages: Number(p.pages || 0),
-          availability: p.availability || "",
+
+          availability: rawAvailability || "",
+          effectiveAvailability: resolvedAvail,
+          onDemandSalesEnabled,
+
+          deliverWithinMinutes: Math.max(
+            1,
+            safeNum(resolvedTiming?.deliverWithinMinutes, p?.deliverWithinMinutes || 20)
+          ),
+          onDemandNote: safeStr(resolvedTiming?.onDemandNote || p?.onDemandNote),
+
+          rawDeliverWithinMinutes: Math.max(1, safeNum(p?.deliverWithinMinutes, 20)),
+          rawOnDemandNote: safeStr(p?.onDemandNote),
+
+          onDemandTimingSource: safeStr(resolvedTiming?.source),
+          onDemandMatchedCourseCode: safeStr(resolvedTiming?.matchedCourseCode),
+          onDemandMatchedRuleId: safeStr(resolvedTiming?.matchedRuleId),
+          onDemandMatchedRuleType: safeStr(resolvedTiming?.matchedRuleType),
+
           importantNote: p.importantNote || "",
 
           isDigital: !!p.isDigital,

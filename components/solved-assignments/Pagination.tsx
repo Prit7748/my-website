@@ -1,7 +1,7 @@
 "use client";
 import React, { useMemo } from "react";
 import { ChevronLeft, ChevronRight } from "lucide-react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 export default function Pagination({
   page = 1,
@@ -11,6 +11,7 @@ export default function Pagination({
   totalPages?: number;
 }) {
   const router = useRouter();
+  const pathname = usePathname();
   const searchParams = useSearchParams();
 
   const current = Math.max(1, Number(page || 1));
@@ -19,8 +20,15 @@ export default function Pagination({
   const go = (p: number) => {
     const next = Math.min(total, Math.max(1, p));
     const params = new URLSearchParams(searchParams.toString());
-    params.set("page", String(next));
-    router.replace(`/solved-assignments?${params.toString()}`);
+
+    if (next <= 1) {
+      params.delete("page");
+    } else {
+      params.set("page", String(next));
+    }
+
+    const query = params.toString();
+    router.replace(query ? `${pathname}?${query}` : pathname);
   };
 
   const pages = useMemo(() => {
@@ -32,7 +40,9 @@ export default function Pagination({
     set.add(current - 1);
     set.add(current + 1);
 
-    const arr = [...set].filter((n) => n >= 1 && n <= total).sort((a, b) => a - b);
+    const arr = [...set]
+      .filter((n) => n >= 1 && n <= total)
+      .sort((a, b) => a - b);
 
     const out: (number | "...")[] = [];
     for (let i = 0; i < arr.length; i++) {

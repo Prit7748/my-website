@@ -1,4 +1,3 @@
-// app/api/products/download/route.ts
 import { NextResponse } from "next/server";
 import mongoose from "mongoose";
 import { S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
@@ -7,11 +6,11 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import dbConnect from "@/lib/db";
 import Product from "@/models/Product";
 import Order from "@/models/Order";
+import PdfVaultFile from "@/models/PdfVaultFile";
 import { getAuthUser } from "@/lib/auth";
 
 export const runtime = "nodejs";
 
-// ✅ Added global COMING_SOON flag
 const COMING_SOON = String(process.env.COMING_SOON || "").trim() === "1";
 
 const REGION = process.env.AWS_REGION || "ap-south-1";
@@ -34,8 +33,61 @@ function clamp(n: number, min: number, max: number) {
   return Math.max(min, Math.min(max, n));
 }
 
+function normalizeAvailability(input: any) {
+  const v = asString(input).toLowerCase();
+
+  if (v === "available" || v === "in_stock" || v === "instock") return "available";
+
+  if (
+    v === "on_demand" ||
+    v === "ondemand" ||
+    v === "on-demand" ||
+    v === "coming_soon" ||
+    v === "comingsoon" ||
+    v === "coming-soon"
+  ) {
+    return "on_demand";
+  }
+
+  if (
+    v === "want_to_buy" ||
+    v === "wanttobuy" ||
+    v === "want-to-buy" ||
+    v === "out_of_stock" ||
+    v === "outofstock" ||
+    v === "out-of-stock"
+  ) {
+    return "want_to_buy";
+  }
+
+  return "available";
+}
+
+function normalizeSkuLike(input: string) {
+  return asString(input).toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+async function findVaultPdfKeyForProduct(product: any) {
+  const directPdfKey = asString(product?.pdfKey);
+  if (directPdfKey) {
+    return directPdfKey;
+  }
+
+  const skuLike = normalizeSkuLike(product?.sku || "");
+  if (!skuLike) return "";
+
+  const vaultFile: any = await PdfVaultFile.findOne({
+    skuNormalized: skuLike,
+    deletedAt: null,
+  })
+    .sort({ uploadedAt: -1, createdAt: -1 })
+    .select("s3Key pageCount")
+    .lean();
+
+  return asString(vaultFile?.s3Key);
+}
+
 export async function GET(req: Request) {
-  // ✅ Intercept early if global COMING_SOON is true
   if (COMING_SOON) {
     return NextResponse.json(
       { ok: false, status: "coming_soon", message: "Downloads are coming soon." },
@@ -44,7 +96,9 @@ export async function GET(req: Request) {
   }
 
   const user = await getAuthUser();
-  if (!user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+  if (!user) {
+    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+  }
 
   const url = new URL(req.url);
   const productId = asString(url.searchParams.get("productId"));
@@ -53,6 +107,7 @@ export async function GET(req: Request) {
   if (!BUCKET_PRIVATE) {
     return NextResponse.json({ error: "Private bucket missing in env" }, { status: 500 });
   }
+
   if (!mongoose.Types.ObjectId.isValid(productId)) {
     return NextResponse.json({ error: "Invalid productId" }, { status: 400 });
   }
@@ -75,94 +130,113 @@ export async function GET(req: Request) {
     );
   }
 
-  const item = (paid.items || []).find((it: any) => String(it.productId) === String(productId));
-  let key = asString(item?.pdfKey);
+  const item = Array.isArray(paid?.items)
+    ? paid.items.find((it: any) => String(it?.productId) === String(productId))
+    : null;
 
-  // If snapshot key empty, try latest product key
-  let p: any = null;
-  if (!key) {
-    p = await Product.findById(productId)
-      .select("pdfKey availability deliverWithinMinutes comingSoonNote isActive")
-      .lean();
-    key = asString(p?.pdfKey);
+  const product: any = await Product.findById(productId)
+    .select("pdfKey availability deliverWithinMinutes onDemandNote comingSoonNote sku isActive pages")
+    .lean();
+
+  if (!product) {
+    return NextResponse.json({ error: "Product not found" }, { status: 404 });
   }
 
-  // If still missing/unavailable: return "WAITING/NOT_READY" (not 404) for better UX
-  if (!key || !key.startsWith("uploads/pdfs/")) {
-    // ensure we have product meta
-    if (!p) {
-      p = await Product.findById(productId)
-        .select("availability deliverWithinMinutes comingSoonNote isActive")
-        .lean();
-    }
+  let key = asString(item?.pdfKey);
 
-    const availability = asString(p?.availability) || "available";
-    const minsRaw = Number(p?.deliverWithinMinutes ?? 20);
-    const deliverWithinMinutes = clamp(Number.isFinite(minsRaw) ? minsRaw : 20, 1, 1440);
-    const note = asString(p?.comingSoonNote);
+  if (!key) {
+    key = await findVaultPdfKeyForProduct(product);
 
-    // If product deleted/inactive but user paid earlier: still show status (don’t leak PDF)
-    const paidAt = paid?.paidAt ? new Date(paid.paidAt) : now;
-
-    if (availability === "coming_soon") {
-      const etaAt = new Date(paidAt.getTime() + deliverWithinMinutes * 60 * 1000);
-      const remainingMs = etaAt.getTime() - now.getTime();
-      const remainingSec = Math.max(0, Math.ceil(remainingMs / 1000));
-
-      return NextResponse.json(
+    if (key) {
+      await Product.updateOne(
+        { _id: product._id },
         {
-          ok: false,
-          status: "processing",
-          availability: "coming_soon",
-          message:
-            note ||
-            "Your material is being prepared. It will appear in your dashboard automatically as soon as it is uploaded.",
-          paidAt: paidAt.toISOString(),
-          etaAt: etaAt.toISOString(),
-          remainingSeconds: remainingSec,
+          $set: {
+            pdfKey: key,
+            availability: "available",
+            lastModifiedAt: new Date(),
+          },
+        }
+      );
+
+      await Order.updateOne(
+        {
+          _id: paid._id,
+          "items.productId": new mongoose.Types.ObjectId(productId),
         },
-        { status: 202 }
+        {
+          $set: {
+            "items.$.pdfKey": key,
+          },
+        }
       );
     }
+  }
 
-    if (availability === "out_of_stock") {
-      return NextResponse.json(
-        {
-          ok: false,
-          status: "not_ready",
-          availability: "out_of_stock",
-          message:
-            "This material is currently unavailable. Your access is محفوظ है—please check again later. We upload requested materials as soon as possible.",
-          paidAt: paidAt.toISOString(),
-        },
-        { status: 202 }
-      );
-    }
+  if (key) {
+    const signed = await getSignedUrl(
+      s3,
+      new GetObjectCommand({
+        Bucket: BUCKET_PRIVATE,
+        Key: key,
+        ResponseContentDisposition: download ? "attachment" : "inline",
+      }),
+      { expiresIn: 60 }
+    );
 
-    // available but key missing => treat as temporarily not ready
+    return NextResponse.json({ ok: true, url: signed, expiresIn: 60 }, { status: 200 });
+  }
+
+  const availability = normalizeAvailability(product?.availability);
+  const minsRaw = Number(product?.deliverWithinMinutes ?? 20);
+  const deliverWithinMinutes = clamp(Number.isFinite(minsRaw) ? minsRaw : 20, 1, 1440);
+  const note = asString(product?.onDemandNote || product?.comingSoonNote);
+  const paidAt = paid?.paidAt ? new Date(paid.paidAt) : now;
+
+  if (availability === "on_demand") {
+    const etaAt = new Date(paidAt.getTime() + deliverWithinMinutes * 60 * 1000);
+    const remainingMs = etaAt.getTime() - now.getTime();
+    const remainingSec = Math.max(0, Math.ceil(remainingMs / 1000));
+
+    return NextResponse.json(
+      {
+        ok: false,
+        status: "processing",
+        availability: "on_demand",
+        message:
+          note ||
+          "Your material is being prepared. It will be available in your dashboard shortly after upload.",
+        paidAt: paidAt.toISOString(),
+        etaAt: etaAt.toISOString(),
+        remainingSeconds: remainingSec,
+      },
+      { status: 202 }
+    );
+  }
+
+  if (availability === "want_to_buy") {
     return NextResponse.json(
       {
         ok: false,
         status: "not_ready",
-        availability: "available",
+        availability: "want_to_buy",
         message:
-          "Your purchase is confirmed, but the PDF is not available right now. Please try again shortly.",
+          "This material is currently not ready. Your purchase is safe—please try again later.",
         paidAt: paidAt.toISOString(),
       },
       { status: 202 }
     );
   }
 
-  // Normal available flow
-  const signed = await getSignedUrl(
-    s3,
-    new GetObjectCommand({
-      Bucket: BUCKET_PRIVATE,
-      Key: key,
-      ResponseContentDisposition: download ? "attachment" : "inline",
-    }),
-    { expiresIn: 60 }
+  return NextResponse.json(
+    {
+      ok: false,
+      status: "not_ready",
+      availability: "available",
+      message:
+        "Your purchase is confirmed, but the PDF is not linked yet. Please try again shortly.",
+      paidAt: paidAt.toISOString(),
+    },
+    { status: 202 }
   );
-
-  return NextResponse.json({ ok: true, url: signed, expiresIn: 60 }, { status: 200 });
 }

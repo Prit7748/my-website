@@ -1,6 +1,5 @@
-// ✅ FILE: components/solved-assignments/ProductGrid.tsx  (COMPLETE REPLACE)
 "use client";
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { Star, ShoppingCart, Eye, Layers, ImageIcon, CheckCircle2 } from "lucide-react";
@@ -15,22 +14,61 @@ interface ProductGridProps {
   selectedCat: string[];
   onMeta?: (meta: Meta) => void;
   search?: string;
+  initialProducts?: any[];
+  initialMeta?: Meta | null;
+  initialQueryKey?: string;
+}
+
+const SOLVED_LABEL = "Solved Assignments";
+const HARDCOPY_LABEL = "Handwritten Hardcopy (Delivery)";
+
+function safeText(x: any) {
+  return String(x ?? "").trim();
+}
+
+function normAvail(v?: string) {
+  return safeText(v).toLowerCase();
+}
+
+function isOutProduct(p: any) {
+  const a = normAvail(p?.availability || "available");
+  return a === "out_of_stock" || a === "outofstock" || a === "out-of-stock" || p?.canPurchase === false;
+}
+
+async function sendWantToBuyRequest(product: any) {
+  try {
+    const res = await fetch("/api/products/want-to-buy", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({
+        productId: safeText(product?._id || product?.id),
+        slug: safeText(product?.slug),
+        title: safeText(product?.title),
+        category: safeText(product?.category),
+        availability: safeText(product?.availability),
+      }),
+    });
+
+    let data: any = null;
+    try {
+      data = await res.json();
+    } catch {}
+
+    if (!res.ok) {
+      throw new Error(data?.error || data?.message || "Request failed");
+    }
+
+    return { ok: true, data };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "Request failed" };
+  }
 }
 
 function fileNameOf(path: string) {
   const clean = (path || "").split("?")[0];
   const parts = clean.split("/");
   return (parts[parts.length - 1] || "").toLowerCase();
-}
-
-function pickImagesSorted(images?: string[]) {
-  const arr = Array.isArray(images) ? [...images] : [];
-  const sorted = arr
-    .filter((x) => typeof x === "string" && x.trim().length > 0)
-    .sort((a, b) => fileNameOf(a).localeCompare(fileNameOf(b), undefined, { numeric: true }));
-  const first = sorted[0] || "";
-  const second = sorted[1] || first || "";
-  return { first, second, all: sorted };
 }
 
 function money(n: number) {
@@ -41,21 +79,162 @@ function money(n: number) {
   }
 }
 
-export default function ProductGrid({ selectedCat, onMeta, search }: ProductGridProps) {
+function pickImagesSorted(images?: string[]) {
+  const arr = Array.isArray(images) ? [...images] : [];
+  const sorted = arr
+    .filter((x) => typeof x === "string" && x.trim().length > 0)
+    .sort((a, b) => fileNameOf(a).localeCompare(fileNameOf(b), undefined, { numeric: true, sensitivity: "base" }));
+  const first = sorted[0] || "";
+  const second = sorted[1] || first || "";
+  return { first, second, all: sorted };
+}
+
+function pickImagesByCategory(p: any) {
+  return pickImagesSorted(p?.images);
+}
+
+function extractSubjectTitle(p: any) {
+  const lang = safeText(p?.language).toLowerCase();
+  const hi = safeText(p?.subjectTitleHi);
+  const en = safeText(p?.subjectTitleEn);
+
+  if ((lang === "hindi" || lang.startsWith("hin")) && hi) return hi;
+  if ((lang === "english" || lang.startsWith("eng")) && en) return en;
+
+  return (
+    hi ||
+    en ||
+    safeText(p?.subjectTitle) ||
+    safeText(p?.subject_title) ||
+    safeText(p?.subjectName) ||
+    safeText(p?.subject_name) ||
+    safeText(p?.paperTitle) ||
+    safeText(p?.paper_title) ||
+    safeText(p?.subject) ||
+    ""
+  );
+}
+
+function extractSubjectCode(p: any) {
+  const direct =
+    safeText(p?.subjectCode) ||
+    safeText(p?.paperCode) ||
+    safeText(p?.code) ||
+    safeText(p?.subject_code);
+
+  if (direct) return direct;
+
+  const t = safeText(p?.title);
+  const m = t.match(/\b([A-Z]{2,6})\s*[-]?\s*(\d{2,4})\b/);
+  if (m) return `${m[1]} ${m[2]}`.trim();
+
+  return "";
+}
+
+function extractCourseCodes(p: any) {
+  const list = Array.isArray(p?.courseCodes)
+    ? p.courseCodes.map((x: any) => safeText(x)).filter(Boolean)
+    : [];
+
+  if (list.length) {
+    return Array.from(new Set(list)).join(", ");
+  }
+
+  return safeText(p?.courseCode) || safeText(p?.programmeCode) || safeText(p?.programCode) || "";
+}
+
+function extractMedium(p: any) {
+  return safeText(p?.language) || safeText(p?.medium) || "";
+}
+
+function normalizeSession(x: any) {
+  const s = safeText(x);
+  if (!s) return "";
+  return s.replace(/\s+/g, " ").trim();
+}
+
+function buildAssignmentMasterThumb(p: any) {
+  const session = normalizeSession(p?.session) || "2025-2026";
+  const code = extractSubjectCode(p) || "IGNOU";
+  const title = extractSubjectTitle(p) || "Solved Assignment";
+  const course = extractCourseCodes(p) || "IGNOU";
+  const medium = extractMedium(p) || "English";
+
+  const qs = new URLSearchParams({
+    session,
+    code,
+    title,
+    course,
+    medium,
+  });
+
+  const v = safeText(p?._id) || safeText(p?.updatedAt) || safeText(p?.slug) || "1";
+  return `/api/thumb/assignment?${qs.toString()}&v=${encodeURIComponent(v)}`;
+}
+
+function buildHardcopyMasterThumb(p: any) {
+  const session = normalizeSession(p?.session) || "2025-26";
+  const code = extractSubjectCode(p) || "IGNOU";
+  const medium = extractMedium(p) || "English";
+
+  const qs = new URLSearchParams({
+    session,
+    code,
+    medium,
+  });
+
+  const v = safeText(p?._id) || safeText(p?.updatedAt) || safeText(p?.slug) || "1";
+  return `/api/thumb/hardcopy?${qs.toString()}&v=${encodeURIComponent(v)}`;
+}
+
+function normalizeCats(arr: string[]) {
+  return (Array.isArray(arr) ? arr : [])
+    .map((x) => safeText(x))
+    .filter(Boolean)
+    .map((x) => x.toLowerCase());
+}
+
+function ProductGridSkeleton() {
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-3 gap-4 md:gap-6">
+      {Array.from({ length: 6 }).map((_, i) => (
+        <div
+          key={i}
+          className="bg-white rounded-xl overflow-hidden border border-gray-100 w-full flex flex-col animate-pulse"
+        >
+          <div className="aspect-[210/297] bg-gray-200 border-b border-gray-100" />
+          <div className="p-3 md:p-4 flex flex-col flex-1">
+            <div className="h-3 w-20 bg-gray-200 rounded mb-2" />
+            <div className="h-4 w-full bg-gray-200 rounded mb-2" />
+            <div className="h-4 w-4/5 bg-gray-200 rounded mb-3" />
+            <div className="flex items-center justify-between gap-2 mb-3">
+              <div className="h-6 w-24 bg-gray-200 rounded" />
+              <div className="flex gap-1">
+                {Array.from({ length: 5 }).map((__, j) => (
+                  <div key={j} className="h-3 w-3 rounded-full bg-gray-200" />
+                ))}
+              </div>
+            </div>
+            <div className="mt-auto">
+              <div className="h-10 w-full bg-gray-200 rounded-lg" />
+            </div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+export default function ProductGrid({
+  selectedCat,
+  onMeta,
+  search,
+  initialProducts = [],
+  initialMeta = null,
+  initialQueryKey = "",
+}: ProductGridProps) {
   const searchParams = useSearchParams();
   const { cart, addToCart, removeFromCart } = useCart();
-
-  const [loading, setLoading] = useState(true);
-  const [products, setProducts] = useState<any[]>([]);
-  const [selectedProduct, setSelectedProduct] = useState<any>(null);
-  const [error, setError] = useState<string>("");
-
-  // ✅ Non-blocking toast (no screen freeze)
-  const [toast, setToast] = useState<{ show: boolean; msg: string; kind: "add" | "remove" }>({
-    show: false,
-    msg: "",
-    kind: "add",
-  });
 
   const selectedCatKey = useMemo(() => selectedCat.join(","), [selectedCat]);
 
@@ -70,28 +249,111 @@ export default function ProductGrid({ selectedCat, onMeta, search }: ProductGrid
     else params.delete("search");
 
     if (!params.get("page")) params.set("page", "1");
-    if (!params.get("limit")) params.set("limit", "24");
+    params.set("limit", "12");
 
     return params.toString();
   }, [searchParams, selectedCatKey, search]);
+
+  const hasUsableInitialData =
+    Array.isArray(initialProducts) && initialMeta && typeof initialQueryKey === "string" && initialQueryKey === queryKey;
+
+  const [loading, setLoading] = useState<boolean>(!hasUsableInitialData);
+  const [products, setProducts] = useState<any[]>(hasUsableInitialData ? initialProducts : []);
+  const [selectedProduct, setSelectedProduct] = useState<any>(null);
+  const [error, setError] = useState<string>("");
+
+  const [wantLoadingMap, setWantLoadingMap] = useState<Record<string, boolean>>({});
+  const [wantSuccessMap, setWantSuccessMap] = useState<Record<string, boolean>>({});
+
+  const onMetaRef = useRef<typeof onMeta>(onMeta);
+  useEffect(() => {
+    onMetaRef.current = onMeta;
+  }, [onMeta]);
+
+  const didUseInitialRef = useRef(false);
+
+  useEffect(() => {
+    if (hasUsableInitialData && !didUseInitialRef.current) {
+      didUseInitialRef.current = true;
+      setProducts(initialProducts);
+      setLoading(false);
+      setError("");
+      onMetaRef.current?.(
+        initialMeta || { total: 0, page: 1, totalPages: 1, limit: 12 }
+      );
+    }
+  }, [hasUsableInitialData, initialProducts, initialMeta]);
+
+  const [toast, setToast] = useState<{
+    show: boolean;
+    msg: string;
+    kind: "add" | "remove" | "info" | "success";
+  }>({
+    show: false,
+    msg: "",
+    kind: "add",
+  });
+
+  const selectedCatsNormalized = useMemo(() => normalizeCats(selectedCat), [selectedCat]);
+
+  const enableAssignmentMasterThumb = useMemo(() => {
+    return selectedCatsNormalized.length === 1 && selectedCatsNormalized[0] === SOLVED_LABEL.toLowerCase();
+  }, [selectedCatsNormalized]);
+
+  const enableHardcopyMasterThumb = useMemo(() => {
+    return selectedCatsNormalized.length === 1 && selectedCatsNormalized[0] === HARDCOPY_LABEL.toLowerCase();
+  }, [selectedCatsNormalized]);
 
   function isInCart(productId: string) {
     return cart.some((x) => x.id === productId);
   }
 
-  function showToast(msg: string, kind: "add" | "remove") {
+  function showToast(msg: string, kind: "add" | "remove" | "info" | "success") {
     setToast({ show: true, msg, kind });
-    window.clearTimeout((showToast as any)._t);
-    (showToast as any)._t = window.setTimeout(() => {
-      setToast((p) => ({ ...p, show: false }));
-    }, 1400);
+    if (typeof window !== "undefined") {
+      window.clearTimeout((showToast as any)._t);
+      (showToast as any)._t = window.setTimeout(() => {
+        setToast((p) => ({ ...p, show: false }));
+      }, 1800);
+    }
+  }
+
+  async function handleWantToBuy(p: any) {
+    const id = String(p?._id || p?.id || p?.slug || "");
+    if (!id || wantLoadingMap[id]) return;
+
+    setWantLoadingMap((prev) => ({ ...prev, [id]: true }));
+    const result = await sendWantToBuyRequest(p);
+    setWantLoadingMap((prev) => ({ ...prev, [id]: false }));
+
+    if (result.ok) {
+      setWantSuccessMap((prev) => ({ ...prev, [id]: true }));
+      showToast(
+        "Request Received. We are processing your submission and will upload the product shortly. Keep an eye on our website for updates.",
+        "success"
+      );
+    } else {
+      showToast(result.error || "Request could not be submitted. Please try again.", "info");
+    }
+  }
+
+  function resolveCardImage(p: any) {
+    const { first } = pickImagesByCategory(p);
+
+    if (enableAssignmentMasterThumb) return buildAssignmentMasterThumb(p);
+    if (enableHardcopyMasterThumb) return buildHardcopyMasterThumb(p);
+
+    return first || "";
   }
 
   function toggleCart(p: any) {
     const id = String(p?._id || p?.id || p?.slug || "");
     if (!id) return;
 
-    const { first } = pickImagesSorted(p.images);
+    if (isOutProduct(p)) {
+      handleWantToBuy(p);
+      return;
+    }
 
     if (isInCart(id)) {
       removeFromCart(id);
@@ -103,16 +365,22 @@ export default function ProductGrid({ selectedCat, onMeta, search }: ProductGrid
       id,
       title: String(p?.title || "Product"),
       price: Number(p?.price || 0),
-      image: first || "/images/cover1.jpg",
+      image: resolveCardImage(p),
       quantity: 1,
       category: String(p?.category || "Product"),
-      courseCode: String(p?.courseCode || (Array.isArray(p?.courseCodes) ? p.courseCodes[0] : "") || ""),
-    });
+      courseCode: extractCourseCodes(p),
+      availability: String(p?.availability || "available"),
+      canPurchase: p?.canPurchase !== false,
+    } as any);
 
     showToast("Added to cart", "add");
   }
 
   useEffect(() => {
+    if (hasUsableInitialData && !didUseInitialRef.current) {
+      return;
+    }
+
     const controller = new AbortController();
     setLoading(true);
     setError("");
@@ -130,31 +398,27 @@ export default function ProductGrid({ selectedCat, onMeta, search }: ProductGrid
         setProducts(list);
 
         const p = data?.pagination || {};
-        onMeta?.({
+        onMetaRef.current?.({
           total: Number(p.total || 0),
           page: Number(p.page || 1),
           totalPages: Number(p.totalPages || 1),
-          limit: Number(p.limit || 24),
+          limit: 12,
         });
       } catch (e: any) {
         if (e?.name === "AbortError") return;
         setError(e?.message || "Something went wrong");
         setProducts([]);
-        onMeta?.({ total: 0, page: 1, totalPages: 1, limit: 24 });
+        onMetaRef.current?.({ total: 0, page: 1, totalPages: 1, limit: 12 });
       } finally {
         setLoading(false);
       }
     })();
 
     return () => controller.abort();
-  }, [queryKey, onMeta]);
+  }, [queryKey, hasUsableInitialData]);
 
   if (loading) {
-    return (
-      <div className="w-full min-h-[340px] flex items-center justify-center">
-        <div className="text-gray-500 font-semibold">Loading products...</div>
-      </div>
-    );
+    return <ProductGridSkeleton />;
   }
 
   if (error) {
@@ -180,7 +444,6 @@ export default function ProductGrid({ selectedCat, onMeta, search }: ProductGrid
 
   return (
     <>
-      {/* ✅ Toast (non-blocking) */}
       <div
         className={`fixed bottom-5 left-1/2 -translate-x-1/2 z-[9999] transition-all duration-300 ${
           toast.show ? "opacity-100 translate-y-0" : "opacity-0 translate-y-3 pointer-events-none"
@@ -192,7 +455,11 @@ export default function ProductGrid({ selectedCat, onMeta, search }: ProductGrid
           className={`px-4 py-2 rounded-2xl shadow-lg border text-sm font-extrabold flex items-center gap-2 ${
             toast.kind === "add"
               ? "bg-emerald-600 text-white border-emerald-500"
-              : "bg-slate-900 text-white border-slate-800"
+              : toast.kind === "remove"
+              ? "bg-slate-900 text-white border-slate-800"
+              : toast.kind === "success"
+              ? "bg-emerald-600 text-white border-emerald-500"
+              : "bg-orange-600 text-white border-orange-500"
           }`}
         >
           <CheckCircle2 size={18} />
@@ -200,32 +467,69 @@ export default function ProductGrid({ selectedCat, onMeta, search }: ProductGrid
         </div>
       </div>
 
-      <div className="grid grid-cols-2 md:grid-cols-3 gap-4 md:gap-8">
+      <div className="grid grid-cols-2 md:grid-cols-3 gap-4 md:gap-6">
         {products.map((p: any) => {
-          const { first, all } = pickImagesSorted(p.images);
+          const { first, all } = pickImagesByCategory(p);
+
           const isCombo = (p.category || "").toLowerCase().includes("combo");
           const href = productHref(p);
 
           const id = String(p?._id || p?.id || p?.slug || "");
           const inCart = id ? isInCart(id) : false;
 
+          const isOut = isOutProduct(p);
+          const wantLoading = !!wantLoadingMap[id];
+          const wantSuccess = !!wantSuccessMap[id];
+
+          const imgSrc = enableAssignmentMasterThumb
+            ? buildAssignmentMasterThumb(p)
+            : enableHardcopyMasterThumb
+            ? buildHardcopyMasterThumb(p)
+            : first || "";
+
+          const productTitle = safeText(p?.title) || "Product";
+
+          const buttonUi = isOut
+            ? wantSuccess
+              ? {
+                  textDesktop: wantLoading ? "Submitting..." : "Request Received",
+                  textMobile: wantLoading ? "..." : "Received",
+                  cls: "bg-emerald-600 hover:bg-emerald-700 text-white",
+                }
+              : {
+                  textDesktop: wantLoading ? "Submitting..." : "Want to Buy",
+                  textMobile: wantLoading ? "..." : "Want",
+                  cls: "bg-orange-50 hover:bg-orange-100 text-orange-700 border border-orange-200 shadow-none",
+                }
+            : inCart
+            ? {
+                textDesktop: "Remove from Cart",
+                textMobile: "Remove",
+                cls: "bg-emerald-600 hover:bg-emerald-700 text-white",
+              }
+            : {
+                textDesktop: "Add to Cart",
+                textMobile: "Add",
+                cls: "bg-[#1e40af] hover:bg-[#1e3a8a] text-white",
+              };
+
           return (
             <div
               key={p._id || p.slug}
               className="bg-white rounded-xl overflow-hidden hover:shadow-2xl hover:-translate-y-1 transition-all duration-300 border border-gray-100 group w-full flex flex-col relative"
             >
-              <div className="aspect-[210/297] bg-gray-100 relative overflow-hidden border-b border-gray-50 group-hover:opacity-95 transition-opacity">
+              <div className="aspect-[210/297] bg-white relative overflow-hidden border-b border-gray-50 group-hover:opacity-95 transition-opacity">
                 <Link href={href} className="block w-full h-full">
-                  {first ? (
+                  {imgSrc ? (
                     <Image
-                      src={first}
-                      alt={p.title || "Product image"}
+                      src={imgSrc}
+                      alt={productTitle}
                       fill
                       className="object-cover group-hover:scale-105 transition-transform duration-500"
                       sizes="(max-width: 768px) 50vw, 33vw"
                     />
                   ) : (
-                    <div className="w-full h-full flex flex-col items-center justify-center text-gray-300 bg-gray-50 text-center p-2 relative">
+                    <div className="w-full h-full flex flex-col items-center justify-center text-gray-300 bg-white text-center p-2 relative">
                       {isCombo ? (
                         <div className="absolute inset-0 flex items-center justify-center opacity-10 text-purple-600">
                           <Layers size={80} />
@@ -266,40 +570,46 @@ export default function ProductGrid({ selectedCat, onMeta, search }: ProductGrid
                 )}
               </div>
 
-              <div className="p-4 md:p-5 flex flex-col flex-1">
-                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">{p.category}</p>
+              <div className="p-3 md:p-4 flex flex-col flex-1">
+                <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-1">
+                  {p.category}
+                </p>
 
-                <h3 className="text-[13px] md:text-[16px] font-bold text-gray-800 leading-snug line-clamp-2 mb-2 h-[38px] md:h-[48px] group-hover:text-blue-600 transition-colors">
-                  <Link href={href}>{p.title}</Link>
+                <h3 className="text-[13px] md:text-[15px] font-bold text-gray-800 leading-snug line-clamp-2 min-h-[38px] md:min-h-[42px] mb-2 group-hover:text-blue-600 transition-colors">
+                  <Link href={href}>{productTitle}</Link>
                 </h3>
 
-                <div className="flex gap-0.5 mb-3">
-                  {[...Array(5)].map((_, i) => (
-                    <Star key={i} size={12} fill="#facc15" stroke="none" />
-                  ))}
-                </div>
-
                 <div className="mt-auto">
-                  <div className="flex items-baseline gap-2 mb-3">
-                    <span className="text-lg md:text-xl font-bold text-blue-700">₹{money(Number(p.price || 0))}</span>
-                    {!!p.oldPrice && (
-                      <span className="text-xs md:text-sm text-gray-400 line-through">₹{money(Number(p.oldPrice))}</span>
-                    )}
+                  <div className="flex items-center justify-between gap-2 mb-2">
+                    <div className="flex items-baseline gap-2 min-w-0">
+                      <span className="text-base md:text-lg font-bold text-blue-700 whitespace-nowrap">
+                        ₹{money(Number(p.price || 0))}
+                      </span>
+                      {!!p.oldPrice && (
+                        <span className="text-[11px] md:text-xs text-gray-400 line-through whitespace-nowrap">
+                          ₹{money(Number(p.oldPrice))}
+                        </span>
+                      )}
+                    </div>
+
+                    <div className="flex gap-0.5 shrink-0">
+                      {[...Array(5)].map((_, i) => (
+                        <Star key={i} size={11} fill="#facc15" stroke="none" />
+                      ))}
+                    </div>
                   </div>
 
-                  {/* ✅ Real cart toggle + Blue⇄Green */}
                   <button
                     type="button"
                     onClick={() => toggleCart(p)}
-                    className={`w-full py-2.5 rounded-lg text-[12px] md:text-[14px] font-bold flex items-center justify-center gap-2 transition shadow-md active:scale-95 ${
-                      inCart
-                        ? "bg-emerald-600 hover:bg-emerald-700 text-white"
-                        : "bg-[#1e40af] hover:bg-[#1e3a8a] text-white"
+                    disabled={wantLoading}
+                    className={`w-full py-2.5 rounded-lg text-[12px] md:text-[13px] font-bold flex items-center justify-center gap-2 transition shadow-md active:scale-95 ${buttonUi.cls} ${
+                      wantLoading ? "opacity-80 cursor-not-allowed" : ""
                     }`}
                   >
                     <ShoppingCart size={16} />
-                    <span className="hidden md:inline">{inCart ? "Remove from Cart" : "Add to Cart"}</span>
-                    <span className="md:hidden">{inCart ? "Remove" : "Add"}</span>
+                    <span className="hidden md:inline">{buttonUi.textDesktop}</span>
+                    <span className="md:hidden">{buttonUi.textMobile}</span>
                   </button>
                 </div>
               </div>
@@ -308,7 +618,9 @@ export default function ProductGrid({ selectedCat, onMeta, search }: ProductGrid
         })}
       </div>
 
-      {selectedProduct && <ProductQuickView product={selectedProduct} onClose={() => setSelectedProduct(null)} />}
+      {selectedProduct && (
+        <ProductQuickView product={selectedProduct} onClose={() => setSelectedProduct(null)} />
+      )}
     </>
   );
 }
