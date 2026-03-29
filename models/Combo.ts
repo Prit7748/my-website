@@ -401,7 +401,6 @@ const ComboSchema = new Schema(
       default: "",
       trim: true,
       maxlength: 300,
-      sparse: true,
     },
 
     generationGroupKey: {

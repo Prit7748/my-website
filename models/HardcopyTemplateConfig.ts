@@ -8,7 +8,6 @@ const HardcopyTemplateConfigSchema = new Schema(
       type: String,
       required: true,
       unique: true,
-      index: true,
       trim: true,
       default: HARDCOPY_TEMPLATE_CONFIG_KEY,
     },
@@ -99,8 +98,6 @@ const HardcopyTemplateConfigSchema = new Schema(
   },
   { timestamps: true }
 );
-
-HardcopyTemplateConfigSchema.index({ key: 1 }, { unique: true });
 
 export default models.HardcopyTemplateConfig ||
   model("HardcopyTemplateConfig", HardcopyTemplateConfigSchema);

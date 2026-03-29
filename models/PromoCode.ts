@@ -53,7 +53,6 @@ const PromoCodeSchema = new Schema(
       unique: true,
       trim: true,
       uppercase: true,
-      index: true,
       maxlength: 40,
     },
 
@@ -325,7 +324,6 @@ PromoCodeSchema.pre("save", function () {
   }
 });
 
-PromoCodeSchema.index({ code: 1 }, { unique: true });
 PromoCodeSchema.index({ isActive: 1, startsAt: 1, endsAt: 1, priority: -1, createdAt: -1 });
 PromoCodeSchema.index({ isActive: 1, isAutoApply: 1, priority: -1, createdAt: -1 });
 PromoCodeSchema.index({ discountType: 1, isActive: 1, createdAt: -1 });

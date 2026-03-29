@@ -1,10 +1,9 @@
-// ✅ REPLACE FILE: models/Blog.ts
 import mongoose, { Schema, models, model } from "mongoose";
 
 const BlogSchema = new Schema(
   {
     title: { type: String, required: true, trim: true },
-    slug: { type: String, required: true, unique: true, trim: true, index: true },
+    slug: { type: String, required: true, unique: true, trim: true },
 
     excerpt: { type: String, default: "", trim: true },
     contentHtml: { type: String, default: "" },
@@ -14,7 +13,6 @@ const BlogSchema = new Schema(
     youtubeUrl: { type: String, default: "", trim: true },
     tags: { type: [String], default: [], index: true },
 
-    // ✅ NEW: Category reference (optional)
     categoryId: { type: Schema.Types.ObjectId, ref: "BlogCategory", default: null, index: true },
 
     authorName: { type: String, default: "IGNOU Students Portal", trim: true },
