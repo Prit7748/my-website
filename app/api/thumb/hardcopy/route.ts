@@ -1,85 +1,91 @@
 import { NextRequest } from "next/server";
 
-export const runtime = "nodejs";
+export const runtime = "edge";
 
 function safeStr(x: string | null, max = 140) {
-  const s = String(x ?? "").trim();
-  return s.length > max ? s.slice(0, max) : s;
+    const s = String(x ?? "").trim();
+    return s.length > max ? s.slice(0, max) : s;
 }
 
 function esc(s: string) {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+    return s
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
 }
 
 function arrayBufferToBase64(buf: ArrayBuffer) {
-  return Buffer.from(buf).toString("base64");
+    const bytes = new Uint8Array(buf);
+    let binary = "";
+    const chunk = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunk) {
+        binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+    }
+    return btoa(binary);
 }
 
 function fitFontSizeByLen(text: string, maxWidthPx: number, baseSize: number, minSize: number) {
-  const t = text.trim();
-  if (!t) return baseSize;
-  const approxChar = 0.76;
-  const need = t.length * baseSize * approxChar;
-  if (need <= maxWidthPx) return baseSize;
-  const ratio = maxWidthPx / need;
-  const sized = Math.floor(baseSize * ratio);
-  return Math.max(minSize, Math.min(baseSize, sized));
+    const t = text.trim();
+    if (!t) return baseSize;
+    const approxChar = 0.76;
+    const need = t.length * baseSize * approxChar;
+    if (need <= maxWidthPx) return baseSize;
+    const ratio = maxWidthPx / need;
+    const sized = Math.floor(baseSize * ratio);
+    return Math.max(minSize, Math.min(baseSize, sized));
 }
 
 function normalizeSession(x: string) {
-  return x.replace(/\s+/g, " ").trim();
+    return x.replace(/\s+/g, " ").trim();
 }
 
 function normalizeMedium(x: string) {
-  const s = x.replace(/\s+/g, " ").trim();
-  if (!s) return "English Medium";
-  if (s.toLowerCase() === "hindi") return "Hindi Medium";
-  if (s.toLowerCase() === "english") return "English Medium";
-  return s;
+    const s = x.replace(/\s+/g, " ").trim();
+    if (!s) return "English Medium";
+    if (s.toLowerCase() === "hindi") return "Hindi Medium";
+    if (s.toLowerCase() === "english") return "English Medium";
+    return s;
 }
 
 async function toDataUriFromPublic(req: NextRequest, path: string) {
-  try {
-    const url = new URL(path, req.url);
-    const r = await fetch(url.toString(), { cache: "force-cache" });
-    if (!r.ok) return "";
-    const type = r.headers.get("content-type") || "image/png";
-    const buf = await r.arrayBuffer();
-    const b64 = arrayBufferToBase64(buf);
-    return `data:${type};base64,${b64}`;
-  } catch {
-    return "";
-  }
+    try {
+        const url = new URL(path, req.url);
+        const r = await fetch(url.toString(), { cache: "force-cache" });
+        if (!r.ok) return "";
+        const type = r.headers.get("content-type") || "image/png";
+        const buf = await r.arrayBuffer();
+        const b64 = arrayBufferToBase64(buf);
+        return `data:${type};base64,${b64}`;
+    } catch {
+        return "";
+    }
 }
 
 export async function GET(req: NextRequest) {
-  const { searchParams } = new URL(req.url);
+    const { searchParams } = new URL(req.url);
 
-  const codeRaw = safeStr(searchParams.get("code"), 30) || "BSKE 150";
-  const sessionRaw = safeStr(searchParams.get("session"), 24) || "2025-26";
-  const mediumRaw = safeStr(searchParams.get("medium"), 24) || "Hindi Medium";
+    const codeRaw = safeStr(searchParams.get("code"), 30) || "BSKE 150";
+    const sessionRaw = safeStr(searchParams.get("session"), 24) || "2025-26";
+    const mediumRaw = safeStr(searchParams.get("medium"), 24) || "Hindi Medium";
 
-  const subjectCode = esc(codeRaw.replace(/\s+/g, " ").trim().toUpperCase());
-  const session = esc(normalizeSession(sessionRaw));
-  const medium = esc(normalizeMedium(mediumRaw));
-  const site = "www.istudentsportal.com";
+    const subjectCode = esc(codeRaw.replace(/\s+/g, " ").trim().toUpperCase());
+    const session = esc(normalizeSession(sessionRaw));
+    const medium = esc(normalizeMedium(mediumRaw));
+    const site = "www.istudentsportal.com";
 
-  const W = 768;
-  const H = 1024;
+    const W = 768;
+    const H = 1024;
 
-  const codeFont = fitFontSizeByLen(subjectCode, 610, 102, 52);
-  const mediumFont = fitFontSizeByLen(medium, 470, 44, 26);
+    const codeFont = fitFontSizeByLen(subjectCode, 610, 102, 52);
+    const mediumFont = fitFontSizeByLen(medium, 470, 44, 26);
 
-  const [stampDataUri, pensDataUri] = await Promise.all([
-    toDataUriFromPublic(req, "/images/thumbs/hardcopy-stamp.png"),
-    toDataUriFromPublic(req, "/images/thumbs/hardcopy-writing-pens.png"),
-  ]);
+    const [stampDataUri, pensDataUri] = await Promise.all([
+        toDataUriFromPublic(req, "/images/thumbs/hardcopy-stamp.png"),
+        toDataUriFromPublic(req, "/images/thumbs/hardcopy-writing-pens.png"),
+    ]);
 
-  const svg = `<?xml version="1.0" encoding="UTF-8"?>
+    const svg = `<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
   <defs>
     <linearGradient id="goldBand" x1="0" y1="0" x2="1" y2="0">
@@ -157,9 +163,8 @@ export async function GET(req: NextRequest) {
     • Fully Prepared • Neatly Handwritten • Quickly Delivered!
   </text>
 
-  ${
-    stampDataUri
-      ? `
+  ${stampDataUri
+            ? `
   <image
     href="${stampDataUri}"
     x="32"
@@ -171,12 +176,11 @@ export async function GET(req: NextRequest) {
     transform="rotate(-12 152 754)"
     filter="url(#softShadow)"
   />`
-      : ""
-  }
+            : ""
+        }
 
-  ${
-    pensDataUri
-      ? `
+ ${pensDataUri
+            ? `
   <image
     href="${pensDataUri}"
     x="372"
@@ -187,8 +191,8 @@ export async function GET(req: NextRequest) {
     opacity="1"
     filter="url(#softShadow)"
   />`
-      : ""
-  }
+            : ""
+        }
 
   <rect x="0" y="938" width="${W}" height="86" fill="#000000"/>
 
@@ -202,10 +206,10 @@ export async function GET(req: NextRequest) {
   </text>
 </svg>`;
 
-  return new Response(svg, {
-    headers: {
-      "Content-Type": "image/svg+xml; charset=utf-8",
-      "Cache-Control": "public, max-age=86400, s-maxage=2592000, stale-while-revalidate=86400",
-    },
-  });
-}
+    return new Response(svg, {
+        headers: {
+            "Content-Type": "image/svg+xml; charset=utf-8",
+            "Cache-Control": "public, max-age=86400, s-maxage=2592000, stale-while-revalidate=86400",
+        },
+    });
+} 
