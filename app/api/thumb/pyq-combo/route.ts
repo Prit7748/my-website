@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 
-export const runtime = "edge";
+export const runtime = "nodejs";
 
 function safeStr(x: string | null | undefined, max = 300) {
   const s = String(x ?? "").trim();
@@ -16,15 +16,7 @@ function esc(s: string) {
 }
 
 function arrayBufferToBase64(buf: ArrayBuffer) {
-  const bytes = new Uint8Array(buf);
-  let binary = "";
-  const chunk = 0x8000;
-
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  }
-
-  return btoa(binary);
+  return Buffer.from(buf).toString("base64");
 }
 
 async function toDataUri(req: NextRequest, rawPathOrUrl: string) {
