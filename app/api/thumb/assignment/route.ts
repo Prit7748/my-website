@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 
-export const runtime = "edge";
+export const runtime = "nodejs";
 
 function safeStr(x: string | null, max = 140) {
   const s = String(x ?? "").trim();
@@ -15,19 +15,13 @@ function esc(s: string) {
 }
 
 function arrayBufferToBase64(buf: ArrayBuffer) {
-  const bytes = new Uint8Array(buf);
-  let binary = "";
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  }
-  return btoa(binary);
+  return Buffer.from(buf).toString("base64");
 }
 
 function fitFontSizeByLen(text: string, maxWidthPx: number, baseSize: number, minSize: number) {
   const t = text.trim();
   if (!t) return baseSize;
-  const approxChar = 0.78; 
+  const approxChar = 0.78;
   const need = t.length * baseSize * approxChar;
   if (need <= maxWidthPx) return baseSize;
   const ratio = maxWidthPx / need;
@@ -63,7 +57,9 @@ export async function GET(req: NextRequest) {
 
   const sessionRaw = safeStr(searchParams.get("session"), 18) || "2025-2026";
   const codeRaw = safeStr(searchParams.get("code"), 22) || "BCHCT 131";
-  const titleRaw = safeStr(searchParams.get("title"), 120) || "IGNOU BCHCT 131 Solved Assignment 2026 | English (Copy)";
+  const titleRaw =
+    safeStr(searchParams.get("title"), 120) ||
+    "IGNOU BCHCT 131 Solved Assignment 2026 | English (Copy)";
   const courseRaw = safeStr(searchParams.get("course"), 18) || "BSCG";
   const mediumRaw = safeStr(searchParams.get("medium"), 14) || "English";
 
@@ -97,44 +93,43 @@ export async function GET(req: NextRequest) {
 
   const LEFT_MARGIN = 120;
 
-  const IGNOU_FONT = 122;     
-  const SOLVED_BASE = 54;     
-  const SESSION_FONT = 92;    
-  const CODE_BASE = 127;      
-  const MED_BASE = 61;        
+  const IGNOU_FONT = 122;
+  const SOLVED_BASE = 54;
+  const SESSION_FONT = 92;
+  const CODE_BASE = 127;
+  const MED_BASE = 61;
 
-  // ✅ Header Texts Vertical Placements
-  const IGNOU_Y = 180; 
+  const IGNOU_Y = 180;
   const SESSION_Y = 360;
-  
-  // 👇 yahan se aap khud position adjust kar sakte hain (kam = upar, jyada = niche)
-  const SOLVED_Y = 255; 
-  
+  const SOLVED_Y = 255;
+
   const SOLVED_MIN = 32;
-  const solvedMaxW = W - LEFT_MARGIN - 24; 
+  const solvedMaxW = W - LEFT_MARGIN - 24;
   const solvedFont = fitFontSizeByLen("SOLVED ASSIGNMENT", solvedMaxW, SOLVED_BASE, SOLVED_MIN);
 
   const BAND_TOP_Y = 430;
-  const BAND_TOP_H = 24;     
+  const BAND_TOP_H = 24;
   const BAND_MID_Y = BAND_TOP_Y + BAND_TOP_H;
-  const BAND_MID_H = 122;    
+  const BAND_MID_H = 122;
   const BAND_BOT_Y = BAND_MID_Y + BAND_MID_H;
-  const BAND_BOT_H = 24;     
+  const BAND_BOT_H = 24;
   const BAND_TOTAL_H = BAND_TOP_H + BAND_MID_H + BAND_BOT_H;
 
   const CODE_MIN = 60;
   const CODE_MAX_W = W - 40;
   const codeFont = fitFontSizeByLen(subjectCode, CODE_MAX_W, CODE_BASE, CODE_MIN);
-  const CODE_CENTER_Y = BAND_MID_Y + (BAND_MID_H / 2);
+  const CODE_CENTER_Y = BAND_MID_Y + BAND_MID_H / 2;
 
   const TITLE_LEFT_MARGIN = 140;
-  const TITLE_TOP_Y = BAND_TOP_Y + BAND_TOTAL_H + 60; 
+  const TITLE_TOP_Y = BAND_TOP_Y + BAND_TOTAL_H + 60;
   const VALID_Y = 820;
-  const TITLE_BOX_H = VALID_Y - TITLE_TOP_Y - 18; 
+  const TITLE_BOX_H = VALID_Y - TITLE_TOP_Y - 18;
   const TITLE_MAX_LINES = 3;
 
   let titleLines = wrapText(subjectTitle, 28, TITLE_MAX_LINES);
-  if (titleLines.length === 3 && titleLines[2].length > 26) titleLines = wrapText(subjectTitle, 24, TITLE_MAX_LINES);
+  if (titleLines.length === 3 && titleLines[2].length > 26) {
+    titleLines = wrapText(subjectTitle, 24, TITLE_MAX_LINES);
+  }
 
   const TITLE_BASE = 40;
   const TITLE_MIN = 24;
@@ -153,9 +148,9 @@ export async function GET(req: NextRequest) {
   const BLACK_H = H - BLACK_Y;
 
   const PILL_H = 80;
-  const PILL_W = 540; 
-  const PILL_X = (W - PILL_W) / 2; 
-  const PILL_Y = BLACK_Y - (PILL_H / 2); 
+  const PILL_W = 540;
+  const PILL_X = (W - PILL_W) / 2;
+  const PILL_Y = BLACK_Y - PILL_H / 2;
 
   const MED_MIN = 34;
   const medFont = fitFontSizeByLen(medium, PILL_W - 60, MED_BASE, MED_MIN);
@@ -212,7 +207,7 @@ export async function GET(req: NextRequest) {
   <rect x="0" y="${BLACK_Y}" width="${W}" height="${BLACK_H}" fill="#000000"/>
 
   <rect x="${PILL_X}" y="${PILL_Y}" rx="40" ry="40" width="${PILL_W}" height="${PILL_H}" fill="#f4f000" stroke="#000000" stroke-width="4"/>
-  <text x="${W / 2}" y="${PILL_Y + (PILL_H / 2)}" text-anchor="middle" dominant-baseline="central" class="black fontBlack" font-size="${medFont}">${medium}</text>
+  <text x="${W / 2}" y="${PILL_Y + PILL_H / 2}" text-anchor="middle" dominant-baseline="central" class="black fontBlack" font-size="${medFont}">${medium}</text>
 
   <text x="${W / 2}" y="${WEBSITE_Y}" text-anchor="middle" dominant-baseline="central" class="white fontBlack" font-size="26" letter-spacing="1.2">${site}</text>
 </svg>`;
@@ -223,4 +218,4 @@ export async function GET(req: NextRequest) {
       "Cache-Control": "public, max-age=86400, s-maxage=2592000, stale-while-revalidate=86400",
     },
   });
-}  
+}

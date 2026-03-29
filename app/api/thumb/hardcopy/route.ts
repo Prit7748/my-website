@@ -1,6 +1,6 @@
 import { NextRequest } from "next/server";
 
-export const runtime = "edge";
+export const runtime = "nodejs";
 
 function safeStr(x: string | null, max = 140) {
     const s = String(x ?? "").trim();
@@ -16,13 +16,7 @@ function esc(s: string) {
 }
 
 function arrayBufferToBase64(buf: ArrayBuffer) {
-    const bytes = new Uint8Array(buf);
-    let binary = "";
-    const chunk = 0x8000;
-    for (let i = 0; i < bytes.length; i += chunk) {
-        binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-    }
-    return btoa(binary);
+    return Buffer.from(buf).toString("base64");
 }
 
 function fitFontSizeByLen(text: string, maxWidthPx: number, baseSize: number, minSize: number) {
@@ -212,4 +206,4 @@ export async function GET(req: NextRequest) {
             "Cache-Control": "public, max-age=86400, s-maxage=2592000, stale-while-revalidate=86400",
         },
     });
-} 
+}
