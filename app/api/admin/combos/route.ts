@@ -117,33 +117,205 @@ function inferVariant(categorySlug: string, comboKind: string) {
   return "default";
 }
 
-function buildDynamicProductThumb(p: any) {
-  const category = safeStr(p?.category);
-  const subjectCode = safeStr(p?.subjectCode).toUpperCase();
-  const title = safeStr(p?.subjectTitleEn) || safeStr(p?.subjectTitleHi) || safeStr(p?.title);
-  const session = safeStr(p?.session);
-  const medium = safeStr(p?.language);
-  const firstCourseCode =
-    Array.isArray(p?.courseCodes) && p.courseCodes[0]
-      ? safeStr(p.courseCodes[0]).toUpperCase()
-      : "";
+function normalizeCategory(x: any) {
+  return safeStr(x).toLowerCase().replace(/\s+/g, " ").trim();
+}
 
-  const params = new URLSearchParams();
-  if (subjectCode) params.set("code", subjectCode);
-  if (title) params.set("title", title);
-  if (session) params.set("session", session);
-  if (medium) params.set("medium", medium);
-  if (firstCourseCode) params.set("course", firstCourseCode);
+function isSolvedAssignmentCategory(x: any) {
+  return normalizeCategory(x) === "solved assignments";
+}
 
-  if (category === "Solved Assignments") {
-    return `/api/thumb/assignment?${params.toString()}`;
-  }
+function isHardcopyCategory(x: any) {
+  return normalizeCategory(x) === "handwritten hardcopy (delivery)";
+}
 
-  if (category === "Handwritten Hardcopy (Delivery)") {
-    return `/api/thumb/hardcopy?${params.toString()}`;
-  }
+function isPyqCategorySlug(x: any) {
+  return safeStr(x).toLowerCase() === "question-papers";
+}
+
+function fileNameOf(path: string) {
+  const clean = safeStr(path).split("?")[0];
+  const parts = clean.split("/");
+  return (parts[parts.length - 1] || "").toLowerCase();
+}
+
+function sortImagesNamewise(arr: any[]) {
+  return (Array.isArray(arr) ? arr : [])
+    .map((x) => safeStr(x))
+    .filter(Boolean)
+    .sort((a, b) =>
+      fileNameOf(a).localeCompare(fileNameOf(b), undefined, {
+        numeric: true,
+        sensitivity: "base",
+      })
+    );
+}
+
+function normalizeSession(x: any) {
+  const s = safeStr(x);
+  if (!s) return "";
+  return s.replace(/\s+/g, " ").trim();
+}
+
+function extractSubjectTitle(p: any) {
+  const lang = safeStr(p?.language || p?.medium).toLowerCase();
+  const hi = safeStr(p?.subjectTitleHi);
+  const en = safeStr(p?.subjectTitleEn);
+
+  if ((lang === "hindi" || lang.startsWith("hin")) && hi) return hi;
+  if ((lang === "english" || lang.startsWith("eng")) && en) return en;
+
+  return hi || en || safeStr(p?.subjectTitle) || safeStr(p?.title) || "";
+}
+
+function extractSubjectCode(p: any) {
+  const direct =
+    safeStr(p?.subjectCode) ||
+    safeStr(p?.paperCode) ||
+    safeStr(p?.code) ||
+    safeStr(p?.subject_code);
+
+  if (direct) return direct.toUpperCase();
+
+  const t = safeStr(p?.title);
+  const m = t.match(/\b([A-Z]{2,6})\s*[-]?\s*(\d{2,4})\b/i);
+  if (m) return `${safeStr(m[1]).toUpperCase()} ${safeStr(m[2])}`.trim();
 
   return "";
+}
+
+function extractCourseCodesText(p: any) {
+  const list = Array.isArray(p?.courseCodes)
+    ? p.courseCodes.map((x: any) => safeStr(x).toUpperCase()).filter(Boolean)
+    : [];
+
+  if (list.length) return Array.from(new Set(list)).join(", ");
+
+  return safeStr(p?.courseCode || p?.programmeCode || p?.programCode).toUpperCase();
+}
+
+function extractMedium(p: any) {
+  return safeStr(p?.language) || safeStr(p?.medium) || "";
+}
+
+function buildAssignmentMasterThumb(p: any) {
+  const session = normalizeSession(p?.session) || "2025-2026";
+  const code = extractSubjectCode(p) || "IGNOU";
+  const title = extractSubjectTitle(p) || "Solved Assignment";
+  const course = extractCourseCodesText(p) || "IGNOU";
+  const medium = extractMedium(p) || "English";
+  const v =
+    safeStr(p?._id) ||
+    safeStr(p?.updatedAt) ||
+    safeStr(p?.lastModifiedAt) ||
+    safeStr(p?.slug) ||
+    "1";
+
+  const params = new URLSearchParams({
+    session,
+    code,
+    title,
+    course,
+    medium,
+    v,
+  });
+
+  return `/api/thumb/assignment?${params.toString()}`;
+}
+
+function buildHardcopyMasterThumb(p: any) {
+  const session = normalizeSession(p?.session) || "2025-26";
+  const code = extractSubjectCode(p) || "IGNOU";
+  const medium = extractMedium(p) || "English";
+  const v =
+    safeStr(p?._id) ||
+    safeStr(p?.updatedAt) ||
+    safeStr(p?.lastModifiedAt) ||
+    safeStr(p?.slug) ||
+    "1";
+
+  const params = new URLSearchParams({
+    session,
+    code,
+    medium,
+    v,
+  });
+
+  return `/api/thumb/hardcopy?${params.toString()}`;
+}
+
+function resolveUploadedImageThumb(p: any) {
+  const sorted = sortImagesNamewise(p?.images);
+  return sorted[0] || safeStr(p?.thumbnailUrl) || safeStr(p?.quickUrl) || "";
+}
+
+function buildProductSnapshotThumb(p: any) {
+  if (isSolvedAssignmentCategory(p?.category)) {
+    return buildAssignmentMasterThumb(p);
+  }
+
+  if (isHardcopyCategory(p?.category)) {
+    return buildHardcopyMasterThumb(p);
+  }
+
+  return resolveUploadedImageThumb(p);
+}
+
+function derivePyqYears(comboKind: string, itemCount: number) {
+  const kind = safeStr(comboKind).toLowerCase();
+  if (kind === "pyq_5y") return "5";
+  if (kind === "pyq_3y") return "3";
+  return itemCount >= 10 ? "5" : "3";
+}
+
+function buildPyqComboThumb(args: {
+  comboKind: string;
+  subjectCode: string;
+  medium: string;
+  savePercent: number;
+  versionSeed: string;
+}) {
+  const params = new URLSearchParams();
+  params.set("years", derivePyqYears(args.comboKind, 0));
+  params.set("code", safeStr(args.subjectCode).toUpperCase() || "IGNOU");
+  params.set("medium", safeStr(args.medium) || "English");
+  if (safeNum(args.savePercent, 0) > 0) {
+    params.set("discount", `${Math.round(safeNum(args.savePercent, 0))}% OFF`);
+  }
+  params.set("v", safeStr(args.versionSeed) || "1");
+  return `/api/thumb/pyq-combo?${params.toString()}`;
+}
+
+function buildComboThumbUrl(args: {
+  explicitThumbUrl?: any;
+  existingThumbUrl?: any;
+  categorySlug: string;
+  comboKind: string;
+  subjectCode: string;
+  medium: string;
+  savePercent: number;
+  itemsSnapshot: any[];
+  versionSeed: string;
+}) {
+  const explicitThumbUrl = safeStr(args.explicitThumbUrl);
+  if (explicitThumbUrl) return explicitThumbUrl;
+
+  if (isPyqCategorySlug(args.categorySlug)) {
+    return buildPyqComboThumb({
+      comboKind: args.comboKind,
+      subjectCode: args.subjectCode,
+      medium: args.medium,
+      savePercent: args.savePercent,
+      versionSeed: args.versionSeed,
+    });
+  }
+
+  const firstItemThumb =
+    (Array.isArray(args.itemsSnapshot) ? args.itemsSnapshot : [])
+      .map((item: any) => safeStr(item?.thumbUrl))
+      .find(Boolean) || "";
+
+  return firstItemThumb || safeStr(args.existingThumbUrl);
 }
 
 async function makeUniqueComboSlug(base: string) {
@@ -176,9 +348,12 @@ async function buildSnapshotFromProductIds(productIds: string[]) {
       subjectCode: 1,
       subjectTitleEn: 1,
       subjectTitleHi: 1,
+      subjectTitle: 1,
       courseCodes: 1,
       courseTitles: 1,
+      courseCode: 1,
       language: 1,
+      medium: 1,
       lang3: 1,
       session: 1,
       session6: 1,
@@ -186,6 +361,8 @@ async function buildSnapshotFromProductIds(productIds: string[]) {
       thumbnailUrl: 1,
       quickUrl: 1,
       images: 1,
+      updatedAt: 1,
+      lastModifiedAt: 1,
     })
     .lean();
 
@@ -197,21 +374,18 @@ async function buildSnapshotFromProductIds(productIds: string[]) {
     title: safeStr(p.title),
     slug: toSlug(p.slug || p.title),
     category: safeStr(p.category),
-    subjectCode: safeStr(p.subjectCode).toUpperCase(),
+    subjectCode: extractSubjectCode(p),
     subjectTitleEn: safeStr(p.subjectTitleEn),
     subjectTitleHi: safeStr(p.subjectTitleHi),
-    medium: safeStr(p.language),
+    medium: extractMedium(p),
     lang3: safeStr(p.lang3).toUpperCase(),
     session: safeStr(p.session),
     session6: safeStr(p.session6),
     courseCodes: uniqueStrings(safeArr(p.courseCodes), true),
     courseTitles: uniqueStrings(safeArr(p.courseTitles), false),
     price: Math.max(0, safeNum(p.price, 0)),
-    thumbUrl:
-      safeStr(p.thumbnailUrl) ||
-      safeStr(p.quickUrl) ||
-      (Array.isArray(p.images) && p.images[0] ? safeStr(p.images[0]) : "") ||
-      buildDynamicProductThumb(p),
+    thumbUrl: buildProductSnapshotThumb(p),
+    sku: safeStr(p?.sku).toUpperCase(),
   }));
 }
 
@@ -498,6 +672,23 @@ export async function POST(req: NextRequest) {
 
   const courseCodes = deriveCourseCodesFromSnapshot(itemsSnapshot, body?.courseCodes || []);
 
+  const thumbVersionSeed =
+    safeStr(body?.thumbVersion) ||
+    safeStr(body?.updatedAt) ||
+    [slug || title, ...productIds].join("_").slice(0, 180);
+
+  const comboThumbUrl = buildComboThumbUrl({
+    explicitThumbUrl: body?.thumbUrl,
+    existingThumbUrl: "",
+    categorySlug,
+    comboKind,
+    subjectCode,
+    medium,
+    savePercent: pricing.savePercent,
+    itemsSnapshot,
+    versionSeed: thumbVersionSeed,
+  });
+
   const docPayload = {
     title,
     slug,
@@ -535,7 +726,7 @@ export async function POST(req: NextRequest) {
     badge: safeStr(body?.badge),
     itemsLabel: safeStr(body?.itemsLabel) || "Included Bundle Items",
     thumbMode: "dynamic",
-    thumbUrl: safeStr(body?.thumbUrl || itemsSnapshot?.[0]?.thumbUrl),
+    thumbUrl: comboThumbUrl,
 
     metaTitle: safeStr(body?.metaTitle),
     metaDescription: safeStr(body?.metaDescription),
