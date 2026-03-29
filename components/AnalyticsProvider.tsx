@@ -3,12 +3,6 @@
 import { useEffect } from "react";
 import { usePathname } from "next/navigation";
 import { useCart } from "../context/CartContext";
-import {
-  buildCheckoutFingerprint,
-  captureAttributionFromBrowser,
-  trackBeginCheckoutFromCart,
-  trackPageView,
-} from "../lib/analytics";
 
 const CHECKOUT_FINGERPRINT_KEY = "isp_begin_checkout_fingerprint_v1";
 
@@ -17,32 +11,68 @@ export default function AnalyticsProvider() {
   const { cart, cartReady } = useCart();
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    let cancelled = false;
 
-    captureAttributionFromBrowser();
+    const run = async () => {
+      if (typeof window === "undefined") return;
 
-    const search = window.location.search || "";
-    const routeWithQuery = `${pathname || ""}${search}`;
+      try {
+        const analytics = await import("../lib/analytics");
+        if (cancelled) return;
 
-    trackPageView({
-      page_path: routeWithQuery,
-      page_location: window.location.href,
-      page_title: document.title || "IGNOU Students Portal",
-    });
+        analytics.captureAttributionFromBrowser?.();
+
+        const search = window.location.search || "";
+        const routeWithQuery = `${pathname || ""}${search}`;
+
+        analytics.trackPageView?.({
+          page_path: routeWithQuery,
+          page_location: window.location.href,
+          page_title: document.title || "IGNOU Students Portal",
+        });
+      } catch {
+        // fail silently so analytics never breaks rendering/build
+      }
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
   }, [pathname]);
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    if (!cartReady) return;
-    if (pathname !== "/checkout") return;
-    if (!Array.isArray(cart) || cart.length === 0) return;
+    let cancelled = false;
 
-    const fingerprint = buildCheckoutFingerprint(cart);
-    const prev = sessionStorage.getItem(CHECKOUT_FINGERPRINT_KEY);
-    if (prev === fingerprint) return;
+    const run = async () => {
+      if (typeof window === "undefined") return;
+      if (!cartReady) return;
+      if (pathname !== "/checkout") return;
+      if (!Array.isArray(cart) || cart.length === 0) return;
 
-    sessionStorage.setItem(CHECKOUT_FINGERPRINT_KEY, fingerprint);
-    trackBeginCheckoutFromCart(cart);
+      try {
+        const analytics = await import("../lib/analytics");
+        if (cancelled) return;
+
+        const fingerprint = analytics.buildCheckoutFingerprint?.(cart);
+        if (!fingerprint) return;
+
+        const prev = sessionStorage.getItem(CHECKOUT_FINGERPRINT_KEY);
+        if (prev === fingerprint) return;
+
+        sessionStorage.setItem(CHECKOUT_FINGERPRINT_KEY, fingerprint);
+        analytics.trackBeginCheckoutFromCart?.(cart);
+      } catch {
+        // fail silently so analytics never breaks rendering/build
+      }
+    };
+
+    void run();
+
+    return () => {
+      cancelled = true;
+    };
   }, [pathname, cart, cartReady]);
 
   return null;

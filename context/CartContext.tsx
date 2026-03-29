@@ -1,6 +1,6 @@
 "use client";
-import { createContext, useContext, useState, useEffect, ReactNode } from "react";
-import { trackAddToCart, trackRemoveFromCart } from "@/lib/analytics";
+
+import { createContext, useContext, useEffect, useState, ReactNode } from "react";
 
 export interface CartComboIncludedItem {
   title: string;
@@ -163,16 +163,20 @@ export function CartProvider({ children }: { children: ReactNode }) {
     });
 
     if (qtyChange > 0) {
-      trackAddToCart({
-        id: normalized.id,
-        title: normalized.title,
-        category: normalized.category,
-        price: normalized.price,
-        quantity: qtyChange,
-        itemType: normalized.itemType,
-        comboSlug: normalized.comboSlug,
-        comboCategorySlug: normalized.comboCategorySlug,
-      });
+      void import("@/lib/analytics")
+        .then((analytics) => {
+          analytics.trackAddToCart?.({
+            id: normalized.id,
+            title: normalized.title,
+            category: normalized.category,
+            price: normalized.price,
+            quantity: qtyChange,
+            itemType: normalized.itemType,
+            comboSlug: normalized.comboSlug,
+            comboCategorySlug: normalized.comboCategorySlug,
+          });
+        })
+        .catch(() => {});
     }
   };
 
@@ -180,16 +184,20 @@ export function CartProvider({ children }: { children: ReactNode }) {
     const existingItem = cart.find((item) => item.id === id);
 
     if (existingItem) {
-      trackRemoveFromCart({
-        id: existingItem.id,
-        title: existingItem.title,
-        category: existingItem.category,
-        price: existingItem.price,
-        quantity: existingItem.quantity,
-        itemType: existingItem.itemType,
-        comboSlug: existingItem.comboSlug,
-        comboCategorySlug: existingItem.comboCategorySlug,
-      });
+      void import("@/lib/analytics")
+        .then((analytics) => {
+          analytics.trackRemoveFromCart?.({
+            id: existingItem.id,
+            title: existingItem.title,
+            category: existingItem.category,
+            price: existingItem.price,
+            quantity: existingItem.quantity,
+            itemType: existingItem.itemType,
+            comboSlug: existingItem.comboSlug,
+            comboCategorySlug: existingItem.comboCategorySlug,
+          });
+        })
+        .catch(() => {});
     }
 
     setCart((prevCart) => prevCart.filter((item) => item.id !== id));

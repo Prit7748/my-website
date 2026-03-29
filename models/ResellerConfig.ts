@@ -305,7 +305,6 @@ const ResellerConfigSchema = new Schema(
       type: String,
       default: "default",
       unique: true,
-      index: true,
       trim: true,
     },
 

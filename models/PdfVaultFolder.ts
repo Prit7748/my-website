@@ -32,7 +32,6 @@ const PdfVaultFolderSchema = new Schema(
       trim: true,
       unique: true,
       maxlength: 2000,
-      index: true,
     },
 
     level: {
@@ -90,6 +89,5 @@ const PdfVaultFolderSchema = new Schema(
 
 PdfVaultFolderSchema.index({ parentId: 1, name: 1, deletedAt: 1 });
 PdfVaultFolderSchema.index({ parentId: 1, slug: 1, deletedAt: 1 }, { unique: false });
-PdfVaultFolderSchema.index({ path: 1 }, { unique: true });
 
 export default models.PdfVaultFolder || model("PdfVaultFolder", PdfVaultFolderSchema);
