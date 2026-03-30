@@ -3,7 +3,6 @@
 import Image from "next/image";
 import Link from "next/link";
 import {
-  Boxes,
   IndianRupee,
   Languages,
   CalendarClock,
@@ -90,12 +89,35 @@ function getVisualItems(items?: ComboBundleItem[], max = 6) {
 function DynamicThumbCollage({ data }: { data: ComboBundleCardData }) {
   const visualItems = getVisualItems(data.items, 6);
   const isPyq = data.variant === "pyq";
+  const thumbUrl = safeText(data.thumbnailUrl);
 
-  if (safeText(data.thumbnailUrl) && (isPyq || visualItems.length === 0)) {
+  if (thumbUrl && isPyq) {
+    return (
+      <div className="relative w-full overflow-hidden rounded-[22px] border border-white/80 bg-white shadow-sm">
+        <div className="absolute inset-0 bg-gradient-to-br from-emerald-50 via-white to-blue-50" />
+        <div className="absolute inset-0 opacity-30 bg-[radial-gradient(circle_at_1px_1px,rgba(15,23,42,0.08)_1px,transparent_0)] bg-[length:18px_18px]" />
+
+        <div className="relative p-2 sm:p-3">
+          <div className="relative aspect-[9/13] w-full overflow-hidden rounded-[18px] bg-white">
+            <Image
+              src={thumbUrl}
+              alt={data.title}
+              fill
+              sizes="(max-width: 640px) 100vw, (max-width: 1280px) 50vw, 25vw"
+              className="object-contain object-center"
+              priority={false}
+            />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (thumbUrl && visualItems.length === 0) {
     return (
       <div className="relative h-[460px] sm:h-[420px] xl:h-[500px] w-full overflow-hidden rounded-[22px] bg-white">
         <Image
-          src={safeText(data.thumbnailUrl)}
+          src={thumbUrl}
           alt={data.title}
           fill
           sizes="(max-width: 640px) 100vw, (max-width: 1280px) 50vw, 25vw"
@@ -108,7 +130,7 @@ function DynamicThumbCollage({ data }: { data: ComboBundleCardData }) {
         <div className="absolute inset-0 p-2 sm:p-3">
           <div className="relative h-full w-full overflow-hidden rounded-[18px]">
             <Image
-              src={safeText(data.thumbnailUrl)}
+              src={thumbUrl}
               alt={data.title}
               fill
               sizes="(max-width: 640px) 100vw, (max-width: 1280px) 50vw, 25vw"

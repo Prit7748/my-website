@@ -20,9 +20,13 @@ import {
   CheckCircle2,
   Star,
   Trash2,
+  Loader2,
 } from "lucide-react";
 
 type ItemRow = {
+  lineId: string;
+  orderMongoId?: string;
+  orderId?: string;
   orderDate?: string | null;
   productId: string;
   sku: string;
@@ -200,6 +204,7 @@ export default function AdminOnDemandOrderDetailPage() {
 
   const [loading, setLoading] = useState(true);
   const [data, setData] = useState<ApiResponse | null>(null);
+  const [deletingLineId, setDeletingLineId] = useState("");
 
   const [uploadOpen, setUploadOpen] = useState(false);
   const [selectedItem, setSelectedItem] = useState<ItemRow | null>(null);
@@ -321,6 +326,56 @@ export default function AdminOnDemandOrderDetailPage() {
     await loadFolders("root");
   }
 
+  async function handleDeleteSingleItem(item: ItemRow) {
+    const lineId = safeStr(item?.lineId);
+    if (!lineId) {
+      alert("Delete reference missing hai. Please refresh page.");
+      return;
+    }
+
+    const ok = window.confirm(
+      `Kya aap sirf is selected on-demand order ko delete karna chahte hain?\n\nProduct: ${safeStr(
+        item.title
+      )}\nOrder: ${safeStr(item.orderId || "-")}\n\nIs action se is customer ke baki on-demand orders delete nahi honge.`
+    );
+
+    if (!ok) return;
+
+    try {
+      setDeletingLineId(lineId);
+
+      const qs = new URLSearchParams();
+      qs.set("lineId", lineId);
+
+      const res = await fetch(`/api/admin/on-demand-orders/${userId}?${qs.toString()}`, {
+        method: "DELETE",
+        credentials: "include",
+        cache: "no-store",
+      });
+
+      const json = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        alert((json as any)?.error || "Delete failed");
+        return;
+      }
+
+      if (selectedItem?.lineId === lineId) {
+        setSelectedItem(null);
+        setUploadOpen(false);
+        setUploadFile(null);
+      }
+
+      await load();
+
+      alert("Selected on-demand order successfully delete ho gaya.");
+    } catch {
+      alert("Delete failed");
+    } finally {
+      setDeletingLineId("");
+    }
+  }
+
   async function handleDirectVaultUpload() {
     if (!selectedItem) {
       alert("No product selected.");
@@ -364,7 +419,9 @@ export default function AdminOnDemandOrderDetailPage() {
       }
 
       const firstRow = Array.isArray(json?.results) ? json.results[0] : null;
-      const matched = Boolean(firstRow?.productMatched || Number(json?.summary?.matchedProducts || 0) > 0);
+      const matched = Boolean(
+        firstRow?.productMatched || Number(json?.summary?.matchedProducts || 0) > 0
+      );
 
       await load();
       await loadFolders(currentPath || "root");
@@ -387,6 +444,7 @@ export default function AdminOnDemandOrderDetailPage() {
 
   useEffect(() => {
     load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [userId]);
 
   useEffect(() => {
@@ -416,7 +474,7 @@ export default function AdminOnDemandOrderDetailPage() {
                     On Demand User Details
                   </h1>
                   <p className="mt-2 text-sm md:text-xl text-slate-600">
-                    Direct folder select + product PDF upload
+                    Direct folder select + product PDF upload + single order delete
                   </p>
                 </div>
               </div>
@@ -471,9 +529,7 @@ export default function AdminOnDemandOrderDetailPage() {
 
                       <div className="flex items-center gap-3 text-slate-700 font-semibold">
                         <CalendarDays size={16} className="text-amber-700" />
-                        <span>
-                          Joined: {formatDateTime(data.user.joinedAt)}
-                        </span>
+                        <span>Joined: {formatDateTime(data.user.joinedAt)}</span>
                       </div>
                     </div>
 
@@ -543,6 +599,7 @@ export default function AdminOnDemandOrderDetailPage() {
                     <thead className="bg-slate-50">
                       <tr className="text-left">
                         <th className="px-5 py-4 text-lg font-extrabold text-slate-900">#</th>
+                        <th className="px-5 py-4 text-lg font-extrabold text-slate-900">Order Ref</th>
                         <th className="px-5 py-4 text-lg font-extrabold text-slate-900">Product</th>
                         <th className="px-5 py-4 text-lg font-extrabold text-slate-900">SKU</th>
                         <th className="px-5 py-4 text-lg font-extrabold text-slate-900">Price</th>
@@ -552,62 +609,86 @@ export default function AdminOnDemandOrderDetailPage() {
                     </thead>
 
                     <tbody className="bg-white">
-                      {data.items.map((item, idx) => (
-                        <tr key={`${item.productId}-${idx}`} className="border-t border-gray-200 align-top">
-                          <td className="px-5 py-5 text-lg font-bold text-slate-800">
-                            {idx + 1}
-                          </td>
+                      {data.items.map((item, idx) => {
+                        const deleting = deletingLineId === safeStr(item.lineId);
 
-                          <td className="px-5 py-5 min-w-[320px]">
-                            <div className="text-[16px] font-extrabold text-slate-900">
-                              {item.title}
-                            </div>
-                            <div className="mt-1 text-sm text-slate-500">
-                              {item.category}
-                            </div>
-                          </td>
+                        return (
+                          <tr key={safeStr(item.lineId) || `${item.productId}-${idx}`} className="border-t border-gray-200 align-top">
+                            <td className="px-5 py-5 text-lg font-bold text-slate-800">
+                              {idx + 1}
+                            </td>
 
-                          <td className="px-5 py-5 text-[15px] font-mono font-bold text-rose-600 min-w-[180px]">
-                            {item.sku || "-"}
-                          </td>
+                            <td className="px-5 py-5 min-w-[180px]">
+                              <div className="text-[14px] font-extrabold text-slate-900 break-all">
+                                {safeStr(item.orderId) || "-"}
+                              </div>
+                            </td>
 
-                          <td className="px-5 py-5 text-[16px] font-bold text-slate-800">
-                            ₹{money(item.price)}
-                          </td>
+                            <td className="px-5 py-5 min-w-[320px]">
+                              <div className="text-[16px] font-extrabold text-slate-900">
+                                {item.title}
+                              </div>
+                              <div className="mt-1 text-sm text-slate-500">
+                                {item.category}
+                              </div>
+                            </td>
 
-                          <td className="px-5 py-5 text-[15px] font-bold text-slate-700 min-w-[200px]">
-                            {formatDateTime(item.orderDate)}
-                          </td>
+                            <td className="px-5 py-5 text-[15px] font-mono font-bold text-rose-600 min-w-[180px]">
+                              {item.sku || "-"}
+                            </td>
 
-                          <td className="px-5 py-5 min-w-[320px]">
-                            <div className="flex items-center gap-3 flex-wrap">
-                              <button
-                                type="button"
-                                onClick={() => openUploadModal(item)}
-                                className="inline-flex items-center gap-2 px-4 py-3 rounded-2xl bg-amber-500 hover:bg-amber-600 text-white transition font-bold shadow-sm"
-                              >
-                                <Upload size={17} />
-                                Upload PDF
-                              </button>
+                            <td className="px-5 py-5 text-[16px] font-bold text-slate-800">
+                              ₹{money(item.price)}
+                            </td>
 
-                              <Link
-                                href={categoryToPublicPath(item.category, item.slug)}
-                                target="_blank"
-                                className="inline-flex items-center gap-2 px-4 py-3 rounded-2xl bg-white hover:bg-gray-50 border border-gray-200 transition font-bold shadow-sm"
-                              >
-                                <ExternalLink size={17} />
-                                Open
-                              </Link>
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
+                            <td className="px-5 py-5 text-[15px] font-bold text-slate-700 min-w-[200px]">
+                              {formatDateTime(item.orderDate)}
+                            </td>
+
+                            <td className="px-5 py-5 min-w-[420px]">
+                              <div className="flex items-center gap-3 flex-wrap">
+                                <button
+                                  type="button"
+                                  onClick={() => openUploadModal(item)}
+                                  className="inline-flex items-center gap-2 px-4 py-3 rounded-2xl bg-amber-500 hover:bg-amber-600 text-white transition font-bold shadow-sm"
+                                >
+                                  <Upload size={17} />
+                                  Upload PDF
+                                </button>
+
+                                <Link
+                                  href={categoryToPublicPath(item.category, item.slug)}
+                                  target="_blank"
+                                  className="inline-flex items-center gap-2 px-4 py-3 rounded-2xl bg-white hover:bg-gray-50 border border-gray-200 transition font-bold shadow-sm"
+                                >
+                                  <ExternalLink size={17} />
+                                  Open
+                                </Link>
+
+                                <button
+                                  type="button"
+                                  disabled={deleting}
+                                  onClick={() => handleDeleteSingleItem(item)}
+                                  className="inline-flex items-center gap-2 px-4 py-3 rounded-2xl bg-white hover:bg-red-50 border border-red-200 text-red-700 transition font-bold shadow-sm disabled:opacity-60"
+                                >
+                                  {deleting ? (
+                                    <Loader2 size={17} className="animate-spin" />
+                                  ) : (
+                                    <Trash2 size={17} />
+                                  )}
+                                  {deleting ? "Deleting..." : "Delete This Order"}
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
 
                 <div className="mt-6 text-sm text-slate-500">
-                  On-demand page se upload ke liye alag lightweight route use ho raha hai, aur ab 2 direct folder shortcuts bhi available hain.
+                  Is page se ab har selected on-demand row ko alag se delete kiya ja sakta hai. Bulk delete ab bhi main list page par available rahega.
                 </div>
               </>
             )}
@@ -666,6 +747,9 @@ export default function AdminOnDemandOrderDetailPage() {
                   </span>
                   <span className="inline-flex rounded-xl bg-white border border-amber-200 px-3 py-2 text-sm font-bold text-slate-700">
                     Category: {safeStr(selectedItem.category) || "-"}
+                  </span>
+                  <span className="inline-flex rounded-xl bg-white border border-amber-200 px-3 py-2 text-sm font-bold text-slate-700">
+                    Order: {safeStr(selectedItem.orderId) || "-"}
                   </span>
                 </div>
                 <div className="mt-3 text-sm font-semibold text-amber-800 leading-6">
@@ -924,7 +1008,11 @@ export default function AdminOnDemandOrderDetailPage() {
                     disabled={uploading}
                     className="w-full mt-5 inline-flex items-center justify-center gap-2 px-5 py-4 rounded-2xl bg-slate-900 hover:bg-slate-950 text-white transition font-extrabold shadow-sm disabled:opacity-60"
                   >
-                    {uploading ? <RefreshCw size={18} className="animate-spin" /> : <CheckCircle2 size={18} />}
+                    {uploading ? (
+                      <RefreshCw size={18} className="animate-spin" />
+                    ) : (
+                      <CheckCircle2 size={18} />
+                    )}
                     {uploading ? "Uploading..." : "Upload PDF"}
                   </button>
                 </div>

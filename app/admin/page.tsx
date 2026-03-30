@@ -30,12 +30,15 @@ import {
 } from "lucide-react";
 import {
   ADMIN_DASHBOARD_TILE_STORAGE_KEY,
+  ADMIN_DASHBOARD_TILE_SYNC_EVENT,
   getAdminDashboardTileDisplayTitle,
   getAdminDashboardTilesInOrder,
   getDefaultAdminDashboardTileSettings,
   normalizeAdminDashboardTileSettings,
   type AdminDashboardTileConfig,
+  type AdminDashboardTileKey,
   type AdminDashboardTileSettings,
+  type AdminDashboardTileTone,
 } from "@/lib/adminDashboardTiles";
 
 type ComingSoonToggleState = {
@@ -52,6 +55,119 @@ type OnDemandStatsResponse = {
     totalOnDemandProducts?: number;
   };
 };
+
+type ToneClasses = {
+  wrap: string;
+  icon: string;
+  title: string;
+};
+
+type NonDefaultTone = Exclude<AdminDashboardTileTone, "default">;
+
+const TONE_CLASSES: Record<NonDefaultTone, ToneClasses> = {
+  gray: {
+    wrap: "border-gray-200 bg-gray-50",
+    icon: "text-slate-700",
+    title: "text-slate-900",
+  },
+  blue: {
+    wrap: "border-blue-200 bg-blue-50",
+    icon: "text-blue-700",
+    title: "text-blue-900",
+  },
+  cyan: {
+    wrap: "border-cyan-200 bg-cyan-50",
+    icon: "text-cyan-700",
+    title: "text-cyan-900",
+  },
+  violet: {
+    wrap: "border-violet-200 bg-violet-50",
+    icon: "text-violet-700",
+    title: "text-violet-900",
+  },
+  emerald: {
+    wrap: "border-emerald-200 bg-emerald-50",
+    icon: "text-emerald-700",
+    title: "text-emerald-900",
+  },
+  amber: {
+    wrap: "border-amber-200 bg-amber-50",
+    icon: "text-amber-700",
+    title: "text-amber-900",
+  },
+  red: {
+    wrap: "border-red-200 bg-red-50",
+    icon: "text-red-700",
+    title: "text-red-900",
+  },
+  rose: {
+    wrap: "border-rose-200 bg-rose-50",
+    icon: "text-rose-700",
+    title: "text-rose-900",
+  },
+  sky: {
+    wrap: "border-sky-200 bg-sky-50",
+    icon: "text-sky-700",
+    title: "text-sky-900",
+  },
+  indigo: {
+    wrap: "border-indigo-200 bg-indigo-50",
+    icon: "text-indigo-700",
+    title: "text-indigo-900",
+  },
+  fuchsia: {
+    wrap: "border-fuchsia-200 bg-fuchsia-50",
+    icon: "text-fuchsia-700",
+    title: "text-fuchsia-900",
+  },
+};
+
+const DEFAULT_TILE_TONES: Record<AdminDashboardTileKey, NonDefaultTone> = {
+  products: "gray",
+  "bulk-product-images": "cyan",
+  combos: "violet",
+  "want-to-buy": "blue",
+  "on-demand-orders": "amber",
+  orders: "gray",
+  "order-reports": "emerald",
+  analytics: "fuchsia",
+  blogs: "gray",
+  "admin-management": "gray",
+  "site-settings": "gray",
+  subjects: "gray",
+  courses: "gray",
+  users: "gray",
+  sessions: "gray",
+  lalita: "rose",
+  "official-papers": "sky",
+  "product-pricing": "emerald",
+  "on-demand-timing-rules": "indigo",
+  "dashboard-tile-order": "indigo",
+};
+
+function readStoredTileSettings(): AdminDashboardTileSettings {
+  if (typeof window === "undefined") {
+    return getDefaultAdminDashboardTileSettings();
+  }
+
+  try {
+    const raw = window.localStorage.getItem(ADMIN_DASHBOARD_TILE_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    const normalized = normalizeAdminDashboardTileSettings(parsed);
+    window.localStorage.setItem(
+      ADMIN_DASHBOARD_TILE_STORAGE_KEY,
+      JSON.stringify(normalized)
+    );
+    return normalized;
+  } catch {
+    const defaults = getDefaultAdminDashboardTileSettings();
+    window.localStorage.setItem(
+      ADMIN_DASHBOARD_TILE_STORAGE_KEY,
+      JSON.stringify(defaults)
+    );
+    return defaults;
+  }
+}
 
 export default function AdminPage() {
   const router = useRouter();
@@ -90,41 +206,39 @@ export default function AdminPage() {
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-
-    try {
-      const raw = window.localStorage.getItem(
-        ADMIN_DASHBOARD_TILE_STORAGE_KEY
-      );
-      const parsed = raw ? JSON.parse(raw) : {};
-      const normalized = normalizeAdminDashboardTileSettings(parsed);
-      setTileSettings(normalized);
-      window.localStorage.setItem(
-        ADMIN_DASHBOARD_TILE_STORAGE_KEY,
-        JSON.stringify(normalized)
-      );
-    } catch {
-      const defaults = getDefaultAdminDashboardTileSettings();
-      setTileSettings(defaults);
-      window.localStorage.setItem(
-        ADMIN_DASHBOARD_TILE_STORAGE_KEY,
-        JSON.stringify(defaults)
-      );
-    }
+    setTileSettings(readStoredTileSettings());
   }, []);
 
   useEffect(() => {
-    const onFocus = () => {
-      try {
-        const raw = window.localStorage.getItem(
-          ADMIN_DASHBOARD_TILE_STORAGE_KEY
-        );
-        const parsed = raw ? JSON.parse(raw) : {};
-        setTileSettings(normalizeAdminDashboardTileSettings(parsed));
-      } catch {}
+    if (typeof window === "undefined") return;
+
+    const syncTiles = () => {
+      setTileSettings(readStoredTileSettings());
     };
 
+    const onFocus = () => syncTiles();
+    const onStorage = (e: StorageEvent) => {
+      if (!e.key || e.key === ADMIN_DASHBOARD_TILE_STORAGE_KEY) {
+        syncTiles();
+      }
+    };
+    const onCustom = () => syncTiles();
+
     window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
+    window.addEventListener("storage", onStorage);
+    window.addEventListener(
+      ADMIN_DASHBOARD_TILE_SYNC_EVENT,
+      onCustom as EventListener
+    );
+
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("storage", onStorage);
+      window.removeEventListener(
+        ADMIN_DASHBOARD_TILE_SYNC_EVENT,
+        onCustom as EventListener
+      );
+    };
   }, []);
 
   useEffect(() => {
@@ -272,99 +386,89 @@ export default function AdminPage() {
     return getAdminDashboardTileDisplayTitle(key, tileSettings);
   }
 
+  function getResolvedTone(key: AdminDashboardTileKey): NonDefaultTone {
+    const override = tileSettings.colorOverrides?.[key];
+    if (override && override !== "default") {
+      return override as NonDefaultTone;
+    }
+    return DEFAULT_TILE_TONES[key] || "gray";
+  }
+
+  function getToneClasses(key: AdminDashboardTileKey) {
+    return TONE_CLASSES[getResolvedTone(key)];
+  }
+
+  function renderBasicTile(
+    tile: AdminDashboardTileConfig,
+    href: string,
+    Icon: any,
+    description: string
+  ) {
+    const tone = getToneClasses(tile.key);
+
+    return (
+      <Link
+        key={tile.key}
+        href={href}
+        className={`rounded-2xl border hover:bg-white transition p-5 shadow-sm ${tone.wrap}`}
+      >
+        <div className="flex items-center gap-3">
+          <Icon className={tone.icon} />
+          <div>
+            <div className={`font-extrabold ${tone.title}`}>{getTitle(tile.key)}</div>
+            <div className="text-xs text-slate-600 mt-1">{description}</div>
+          </div>
+        </div>
+      </Link>
+    );
+  }
+
   function renderTile(tile: AdminDashboardTileConfig) {
     if (tile.key === "products") {
-      return (
-        <Link
-          key={tile.key}
-          href="/admin/products"
-          className="rounded-2xl border border-gray-200 bg-gray-50 hover:bg-white transition p-5 shadow-sm"
-        >
-          <div className="flex items-center gap-3">
-            <Package className="text-slate-700" />
-            <div>
-              <div className="font-extrabold">{getTitle(tile.key)}</div>
-              <div className="text-xs text-slate-600 mt-1">
-                Add / edit products
-              </div>
-            </div>
-          </div>
-        </Link>
-      );
+      return renderBasicTile(tile, "/admin/products", Package, "Add / edit products");
     }
 
     if (tile.key === "bulk-product-images") {
-      return (
-        <Link
-          key={tile.key}
-          href="/admin/products/bulk/bulk-images"
-          className="rounded-2xl border border-cyan-200 bg-cyan-50 hover:bg-white transition p-5 shadow-sm"
-        >
-          <div className="flex items-center gap-3">
-            <ImageIcon className="text-cyan-700" />
-            <div>
-              <div className="font-extrabold text-cyan-900">
-                {getTitle(tile.key)}
-              </div>
-              <div className="text-xs text-slate-600 mt-1">
-                ZIP upload + category-wise missing image report
-              </div>
-            </div>
-          </div>
-        </Link>
+      return renderBasicTile(
+        tile,
+        "/admin/products/bulk/bulk-images",
+        ImageIcon,
+        "ZIP upload + category-wise missing image report"
       );
     }
 
     if (tile.key === "combos") {
-      return (
-        <Link
-          key={tile.key}
-          href="/admin/combos"
-          className="rounded-2xl border border-violet-200 bg-violet-50 hover:bg-white transition p-5 shadow-sm"
-        >
-          <div className="flex items-center gap-3">
-            <Boxes className="text-violet-700" />
-            <div>
-              <div className="font-extrabold text-violet-900">
-                {getTitle(tile.key)}
-              </div>
-              <div className="text-xs text-slate-600 mt-1">
-                Manage combo rules, bundles & SEO
-              </div>
-            </div>
-          </div>
-        </Link>
+      return renderBasicTile(
+        tile,
+        "/admin/combos",
+        Boxes,
+        "Manage combo rules, bundles & SEO"
       );
     }
 
     if (tile.key === "want-to-buy") {
-      return (
-        <Link
-          key={tile.key}
-          href="/admin/want-to-buy"
-          className="rounded-2xl border border-blue-200 bg-blue-50 hover:bg-white transition p-5 shadow-sm"
-        >
-          <div className="flex items-center gap-3">
-            <ShoppingCart className="text-blue-700" />
-            <div>
-              <div className="font-extrabold text-blue-900">
-                {getTitle(tile.key)}
-              </div>
-              <div className="text-xs text-slate-600 mt-1">
-                Product demand enquiries
-              </div>
-            </div>
-          </div>
-        </Link>
+      return renderBasicTile(
+        tile,
+        "/admin/want-to-buy",
+        ShoppingCart,
+        "Product demand enquiries"
       );
     }
 
     if (tile.key === "on-demand-orders") {
+      const customTone = tileSettings.colorOverrides?.[tile.key];
+      const customActive = Boolean(customTone && customTone !== "default");
+      const tone = customActive ? TONE_CLASSES[customTone as NonDefaultTone] : null;
+
       return (
         <Link
           key={tile.key}
           href="/admin/on-demand-orders"
-          className={`rounded-2xl transition p-5 shadow-sm relative overflow-hidden ${onDemandTileTone.wrap} ${emergencyClass}`}
+          className={`rounded-2xl transition p-5 shadow-sm relative overflow-hidden ${
+            customActive
+              ? `${tone?.wrap} hover:bg-white`
+              : `${onDemandTileTone.wrap} ${emergencyClass}`
+          }`}
           title={
             hasOnDemandEmergency
               ? `${onDemandProducts} pending on demand product request(s)`
@@ -382,16 +486,36 @@ export default function AdminPage() {
 
           <div className="flex items-center gap-3">
             <div
-              className={`h-12 w-12 rounded-2xl flex items-center justify-center shadow-sm ${onDemandTileTone.iconWrap}`}
+              className={`h-12 w-12 rounded-2xl flex items-center justify-center shadow-sm ${
+                customActive
+                  ? "bg-white/80"
+                  : onDemandTileTone.iconWrap
+              }`}
             >
-              <Package className={hasOnDemandEmergency ? "isp-siren" : ""} />
+              <Package
+                className={
+                  customActive
+                    ? `${tone?.icon} ${hasOnDemandEmergency ? "isp-siren" : ""}`
+                    : hasOnDemandEmergency
+                    ? "isp-siren"
+                    : ""
+                }
+              />
             </div>
 
             <div className="min-w-0 flex-1">
-              <div className={`font-extrabold ${onDemandTileTone.title}`}>
+              <div
+                className={`font-extrabold ${
+                  customActive ? tone?.title : onDemandTileTone.title
+                }`}
+              >
                 {getTitle(tile.key)}
               </div>
-              <div className={`text-xs mt-1 ${onDemandTileTone.sub}`}>
+              <div
+                className={`text-xs mt-1 ${
+                  customActive ? "text-slate-600" : onDemandTileTone.sub
+                }`}
+              >
                 {odLoading
                   ? "Loading pending uploads..."
                   : hasOnDemandEmergency
@@ -401,7 +525,11 @@ export default function AdminPage() {
 
               <div className="mt-3 flex items-center gap-2 flex-wrap">
                 <span
-                  className={`inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-extrabold ${onDemandTileTone.badge}`}
+                  className={`inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-extrabold ${
+                    customActive
+                      ? "bg-white text-slate-700 border border-gray-200"
+                      : onDemandTileTone.badge
+                  }`}
                 >
                   {odLoading ? "..." : `${onDemandProducts} pending`}
                 </span>
@@ -413,7 +541,7 @@ export default function AdminPage() {
             </div>
           </div>
 
-          {hasOnDemandEmergency ? (
+          {!customActive && hasOnDemandEmergency ? (
             <div className="absolute inset-x-0 bottom-0 h-1 bg-gradient-to-r from-red-500 via-red-700 to-red-500" />
           ) : null}
         </Link>
@@ -421,99 +549,48 @@ export default function AdminPage() {
     }
 
     if (tile.key === "orders") {
-      return (
-        <Link
-          key={tile.key}
-          href="/admin/orders"
-          className="rounded-2xl border border-gray-200 bg-gray-50 hover:bg-white transition p-5 shadow-sm"
-        >
-          <div className="flex items-center gap-3">
-            <ClipboardList className="text-slate-700" />
-            <div>
-              <div className="font-extrabold">{getTitle(tile.key)}</div>
-              <div className="text-xs text-slate-600 mt-1">
-                View payments & delivery
-              </div>
-            </div>
-          </div>
-        </Link>
-      );
+      return renderBasicTile(tile, "/admin/orders", ClipboardList, "View payments & delivery");
     }
 
     if (tile.key === "order-reports") {
-      return (
-        <Link
-          key={tile.key}
-          href="/admin/order-reports"
-          className="rounded-2xl border border-emerald-200 bg-emerald-50 hover:bg-white transition p-5 shadow-sm"
-        >
-          <div className="flex items-center gap-3">
-            <BarChart3 className="text-emerald-700" />
-            <div>
-              <div className="font-extrabold text-emerald-900">
-                {getTitle(tile.key)}
-              </div>
-              <div className="text-xs text-slate-600 mt-1">
-                Revenue, products sold, trends & analytics
-              </div>
-            </div>
-          </div>
-        </Link>
+      return renderBasicTile(
+        tile,
+        "/admin/order-reports",
+        BarChart3,
+        "Revenue, products sold, trends & analytics"
       );
     }
 
     if (tile.key === "analytics") {
-      return (
-        <Link
-          key={tile.key}
-          href="/admin/analytics"
-          className="rounded-2xl border border-fuchsia-200 bg-fuchsia-50 hover:bg-white transition p-5 shadow-sm"
-        >
-          <div className="flex items-center gap-3">
-            <TrendingUp className="text-fuchsia-700" />
-            <div>
-              <div className="font-extrabold text-fuchsia-900">
-                {getTitle(tile.key)}
-              </div>
-              <div className="text-xs text-slate-600 mt-1">
-                SEO, source buckets, UTM, referrers & attribution report
-              </div>
-            </div>
-          </div>
-        </Link>
+      return renderBasicTile(
+        tile,
+        "/admin/analytics",
+        TrendingUp,
+        "SEO, source buckets, UTM, referrers & attribution report"
       );
     }
 
     if (tile.key === "blogs") {
-      return (
-        <Link
-          key={tile.key}
-          href="/admin/blogs"
-          className="rounded-2xl border border-gray-200 bg-gray-50 hover:bg-white transition p-5 shadow-sm"
-        >
-          <div className="flex items-center gap-3">
-            <FileText className="text-slate-700" />
-            <div>
-              <div className="font-extrabold">{getTitle(tile.key)}</div>
-              <div className="text-xs text-slate-600 mt-1">
-                Manage blog categories & posts
-              </div>
-            </div>
-          </div>
-        </Link>
+      return renderBasicTile(
+        tile,
+        "/admin/blogs",
+        FileText,
+        "Manage blog categories & posts"
       );
     }
 
     if (tile.key === "admin-management") {
+      const tone = getToneClasses(tile.key);
+
       return (
         <div
           key={tile.key}
-          className="rounded-2xl border border-gray-200 bg-gray-50 p-5 shadow-sm"
+          className={`rounded-2xl border p-5 shadow-sm ${tone.wrap}`}
         >
           <div className="flex items-center gap-3">
-            <Users className="text-slate-700" />
+            <Users className={tone.icon} />
             <div className="min-w-0">
-              <div className="font-extrabold">{getTitle(tile.key)}</div>
+              <div className={`font-extrabold ${tone.title}`}>{getTitle(tile.key)}</div>
               <div className="text-xs text-slate-600 mt-1">
                 {isMaster
                   ? "Create / delete Co-Admins (Master only)"
@@ -544,168 +621,92 @@ export default function AdminPage() {
     }
 
     if (tile.key === "site-settings") {
-      return (
-        <Link
-          key={tile.key}
-          href="/admin/site-settings"
-          className="rounded-2xl border border-gray-200 bg-gray-50 hover:bg-white transition p-5 shadow-sm"
-        >
-          <div className="flex items-center gap-3">
-            <Settings className="text-slate-700" />
-            <div>
-              <div className="font-extrabold">{getTitle(tile.key)}</div>
-              <div className="text-xs text-slate-600 mt-1">
-                Hero, FAQ, Social links, Testimonials
-              </div>
-            </div>
-          </div>
-        </Link>
+      return renderBasicTile(
+        tile,
+        "/admin/site-settings",
+        Settings,
+        "Hero, FAQ, Social links, Testimonials"
       );
     }
 
     if (tile.key === "subjects") {
-      return (
-        <Link
-          key={tile.key}
-          href="/admin/subjects"
-          className="rounded-2xl border border-gray-200 bg-gray-50 hover:bg-white transition p-5 shadow-sm"
-        >
-          <div className="flex items-center gap-3">
-            <BookOpen className="text-slate-700" />
-            <div>
-              <div className="font-extrabold">{getTitle(tile.key)}</div>
-              <div className="text-xs text-slate-600 mt-1">
-                Codes + Titles (Excel upload)
-              </div>
-            </div>
-          </div>
-        </Link>
+      return renderBasicTile(
+        tile,
+        "/admin/subjects",
+        BookOpen,
+        "Codes + Titles (Excel upload)"
       );
     }
 
     if (tile.key === "courses") {
-      return (
-        <Link
-          key={tile.key}
-          href="/admin/courses"
-          className="rounded-2xl border border-gray-200 bg-gray-50 hover:bg-white transition p-5 shadow-sm"
-        >
-          <div className="flex items-center gap-3">
-            <GraduationCap className="text-slate-700" />
-            <div>
-              <div className="font-extrabold">{getTitle(tile.key)}</div>
-              <div className="text-xs text-slate-600 mt-1">
-                Codes + Title (single title)
-              </div>
-            </div>
-          </div>
-        </Link>
+      return renderBasicTile(
+        tile,
+        "/admin/courses",
+        GraduationCap,
+        "Codes + Title (single title)"
       );
     }
 
     if (tile.key === "users") {
-      return (
-        <Link
-          key={tile.key}
-          href="/admin/users"
-          className="rounded-2xl border border-gray-200 bg-gray-50 hover:bg-white transition p-5 shadow-sm"
-        >
-          <div className="flex items-center gap-3">
-            <UserCircle2 className="text-slate-700" />
-            <div>
-              <div className="font-extrabold">{getTitle(tile.key)}</div>
-              <div className="text-xs text-slate-600 mt-1">
-                Customers list + order count
-              </div>
-            </div>
-          </div>
-        </Link>
+      return renderBasicTile(
+        tile,
+        "/admin/users",
+        UserCircle2,
+        "Customers list + order count"
       );
     }
 
     if (tile.key === "sessions") {
-      return (
-        <Link
-          key={tile.key}
-          href="/admin/sessions"
-          className="rounded-2xl border border-gray-200 bg-gray-50 hover:bg-white transition p-5 shadow-sm"
-        >
-          <div className="flex items-center gap-3">
-            <CalendarDays className="text-slate-700" />
-            <div>
-              <div className="font-extrabold">{getTitle(tile.key)}</div>
-              <div className="text-xs text-slate-600 mt-1">
-                Smart sessions by category
-              </div>
-            </div>
-          </div>
-        </Link>
+      return renderBasicTile(
+        tile,
+        "/admin/sessions",
+        CalendarDays,
+        "Smart sessions by category"
       );
     }
 
     if (tile.key === "lalita") {
-      return (
-        <Link
-          key={tile.key}
-          href="/admin/Lalita"
-          className="rounded-2xl border border-rose-200 bg-rose-50 hover:bg-white transition p-5 shadow-sm"
-        >
-          <div className="flex items-center gap-3">
-            <FileArchive className="text-rose-700" />
-            <div>
-              <div className="font-extrabold text-rose-900">
-                {getTitle(tile.key)}
-              </div>
-              <div className="text-xs text-slate-600 mt-1">
-                Hidden secure bulk PDF upload page
-              </div>
-            </div>
-          </div>
-        </Link>
+      return renderBasicTile(
+        tile,
+        "/admin/Lalita",
+        FileArchive,
+        "Hidden secure bulk PDF upload page"
       );
     }
 
     if (tile.key === "official-papers") {
-      return (
-        <Link
-          key={tile.key}
-          href="/admin/official-papers"
-          className="rounded-2xl border border-sky-200 bg-sky-50 hover:bg-white transition p-5 shadow-sm"
-        >
-          <div className="flex items-center gap-3">
-            <FolderOpen className="text-sky-700" />
-            <div>
-              <div className="font-extrabold text-sky-900">
-                {getTitle(tile.key)}
-              </div>
-              <div className="text-xs text-slate-600 mt-1">
-                Upload official / unsolved papers by SKU
-              </div>
-            </div>
-          </div>
-        </Link>
+      return renderBasicTile(
+        tile,
+        "/admin/official-papers",
+        FolderOpen,
+        "Upload official / unsolved papers by SKU"
+      );
+    }
+
+    if (tile.key === "product-pricing") {
+      return renderBasicTile(
+        tile,
+        "/admin/product-pricing",
+        IndianRupee,
+        "Category + course pricing rules & product overrides"
+      );
+    }
+
+    if (tile.key === "on-demand-timing-rules") {
+      return renderBasicTile(
+        tile,
+        "/admin/on-demand-timing-rules",
+        Clock3,
+        "Category default + course-wise timer configuration"
       );
     }
 
     if (tile.key === "dashboard-tile-order") {
-      return (
-        <Link
-          key={tile.key}
-          href="/admin/dashboard-tile-order"
-          className="rounded-2xl border border-indigo-200 bg-indigo-50 hover:bg-white transition p-5 shadow-sm"
-        >
-          <div className="flex items-center gap-3">
-            <SlidersHorizontal className="text-indigo-700" />
-            <div>
-              <div className="font-extrabold text-indigo-900">
-                {getTitle(tile.key)}
-              </div>
-              <div className="text-xs text-slate-600 mt-1">
-                Set tile order, names, and visibility
-              </div>
-            </div>
-          </div>
-        </Link>
+      return renderBasicTile(
+        tile,
+        "/admin/dashboard-tile-order",
+        SlidersHorizontal,
+        "Set tile order, names, and visibility"
       );
     }
 
@@ -818,40 +819,6 @@ export default function AdminPage() {
 
           <div className="mt-6 grid grid-cols-1 md:grid-cols-4 gap-4">
             {orderedTiles.map((tile) => renderTile(tile))}
-
-            <Link
-              href="/admin/product-pricing"
-              className="rounded-2xl border border-emerald-200 bg-emerald-50 hover:bg-white transition p-5 shadow-sm"
-            >
-              <div className="flex items-center gap-3">
-                <IndianRupee className="text-emerald-700" />
-                <div>
-                  <div className="font-extrabold text-emerald-900">
-                    Product Pricing
-                  </div>
-                  <div className="text-xs text-slate-600 mt-1">
-                    Category + course pricing rules & product overrides
-                  </div>
-                </div>
-              </div>
-            </Link>
-
-            <Link
-              href="/admin/on-demand-timing-rules"
-              className="rounded-2xl border border-indigo-200 bg-indigo-50 hover:bg-white transition p-5 shadow-sm"
-            >
-              <div className="flex items-center gap-3">
-                <Clock3 className="text-indigo-700" />
-                <div>
-                  <div className="font-extrabold text-indigo-900">
-                    On Demand Timing Rules
-                  </div>
-                  <div className="text-xs text-slate-600 mt-1">
-                    Category default + course-wise timer configuration
-                  </div>
-                </div>
-              </div>
-            </Link>
           </div>
 
           <div className="mt-6 text-xs text-slate-500">

@@ -44,7 +44,9 @@ function normalizeAvailability(input: any) {
 
 export async function GET(req: NextRequest) {
   const user = await getAuthUser();
-  if (!user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+  if (!user) {
+    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+  }
 
   if (!hasPermission(user, "products:read") && !hasPermission(user, "products:write")) {
     return NextResponse.json({ error: "Forbidden" }, { status: 403 });
@@ -65,6 +67,7 @@ export async function GET(req: NextRequest) {
 
   for (const order of paidOrders) {
     if (order?.userId) userIdsSet.add(String(order.userId));
+
     const items = Array.isArray(order?.items) ? order.items : [];
     for (const it of items) {
       if (it?.productId) productIdsSet.add(String(it.productId));
@@ -79,19 +82,27 @@ export async function GET(req: NextRequest) {
     .filter((id) => mongoose.Types.ObjectId.isValid(id))
     .map((id) => new mongoose.Types.ObjectId(id));
 
-  const products: any[] = await Product.find({ _id: { $in: productIds } })
-    .select("_id title slug category availability pdfKey isActive sku")
-    .lean();
+  const products: any[] = productIds.length
+    ? await Product.find({ _id: { $in: productIds } })
+        .select("_id title slug category availability pdfKey isActive sku")
+        .lean()
+    : [];
 
-  const users: any[] = await User.find({ _id: { $in: userIds } })
-    .select("_id name email phone createdAt")
-    .lean();
+  const users: any[] = userIds.length
+    ? await User.find({ _id: { $in: userIds } })
+        .select("_id name email phone createdAt")
+        .lean()
+    : [];
 
   const productMap = new Map<string, any>();
-  for (const p of products) productMap.set(String(p._id), p);
+  for (const p of products) {
+    productMap.set(String(p._id), p);
+  }
 
   const userMap = new Map<string, any>();
-  for (const u of users) userMap.set(String(u._id), u);
+  for (const u of users) {
+    userMap.set(String(u._id), u);
+  }
 
   const grouped = new Map<
     string,
@@ -113,7 +124,6 @@ export async function GET(req: NextRequest) {
     if (!uid) continue;
 
     const dbUser = userMap.get(uid);
-
     const items = Array.isArray(order?.items) ? order.items : [];
     const totalPurchasedProducts = items.length;
 
@@ -182,7 +192,8 @@ export async function GET(req: NextRequest) {
   }
 
   items.sort((a, b) => {
-    const byOnDemand = Number(b.totalOnDemandProducts || 0) - Number(a.totalOnDemandProducts || 0);
+    const byOnDemand =
+      Number(b.totalOnDemandProducts || 0) - Number(a.totalOnDemandProducts || 0);
     if (byOnDemand !== 0) return byOnDemand;
 
     return new Date(b.latestAt || 0).getTime() - new Date(a.latestAt || 0).getTime();
@@ -194,7 +205,10 @@ export async function GET(req: NextRequest) {
       items,
       stats: {
         totalUsers: items.length,
-        totalOnDemandProducts: items.reduce((acc, x) => acc + Number(x.totalOnDemandProducts || 0), 0),
+        totalOnDemandProducts: items.reduce(
+          (acc, x) => acc + Number(x.totalOnDemandProducts || 0),
+          0
+        ),
       },
     },
     { status: 200 }

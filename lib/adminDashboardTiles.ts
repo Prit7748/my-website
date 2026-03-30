@@ -16,7 +16,23 @@ export type AdminDashboardTileKey =
   | "sessions"
   | "lalita"
   | "official-papers"
+  | "product-pricing"
+  | "on-demand-timing-rules"
   | "dashboard-tile-order";
+
+export type AdminDashboardTileTone =
+  | "default"
+  | "gray"
+  | "blue"
+  | "cyan"
+  | "violet"
+  | "emerald"
+  | "amber"
+  | "red"
+  | "rose"
+  | "sky"
+  | "indigo"
+  | "fuchsia";
 
 export type AdminDashboardTileConfig = {
   key: AdminDashboardTileKey;
@@ -30,10 +46,32 @@ export type AdminDashboardTileSettings = {
   order: AdminDashboardTileKey[];
   hiddenKeys: AdminDashboardTileKey[];
   labelOverrides: Partial<Record<AdminDashboardTileKey, string>>;
+  colorOverrides: Partial<Record<AdminDashboardTileKey, AdminDashboardTileTone>>;
 };
 
 export const ADMIN_DASHBOARD_TILE_STORAGE_KEY =
   "ignou_admin_dashboard_tile_settings_v2";
+
+export const ADMIN_DASHBOARD_TILE_SYNC_EVENT =
+  "ignou:admin-dashboard-tile-settings-updated";
+
+export const ADMIN_DASHBOARD_TILE_TONE_OPTIONS: Array<{
+  value: AdminDashboardTileTone;
+  label: string;
+}> = [
+  { value: "default", label: "Default / Auto" },
+  { value: "gray", label: "Gray" },
+  { value: "blue", label: "Blue" },
+  { value: "cyan", label: "Cyan" },
+  { value: "violet", label: "Violet" },
+  { value: "emerald", label: "Emerald" },
+  { value: "amber", label: "Amber" },
+  { value: "red", label: "Red" },
+  { value: "rose", label: "Rose" },
+  { value: "sky", label: "Sky" },
+  { value: "indigo", label: "Indigo" },
+  { value: "fuchsia", label: "Fuchsia" },
+];
 
 export const ADMIN_DASHBOARD_TILES: AdminDashboardTileConfig[] = [
   {
@@ -139,6 +177,18 @@ export const ADMIN_DASHBOARD_TILES: AdminDashboardTileConfig[] = [
     href: "/admin/official-papers",
   },
   {
+    key: "product-pricing",
+    defaultTitle: "Product Pricing",
+    description: "Category + course pricing rules & product overrides",
+    href: "/admin/product-pricing",
+  },
+  {
+    key: "on-demand-timing-rules",
+    defaultTitle: "On Demand Timing Rules",
+    description: "Category default + course-wise timer configuration",
+    href: "/admin/on-demand-timing-rules",
+  },
+  {
     key: "dashboard-tile-order",
     defaultTitle: "Dashboard Tile Order",
     description: "Set tile order, names, and visibility",
@@ -156,6 +206,7 @@ export function getDefaultAdminDashboardTileSettings(): AdminDashboardTileSettin
     order: getDefaultAdminDashboardTileOrder(),
     hiddenKeys: [],
     labelOverrides: {},
+    colorOverrides: {},
   };
 }
 
@@ -227,6 +278,33 @@ export function normalizeAdminDashboardLabelOverrides(
   return out;
 }
 
+export function normalizeAdminDashboardColorOverrides(
+  raw: unknown
+): Partial<Record<AdminDashboardTileKey, AdminDashboardTileTone>> {
+  const out: Partial<Record<AdminDashboardTileKey, AdminDashboardTileTone>> = {};
+  const validTileSet = new Set(getDefaultAdminDashboardTileOrder());
+  const validToneSet = new Set(
+    ADMIN_DASHBOARD_TILE_TONE_OPTIONS.map((x) => x.value)
+  );
+
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return out;
+  }
+
+  for (const [k, v] of Object.entries(raw as Record<string, unknown>)) {
+    const key = String(k || "") as AdminDashboardTileKey;
+    const value = String(v || "") as AdminDashboardTileTone;
+
+    if (!validTileSet.has(key)) continue;
+    if (!validToneSet.has(value)) continue;
+    if (value === "default") continue;
+
+    out[key] = value;
+  }
+
+  return out;
+}
+
 export function normalizeAdminDashboardTileSettings(
   raw: unknown
 ): AdminDashboardTileSettings {
@@ -239,6 +317,7 @@ export function normalizeAdminDashboardTileSettings(
     order: normalizeAdminDashboardTileOrder(base.order),
     hiddenKeys: normalizeAdminDashboardHiddenKeys(base.hiddenKeys),
     labelOverrides: normalizeAdminDashboardLabelOverrides(base.labelOverrides),
+    colorOverrides: normalizeAdminDashboardColorOverrides(base.colorOverrides),
   };
 }
 
