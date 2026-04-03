@@ -65,12 +65,24 @@ type BulkResponse = {
 const DEFAULT_NOTE =
   "Please verify the question paper shown in the preview/thumbnail before purchasing. Purchase only if it matches your subject code, medium, session, and questions.";
 
+const DEFAULT_TITLE_TEMPLATE = "IGNOU %B Solved Assignment %C (%D Medium)";
+const DEFAULT_SHORT_DESC_TEMPLATE =
+  "Download IGNOU %B (%F) solved assignment for session %C in %D medium.";
+const DEFAULT_LONG_DESC_TEMPLATE =
+  "This IGNOU %B (%F) solved assignment is prepared for session %C in %D medium. Course title is auto-matched from master data: %G.";
+const DEFAULT_META_TITLE_TEMPLATE =
+  "IGNOU %B Solved Assignment %C (%D Medium) PDF Download";
+const DEFAULT_META_DESCRIPTION_TEMPLATE =
+  "Download IGNOU %B (%F) solved assignment for session %C in %D medium. Course title: %G. Instant access and verified subject mapping.";
+
 const TOKEN_HELP = [
   "%A = Unique Id (SKU)",
   "%B = Subject Code",
   "%C = Session",
   "%D = Language",
   "%E = Course Code",
+  "%F = Subject Title (language matched from master subjects)",
+  "%G = Course Title (from master courses)",
 ];
 
 const SAMPLE_CSV = `unique_id,subject_code,session,language,course_code
@@ -118,15 +130,13 @@ export default function BulkDetailsPage() {
 
   const [form, setForm] = useState({
     category: "Solved Assignments",
-    titleTemplate: "IGNOU %B Solved Assignment %C (%D Medium)",
+    titleTemplate: DEFAULT_TITLE_TEMPLATE,
     importantNoteTemplate: DEFAULT_NOTE,
-    shortDescTemplate: "Download IGNOU %B solved assignment for session %C in %D medium.",
-    longDescTemplate:
-      "This IGNOU %B solved assignment is prepared for session %C in %D medium. Subject title and course title are auto-matched from master data.",
+    shortDescTemplate: DEFAULT_SHORT_DESC_TEMPLATE,
+    longDescTemplate: DEFAULT_LONG_DESC_TEMPLATE,
     slugTemplate: "",
-    metaTitleTemplate: "IGNOU %B Solved Assignment %C (%D Medium) PDF Download",
-    metaDescriptionTemplate:
-      "Download IGNOU %B solved assignment for session %C in %D medium. Instant access, verified subject mapping and easy download.",
+    metaTitleTemplate: DEFAULT_META_TITLE_TEMPLATE,
+    metaDescriptionTemplate: DEFAULT_META_DESCRIPTION_TEMPLATE,
     publishNow: false,
     csvText: "",
     duplicateStrategy: "ignore" as "replace" | "ignore",
@@ -325,6 +335,9 @@ export default function BulkDetailsPage() {
               {TOKEN_HELP.map((x) => (
                 <div key={x}>{x}</div>
               ))}
+              <div className="mt-2 font-semibold">
+                Note: %F me sirf usi language ka subject title aayega jo row me diya gaya hai. English row me Hindi ya other title nahi aayega.
+              </div>
             </div>
           </div>
 
@@ -555,15 +568,13 @@ export default function BulkDetailsPage() {
                     });
                     setForm({
                       category: "Solved Assignments",
-                      titleTemplate: "IGNOU %B Solved Assignment %C (%D Medium)",
+                      titleTemplate: DEFAULT_TITLE_TEMPLATE,
                       importantNoteTemplate: DEFAULT_NOTE,
-                      shortDescTemplate: "Download IGNOU %B solved assignment for session %C in %D medium.",
-                      longDescTemplate:
-                        "This IGNOU %B solved assignment is prepared for session %C in %D medium. Subject title and course title are auto-matched from master data.",
+                      shortDescTemplate: DEFAULT_SHORT_DESC_TEMPLATE,
+                      longDescTemplate: DEFAULT_LONG_DESC_TEMPLATE,
                       slugTemplate: "",
-                      metaTitleTemplate: "IGNOU %B Solved Assignment %C (%D Medium) PDF Download",
-                      metaDescriptionTemplate:
-                        "Download IGNOU %B solved assignment for session %C in %D medium. Instant access, verified subject mapping and easy download.",
+                      metaTitleTemplate: DEFAULT_META_TITLE_TEMPLATE,
+                      metaDescriptionTemplate: DEFAULT_META_DESCRIPTION_TEMPLATE,
                       publishNow: false,
                       csvText: "",
                       duplicateStrategy: "ignore",
@@ -599,6 +610,8 @@ export default function BulkDetailsPage() {
                   Final availability file existence se derive hogi.
                   <br />
                   Duplicate handling aapke selected Ignore / Replace mode ke hisab se hogi.
+                  <br />
+                  %F aur %G master data se auto aayenge. Excel me inke liye alag columns dene ki zarurat nahi hai.
                 </div>
               </div>
             </div>

@@ -310,6 +310,79 @@ function getAvailabilityAfterSync(syncResult: any) {
   return safeStr(syncResult?.after?.availability || syncResult?.snapshot?.availability || "");
 }
 
+function normalizeLooseText(input: string) {
+  return safeStr(input)
+    .toLowerCase()
+    .normalize("NFKC")
+    .replace(/[^\p{L}\p{N}]+/gu, "");
+}
+
+function detectLanguageBucket(input: string): "en" | "hi" | "other" | "" {
+  const raw = safeStr(input).toLowerCase();
+  const norm = normalizeLooseText(input);
+
+  if (!raw && !norm) return "";
+  if (
+    raw === "en" ||
+    raw.includes("english") ||
+    norm === "en" ||
+    norm.includes("english")
+  ) {
+    return "en";
+  }
+  if (
+    raw === "hi" ||
+    raw.includes("hindi") ||
+    norm === "hi" ||
+    norm.includes("hindi") ||
+    norm.includes("हिंदी") ||
+    norm.includes("हिन्दी")
+  ) {
+    return "hi";
+  }
+  return "other";
+}
+
+function getMatchedSubjectTitleForLanguage(subject: any, language: string) {
+  const bucket = detectLanguageBucket(language);
+  const { subjectTitleHi, subjectTitleEn, subjectTitleOther } = getSubjectTitle(subject);
+
+  if (bucket === "en") return subjectTitleEn;
+  if (bucket === "hi") return subjectTitleHi;
+
+  if (bucket === "other") {
+    const subjectOtherLanguageName = normalizeLooseText(subject?.otherLangName || "");
+    const rowLanguage = normalizeLooseText(language);
+
+    if (subjectOtherLanguageName && rowLanguage && subjectOtherLanguageName === rowLanguage) {
+      return subjectTitleOther;
+    }
+    return "";
+  }
+
+  return "";
+}
+
+function buildTemplateWarnings(params: {
+  allTemplates: string[];
+  matchedSubjectTitle: string;
+  joinedCourseTitles: string;
+}) {
+  const warnings: string[] = [];
+  const usesSubjectTitle = params.allTemplates.some((t) => /%F/.test(safeStr(t)));
+  const usesCourseTitle = params.allTemplates.some((t) => /%G/.test(safeStr(t)));
+
+  if (usesSubjectTitle && !safeStr(params.matchedSubjectTitle)) {
+    warnings.push("Matched subject title is blank for this row language in master subjects");
+  }
+
+  if (usesCourseTitle && !safeStr(params.joinedCourseTitles)) {
+    warnings.push("Matched course title is blank in master courses");
+  }
+
+  return warnings;
+}
+
 async function makeUniqueSlug(base: string, excludeId?: string) {
   const clean = slugify(base) || "product";
   let slug = clean;
@@ -535,6 +608,16 @@ export async function POST(req: Request) {
     let skippedRows = 0;
     let failedRows = 0;
 
+    const allTemplates = [
+      titleTemplate,
+      importantNoteTemplate,
+      shortDescTemplate,
+      longDescTemplate,
+      slugTemplate,
+      metaTitleTemplate,
+      metaDescriptionTemplate,
+    ];
+
     for (let i = 0; i < parsedRows.length; i++) {
       const raw = parsedRows[i] || [];
       const rowNumber = i + 2;
@@ -625,12 +708,22 @@ export async function POST(req: Request) {
         continue;
       }
 
-      const title = replaceTokens(titleTemplate, row);
-      const slugBase = slugTemplate ? replaceTokens(slugTemplate, row) : title;
-      const normalizedSlugBase = slugify(slugBase);
       const lang3 = normalizeLang3(language);
       const session6 = normalizeSession6(session);
       const { subjectTitleHi, subjectTitleEn, subjectTitleOther } = getSubjectTitle(subjectDoc);
+      const matchedSubjectTitle = getMatchedSubjectTitleForLanguage(subjectDoc, language);
+      const normalizedCourseTitles = uniqueStrings(courseTitles.filter(Boolean));
+      const joinedCourseTitles = normalizedCourseTitles.join(", ");
+
+      const tokenRow = {
+        ...row,
+        F: matchedSubjectTitle,
+        G: joinedCourseTitles,
+      };
+
+      const title = replaceTokens(titleTemplate, tokenRow);
+      const slugBase = slugTemplate ? replaceTokens(slugTemplate, tokenRow) : title;
+      const normalizedSlugBase = slugify(slugBase);
 
       if (!title) {
         items.push({
@@ -642,6 +735,12 @@ export async function POST(req: Request) {
         failedRows++;
         continue;
       }
+
+      const templateWarnings = buildTemplateWarnings({
+        allTemplates,
+        matchedSubjectTitle,
+        joinedCourseTitles,
+      });
 
       const pricingResolution = await resolveRequiredProductPricing({
         category,
@@ -659,7 +758,7 @@ export async function POST(req: Request) {
           reason:
             "Pricing rule not found. Pehle Product Pricing page me category + course rule ya product override set karo.",
           courseCodes: courseCodeList,
-          courseTitles,
+          courseTitles: normalizedCourseTitles,
         });
         failedRows++;
         continue;
@@ -670,6 +769,8 @@ export async function POST(req: Request) {
       const existing: any = await Product.findOne({
         $or: [{ sku }, { slug: normalizedSlugBase }],
       });
+
+      const warningText = templateWarnings.length ? ` Warnings: ${templateWarnings.join(" | ")}.` : "";
 
       if (dryRun) {
         items.push({
@@ -688,11 +789,11 @@ export async function POST(req: Request) {
             : undefined,
           reason: existing
             ? duplicateStrategy === "replace"
-              ? `Duplicate mila: final create par existing product replace/update hoga. Price auto from ${pricingResolution.source}. Availability auto file-existence se derive hogi.`
-              : `Duplicate mila: final create par new row ignore/skip hogi. Price auto from ${pricingResolution.source}. Availability auto file-existence se derive hogi.`
-            : `Ready to create. Price auto from ${pricingResolution.source}. Availability auto file-existence se derive hogi.`,
+              ? `Duplicate mila: final create par existing product replace/update hoga. Price auto from ${pricingResolution.source}. Availability auto file-existence se derive hogi.${warningText}`
+              : `Duplicate mila: final create par new row ignore/skip hogi. Price auto from ${pricingResolution.source}. Availability auto file-existence se derive hogi.${warningText}`
+            : `Ready to create. Price auto from ${pricingResolution.source}. Availability auto file-existence se derive hogi.${warningText}`,
           courseCodes: courseCodeList,
-          courseTitles,
+          courseTitles: normalizedCourseTitles,
         });
         continue;
       }
@@ -708,7 +809,7 @@ export async function POST(req: Request) {
         subjectTitleOther,
 
         courseCodes: courseCodeList,
-        courseTitles,
+        courseTitles: normalizedCourseTitles,
 
         session,
         session6,
@@ -720,19 +821,19 @@ export async function POST(req: Request) {
 
         pages: 0,
         availability: "want_to_buy",
-        importantNote: replaceTokens(importantNoteTemplate, row),
+        importantNote: replaceTokens(importantNoteTemplate, tokenRow),
 
         deliverWithinMinutes: 20,
         onDemandNote: "",
         autoMakeAvailableOnUpload: true,
 
-        shortDesc: replaceTokens(shortDescTemplate, row),
-        descriptionHtml: replaceTokens(longDescTemplate, row),
+        shortDesc: replaceTokens(shortDescTemplate, tokenRow),
+        descriptionHtml: replaceTokens(longDescTemplate, tokenRow),
 
         isDigital: isDigitalForCategory,
 
-        metaTitle: replaceTokens(metaTitleTemplate, row),
-        metaDescription: replaceTokens(metaDescriptionTemplate, row),
+        metaTitle: replaceTokens(metaTitleTemplate, tokenRow),
+        metaDescription: replaceTokens(metaDescriptionTemplate, tokenRow),
 
         isAutoGenerated: false,
         autoGenerationType: "",
@@ -770,9 +871,9 @@ export async function POST(req: Request) {
                 : existing?.sku === sku
                 ? "sku"
                 : "slug",
-            reason: `Duplicate product already exists, new row ignored. Price auto from ${pricingResolution.source}. Availability current files se auto derive hoti rahegi.`,
+            reason: `Duplicate product already exists, new row ignored. Price auto from ${pricingResolution.source}. Availability current files se auto derive hoti rahegi.${warningText}`,
             courseCodes: courseCodeList,
-            courseTitles,
+            courseTitles: normalizedCourseTitles,
           });
           skippedRows++;
           continue;
@@ -821,9 +922,9 @@ export async function POST(req: Request) {
               : existing?.sku === sku
               ? "sku"
               : "slug",
-          reason: `Existing product replaced successfully. Price auto from ${pricingResolution.source}. Availability auto synced.`,
+          reason: `Existing product replaced successfully. Price auto from ${pricingResolution.source}. Availability auto synced.${warningText}`,
           courseCodes: courseCodeList,
-          courseTitles,
+          courseTitles: normalizedCourseTitles,
           availabilityAfter: getAvailabilityAfterSync(availabilitySync) || safeStr(afterDoc?.availability || ""),
         });
         updatedRows++;
@@ -857,9 +958,9 @@ export async function POST(req: Request) {
         title,
         slug: finalSlug,
         status: "created",
-        reason: `Created successfully. Price auto from ${pricingResolution.source}. Availability auto synced.`,
+        reason: `Created successfully. Price auto from ${pricingResolution.source}. Availability auto synced.${warningText}`,
         courseCodes: courseCodeList,
-        courseTitles,
+        courseTitles: normalizedCourseTitles,
         availabilityAfter: getAvailabilityAfterSync(availabilitySync) || safeStr(createdObj?.availability || ""),
       });
       createdRows++;
