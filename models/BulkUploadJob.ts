@@ -280,7 +280,6 @@ const BulkUploadJobSchema = new Schema(
     lockExpiresAt: {
       type: Date,
       default: null,
-      index: true,
     },
 
     startedAt: {
@@ -292,7 +291,6 @@ const BulkUploadJobSchema = new Schema(
     completedAt: {
       type: Date,
       default: null,
-      index: true,
     },
 
     failedAt: {
