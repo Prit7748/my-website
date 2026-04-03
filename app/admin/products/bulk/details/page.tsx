@@ -1,3 +1,4 @@
+// ✅ FILE: app\admin\products\bulk\details\page.tsx (COMPLETE REPLACE)
 "use client";
 
 import { useMemo, useState } from "react";

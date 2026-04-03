@@ -1,3 +1,4 @@
+// ✅ FILE: app\api\admin\products\bulk\details\route.ts (COMPLETE REPLACE)
 import { NextResponse } from "next/server";
 import dbConnect from "@/lib/db";
 import Product from "@/models/Product";
