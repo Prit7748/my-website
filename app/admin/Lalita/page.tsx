@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -23,6 +23,13 @@ import {
   Download,
   FolderDown,
   X,
+  AlertTriangle,
+  CheckCircle2,
+  Info,
+  PauseCircle,
+  LoaderCircle,
+  BarChart3,
+  Database,
 } from "lucide-react";
 
 type BootstrapResponse = {
@@ -56,6 +63,8 @@ type FolderListResponse = {
 type VaultFileItem = {
   _id: string;
   folderId: string;
+  folderName?: string;
+  folderPath?: string;
   originalName: string;
   fileName: string;
   fileExt: string;
@@ -74,31 +83,77 @@ type VaultFileItem = {
   deletedAt?: string | null;
 };
 
-type FileListResponse = { ok?: boolean; files?: VaultFileItem[]; total?: number };
-
-type UploadRow = {
+type FileListResponse = {
   ok?: boolean;
-  fileName?: string;
-  action?: string;
-  reason?: string;
-  skuNormalized?: string;
-  productMatched?: boolean;
-  productSku?: string;
+  files?: VaultFileItem[];
+  total?: number;
+  page?: number;
+  pageSize?: number;
+  totalPages?: number;
 };
 
-type UploadResponse = {
-  ok?: boolean;
-  summary?: {
-    total?: number;
-    uploaded?: number;
-    replaced?: number;
-    ignored?: number;
+type BulkJobProgress = {
+  totalItems: number;
+  processedItems: number;
+  successItems: number;
+  failedItems: number;
+  skippedItems: number;
+  validItems: number;
+  batchSize: number;
+  batchCount: number;
+  currentBatchNumber: number;
+  lastProcessedIndex: number;
+  progressPercent: number;
+};
+
+type RecentFailureItem = {
+  itemIndex?: number;
+  rowNumber?: number;
+  batchNumber?: number;
+  identifier?: string;
+  sku?: string;
+  fileName?: string;
+  status?: string;
+  reason?: string;
+  createdAt?: string | null;
+};
+
+type BulkJobState = {
+  _id: string;
+  jobType: string;
+  jobLabel: string;
+  status: string;
+  createdBy: string;
+  meta?: any;
+  config?: any;
+  summary?: any;
+  progress?: BulkJobProgress;
+  lastBatch?: {
+    batchNumber?: number;
+    fromIndex?: number;
+    toIndex?: number;
+    attempted?: number;
+    success?: number;
     failed?: number;
     skipped?: number;
-    matchedProducts?: number;
-  };
-  results?: UploadRow[];
+    startedAt?: string | null;
+    endedAt?: string | null;
+    note?: string;
+  } | null;
+  failuresCount?: number;
+  recentFailures?: RecentFailureItem[];
+  resultMessage?: string;
+  downloadFileName?: string;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  failedAt?: string | null;
+  cancelledAt?: string | null;
+  lastHeartbeatAt?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
 };
+
+const ACTIVE_JOB_STORAGE_KEY = "isp_pdf_vault_active_job_id";
 
 function formatBytes(bytes: number) {
   const n = Number(bytes || 0);
@@ -115,6 +170,17 @@ function formatDate(input?: string | null) {
   return d.toLocaleString("en-IN");
 }
 
+function formatDateTime(input?: string | null) {
+  if (!input) return "—";
+  const d = new Date(input);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString("en-IN");
+}
+
+function safeText(x: any) {
+  return String(x ?? "").trim();
+}
+
 function notifyLongTaskStart() {
   if (typeof window !== "undefined") {
     window.dispatchEvent(new CustomEvent("admin-long-task-start"));
@@ -125,6 +191,34 @@ function notifyLongTaskEnd() {
   if (typeof window !== "undefined") {
     window.dispatchEvent(new CustomEvent("admin-long-task-end"));
   }
+}
+
+function isFinalStatus(status: string) {
+  const s = safeText(status);
+  return (
+    s === "completed" ||
+    s === "completed_with_errors" ||
+    s === "failed" ||
+    s === "cancelled"
+  );
+}
+
+function statusTone(status: string) {
+  const s = safeText(status);
+
+  if (s === "completed") {
+    return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  }
+
+  if (s === "completed_with_errors") {
+    return "border-amber-200 bg-amber-50 text-amber-800";
+  }
+
+  if (s === "failed" || s === "cancelled") {
+    return "border-rose-200 bg-rose-50 text-rose-800";
+  }
+
+  return "border-blue-200 bg-blue-50 text-blue-800";
 }
 
 export default function HiddenPdfVaultPage() {
@@ -146,8 +240,6 @@ export default function HiddenPdfVaultPage() {
   const [filesLoading, setFilesLoading] = useState(false);
 
   const [globalSearch, setGlobalSearch] = useState("");
-  const [globalSuggestions, setGlobalSuggestions] = useState<VaultFileItem[]>([]);
-  const [showSuggestions, setShowSuggestions] = useState(false);
 
   const [folderSortBy, setFolderSortBy] = useState("name");
   const [folderSortDir, setFolderSortDir] = useState<"asc" | "desc">("asc");
@@ -157,14 +249,23 @@ export default function HiddenPdfVaultPage() {
 
   const [filePage, setFilePage] = useState(1);
   const [filePageSize, setFilePageSize] = useState(25);
+  const [serverTotal, setServerTotal] = useState(0);
+  const [serverTotalPages, setServerTotalPages] = useState(1);
 
   const [newFolderName, setNewFolderName] = useState("");
   const [creatingFolder, setCreatingFolder] = useState(false);
 
-  const [uploadFiles, setUploadFiles] = useState<File[]>([]);
+  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [conflictMode, setConflictMode] = useState<"ignore" | "replace">("ignore");
-  const [uploading, setUploading] = useState(false);
-  const [uploadResult, setUploadResult] = useState<UploadResponse | null>(null);
+  const [batchSize, setBatchSize] = useState(100);
+  const [creatingJob, setCreatingJob] = useState(false);
+
+  const [activeJob, setActiveJob] = useState<BulkJobState | null>(null);
+  const [activeJobId, setActiveJobId] = useState("");
+  const [isCancelling, setIsCancelling] = useState(false);
+
+  const [serverMessage, setServerMessage] = useState("");
+  const [serverMessageType, setServerMessageType] = useState<"success" | "error" | "info">("info");
 
   const [showTrash, setShowTrash] = useState(false);
   const [folderActionLoadingId, setFolderActionLoadingId] = useState("");
@@ -175,26 +276,83 @@ export default function HiddenPdfVaultPage() {
   const [cutFileName, setCutFileName] = useState("");
   const [fileActionLoadingId, setFileActionLoadingId] = useState("");
 
+  const processInFlightRef = useRef(false);
+  const longTaskActiveRef = useRef(false);
+  const finalRefreshDoneRef = useRef(false);
+
   const titlePath = useMemo(() => breadcrumbs.map((x) => x.name).join(" / "), [breadcrumbs]);
   const searchActive = globalSearch.trim().length > 0;
 
-  const pagedFiles = useMemo(() => {
-    const start = (filePage - 1) * filePageSize;
-    return files.slice(start, start + filePageSize);
-  }, [files, filePage, filePageSize]);
+  const currentStatus = safeText(activeJob?.status);
+  const isJobActive = Boolean(activeJobId) && !isFinalStatus(currentStatus);
+  const progress = activeJob?.progress;
+  const summary = activeJob?.summary || {};
+  const recentFailures = Array.isArray(activeJob?.recentFailures)
+    ? activeJob.recentFailures
+    : [];
 
-  const totalPages = useMemo(() => {
-    const total = Math.ceil(files.length / filePageSize);
-    return total > 0 ? total : 1;
-  }, [files.length, filePageSize]);
+  const selectedFilesSize = useMemo(
+    () => selectedFiles.reduce((sum, file) => sum + Number(file.size || 0), 0),
+    [selectedFiles]
+  );
 
-  const startItem = files.length ? (filePage - 1) * filePageSize + 1 : 0;
-  const endItem = Math.min(filePage * filePageSize, files.length);
+  const fromItem = serverTotal === 0 ? 0 : (filePage - 1) * filePageSize + 1;
+  const toItem = Math.min(filePage * filePageSize, serverTotal);
+
+  function resetMessages() {
+    setServerMessage("");
+    setServerMessageType("info");
+  }
+
+  function safePersistActiveJobId(jobId: string) {
+    if (typeof window === "undefined") return;
+
+    if (jobId) {
+      window.sessionStorage.setItem(ACTIVE_JOB_STORAGE_KEY, jobId);
+    } else {
+      window.sessionStorage.removeItem(ACTIVE_JOB_STORAGE_KEY);
+    }
+  }
+
+  async function safeReadJson(res: Response) {
+    const text = await res.text();
+    if (!text) return { ok: false, error: "Server returned empty response" };
+
+    try {
+      return JSON.parse(text);
+    } catch {
+      return {
+        ok: false,
+        error: text.slice(0, 400) || "Invalid server response",
+      };
+    }
+  }
+
+  async function fetchJobStatus(jobId: string) {
+    const res = await fetch(`/api/admin/bulk-jobs/${encodeURIComponent(jobId)}`, {
+      method: "GET",
+      credentials: "include",
+      cache: "no-store",
+    });
+
+    const data = await safeReadJson(res);
+    if (!res.ok || !data?.ok) {
+      throw new Error(data?.error || "Failed to fetch job status");
+    }
+
+    const job = data?.job as BulkJobState;
+    setActiveJob(job);
+    return job;
+  }
 
   async function loadBootstrap() {
     setBootLoading(true);
     try {
-      const res = await fetch("/api/admin/pdf-vault/bootstrap", { credentials: "include", cache: "no-store" });
+      const res = await fetch("/api/admin/pdf-vault/bootstrap", {
+        credentials: "include",
+        cache: "no-store",
+      });
+
       const data: BootstrapResponse = await res.json().catch(() => ({}));
       if (!res.ok) {
         setAccessGranted(false);
@@ -205,7 +363,10 @@ export default function HiddenPdfVaultPage() {
       setCurrentPath(data?.root?.path || "root");
 
       if (!data?.accessGranted) {
-        const puzzleRes = await fetch("/api/admin/pdf-vault/puzzle", { credentials: "include", cache: "no-store" });
+        const puzzleRes = await fetch("/api/admin/pdf-vault/puzzle", {
+          credentials: "include",
+          cache: "no-store",
+        });
         const puzzleData = await puzzleRes.json().catch(() => ({}));
         if (puzzleRes.ok) {
           setPuzzleA(Number((puzzleData as any)?.puzzle?.a || 0));
@@ -255,13 +416,17 @@ export default function HiddenPdfVaultPage() {
       if (showTrash) {
         qs.set("trash", "1");
         qs.set("parentPath", path);
+      } else if (q) {
+        qs.set("global", "1");
+        qs.set("q", q);
       } else {
-        qs.set("parentPath", q ? "root" : path);
-        if (q) qs.set("q", q);
+        qs.set("parentPath", path);
       }
 
       qs.set("sortBy", fileSortBy);
       qs.set("sortDir", fileSortDir);
+      qs.set("page", String(filePage));
+      qs.set("pageSize", String(filePageSize));
 
       const res = await fetch(`/api/admin/pdf-vault/files?${qs.toString()}`, {
         credentials: "include",
@@ -273,16 +438,18 @@ export default function HiddenPdfVaultPage() {
         if ((data as any)?.needsPuzzle) {
           setAccessGranted(false);
           await loadBootstrap();
+          return;
         }
+
+        setFiles([]);
+        setServerTotal(0);
+        setServerTotalPages(1);
         return;
       }
 
-      const nextFiles = Array.isArray(data?.files) ? data.files : [];
-      setFiles(nextFiles);
-      setFilePage(1);
-
-      if (!showTrash && q) setGlobalSuggestions(nextFiles.slice(0, 8));
-      else setGlobalSuggestions([]);
+      setFiles(Array.isArray(data?.files) ? data.files : []);
+      setServerTotal(Number(data?.total || 0));
+      setServerTotalPages(Math.max(1, Number(data?.totalPages || 1)));
     } finally {
       setFilesLoading(false);
     }
@@ -350,48 +517,158 @@ export default function HiddenPdfVaultPage() {
     }
   }
 
-  async function handleUpload() {
-    if (!uploadFiles.length) {
+  async function createSolvedPdfJob() {
+    if (!selectedFiles.length) {
       alert("Pehle PDF files select karo.");
       return;
     }
+
     if (showTrash) {
       alert("Trash view me upload allowed nahi hai.");
       return;
     }
 
-    setUploading(true);
-    setUploadResult(null);
-    notifyLongTaskStart();
+    if (isJobActive) {
+      alert("Ek upload job already running hai.");
+      return;
+    }
+
+    setCreatingJob(true);
+    resetMessages();
+    setActiveJob(null);
+    setActiveJobId("");
+    finalRefreshDoneRef.current = false;
 
     try {
-      const form = new FormData();
-      form.append("parentPath", currentPath);
-      form.append("conflictMode", conflictMode);
-      for (const file of uploadFiles) form.append("files", file);
+      const payload = {
+        parentPath: currentPath,
+        conflictMode,
+        batchSize,
+        originalSelectionCount: selectedFiles.length,
+        files: selectedFiles.map((file) => ({
+          name: file.name,
+          size: Number(file.size || 0),
+          lastModified: Number(file.lastModified || 0),
+        })),
+      };
 
-      const res = await fetch("/api/admin/pdf-vault/upload", {
+      const res = await fetch("/api/admin/pdf-vault/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify(payload),
+      });
+
+      const data = await safeReadJson(res);
+
+      if (!res.ok || !data?.ok) {
+        const errMsg = data?.error || "Job creation failed";
+        setServerMessage(errMsg);
+        setServerMessageType("error");
+        alert(errMsg);
+        return;
+      }
+
+      const job = data?.job as BulkJobState;
+      setActiveJob(job);
+      setActiveJobId(job?._id || "");
+      safePersistActiveJobId(job?._id || "");
+      finalRefreshDoneRef.current = false;
+
+      setServerMessage("Bulk solved PDFs job started successfully.");
+      setServerMessageType("success");
+    } catch (e: any) {
+      const errMsg = e?.message || "Server error";
+      setServerMessage(errMsg);
+      setServerMessageType("error");
+      alert(errMsg);
+    } finally {
+      setCreatingJob(false);
+    }
+  }
+
+  async function processNextBatch(job: BulkJobState) {
+    const jobId = safeText(job?._id);
+    if (!jobId || processInFlightRef.current) return;
+
+    const processedItems = Number(job?.progress?.processedItems || 0);
+    const totalItems = Number(job?.progress?.totalItems || 0);
+    const currentBatchSize = Math.max(1, Number(job?.progress?.batchSize || batchSize));
+
+    if (processedItems >= totalItems) return;
+
+    const nextBatchExpected = Math.min(currentBatchSize, totalItems - processedItems);
+    const nextBatchFiles = selectedFiles.slice(processedItems, processedItems + nextBatchExpected);
+
+    if (nextBatchFiles.length !== nextBatchExpected) {
+      setServerMessage(
+        "Current browser me required PDF batch files available nahi hain. Agar page refresh hua tha, same original PDF list dubara select karke continue karo."
+      );
+      setServerMessageType("info");
+      return;
+    }
+
+    processInFlightRef.current = true;
+    try {
+      const form = new FormData();
+      form.append("jobId", jobId);
+      for (const file of nextBatchFiles) {
+        form.append("files", file);
+      }
+
+      const res = await fetch("/api/admin/pdf-vault/jobs/process", {
         method: "POST",
         credentials: "include",
         body: form,
       });
 
-      const data: UploadResponse = await res.json().catch(() => ({}));
+      const data = await safeReadJson(res);
 
       if (!res.ok || !data?.ok) {
-        alert((data as any)?.error || "Upload failed");
-        return;
+        throw new Error(data?.error || "Batch processing failed");
       }
 
-      setUploadResult(data);
-      setUploadFiles([]);
-      const input = document.getElementById("vault-upload-input") as HTMLInputElement | null;
-      if (input) input.value = "";
-
-      await Promise.all([loadFiles(currentPath, globalSearch.trim()), loadFolders(currentPath)]);
+      if (data?.job) {
+        setActiveJob(data.job as BulkJobState);
+      }
     } finally {
-      notifyLongTaskEnd();
-      setUploading(false);
+      processInFlightRef.current = false;
+    }
+  }
+
+  async function cancelCurrentJob() {
+    if (!activeJobId) return;
+
+    const ok = window.confirm("Current solved PDFs bulk job ko cancel karna hai?");
+    if (!ok) return;
+
+    setIsCancelling(true);
+    try {
+      const res = await fetch(`/api/admin/bulk-jobs/${encodeURIComponent(activeJobId)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ action: "cancel" }),
+      });
+
+      const data = await safeReadJson(res);
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.error || "Cancel failed");
+      }
+
+      if (data?.job) {
+        setActiveJob(data.job as BulkJobState);
+      }
+
+      setServerMessage("Bulk job cancelled.");
+      setServerMessageType("info");
+    } catch (e: any) {
+      const errMsg = e?.message || "Cancel failed";
+      setServerMessage(errMsg);
+      setServerMessageType("error");
+      alert(errMsg);
+    } finally {
+      setIsCancelling(false);
     }
   }
 
@@ -417,7 +694,9 @@ export default function HiddenPdfVaultPage() {
         return;
       }
 
-      if (currentPath === folder.path && (data as any)?.folder?.path) setCurrentPath(String((data as any).folder.path));
+      if (currentPath === folder.path && (data as any)?.folder?.path) {
+        setCurrentPath(String((data as any).folder.path));
+      }
 
       setRenamingFolderId("");
       setRenameValue("");
@@ -522,7 +801,10 @@ export default function HiddenPdfVaultPage() {
       }
 
       const blob = await res.blob();
-      const fileName = `${(breadcrumbs[breadcrumbs.length - 1]?.name || "folder").replace(/[^a-zA-Z0-9-_]/g, "-")}.zip`;
+      const fileName = `${(breadcrumbs[breadcrumbs.length - 1]?.name || "folder").replace(
+        /[^a-zA-Z0-9-_]/g,
+        "-"
+      )}.zip`;
 
       const objectUrl = window.URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -698,26 +980,138 @@ export default function HiddenPdfVaultPage() {
   }, []);
 
   useEffect(() => {
-    if (!accessGranted) return;
-    void Promise.all([loadFolders(currentPath), loadFiles(currentPath, globalSearch.trim())]);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [accessGranted, currentPath, folderSortBy, folderSortDir, fileSortBy, fileSortDir, showTrash]);
+    if (typeof window === "undefined") return;
+
+    const savedJobId = window.sessionStorage.getItem(ACTIVE_JOB_STORAGE_KEY) || "";
+    if (savedJobId) {
+      setActiveJobId(savedJobId);
+    }
+  }, []);
 
   useEffect(() => {
-    if (!accessGranted || showTrash) return;
+    if (!activeJobId) {
+      safePersistActiveJobId("");
+      return;
+    }
+
+    safePersistActiveJobId(activeJobId);
+  }, [activeJobId]);
+
+  useEffect(() => {
+    if (!accessGranted) return;
+    void loadFolders(currentPath);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accessGranted, currentPath, folderSortBy, folderSortDir, showTrash]);
+
+  useEffect(() => {
+    if (!accessGranted) return;
 
     const t = setTimeout(() => {
       void loadFiles(currentPath, globalSearch.trim());
-      setShowSuggestions(Boolean(globalSearch.trim()));
-    }, 220);
+    }, searchActive ? 250 : 0);
 
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [globalSearch]);
+  }, [
+    accessGranted,
+    currentPath,
+    globalSearch,
+    showTrash,
+    fileSortBy,
+    fileSortDir,
+    filePage,
+    filePageSize,
+  ]);
 
   useEffect(() => {
     setFilePage(1);
-  }, [filePageSize]);
+  }, [filePageSize, currentPath, showTrash, fileSortBy, fileSortDir]);
+
+  useEffect(() => {
+    if (isJobActive && !longTaskActiveRef.current) {
+      notifyLongTaskStart();
+      longTaskActiveRef.current = true;
+    }
+
+    if ((!isJobActive || isFinalStatus(currentStatus)) && longTaskActiveRef.current) {
+      notifyLongTaskEnd();
+      longTaskActiveRef.current = false;
+    }
+  }, [isJobActive, currentStatus]);
+
+  useEffect(() => {
+    if (!activeJobId) return;
+    if (!accessGranted) return;
+    if (activeJob) return;
+
+    void fetchJobStatus(activeJobId).catch(() => {
+      // ignore initial restore error
+    });
+  }, [activeJobId, accessGranted, activeJob]);
+
+  useEffect(() => {
+    if (!activeJobId) return;
+    if (isFinalStatus(currentStatus)) return;
+
+    const interval = setInterval(() => {
+      void fetchJobStatus(activeJobId).catch(() => {
+        // ignore polling error
+      });
+    }, 1200);
+
+    return () => clearInterval(interval);
+  }, [activeJobId, currentStatus]);
+
+  useEffect(() => {
+    if (!activeJobId) return;
+    if (!activeJob) return;
+    if (isFinalStatus(currentStatus)) return;
+
+    const processedItems = Number(activeJob?.progress?.processedItems || 0);
+    const totalItems = Number(activeJob?.progress?.totalItems || 0);
+    const currentBatchSize = Math.max(1, Number(activeJob?.progress?.batchSize || batchSize));
+    const nextBatchExpected = Math.min(currentBatchSize, Math.max(0, totalItems - processedItems));
+
+    if (nextBatchExpected <= 0) return;
+
+    const nextBatchFiles = selectedFiles.slice(processedItems, processedItems + nextBatchExpected);
+    if (nextBatchFiles.length !== nextBatchExpected) return;
+
+    const timer = setTimeout(() => {
+      void processNextBatch(activeJob);
+    }, 350);
+
+    return () => clearTimeout(timer);
+  }, [activeJobId, activeJob, currentStatus, selectedFiles, batchSize]);
+
+  useEffect(() => {
+    if (!activeJobId) return;
+    if (!isFinalStatus(currentStatus)) {
+      finalRefreshDoneRef.current = false;
+      return;
+    }
+    if (finalRefreshDoneRef.current) return;
+
+    finalRefreshDoneRef.current = true;
+    safePersistActiveJobId("");
+
+    if (isFinalStatus(currentStatus)) {
+      setSelectedFiles([]);
+      const input = document.getElementById("vault-upload-input") as HTMLInputElement | null;
+      if (input) input.value = "";
+    }
+
+    void refreshAll();
+  }, [activeJobId, currentStatus]);
+
+  useEffect(() => {
+    return () => {
+      if (longTaskActiveRef.current) {
+        notifyLongTaskEnd();
+        longTaskActiveRef.current = false;
+      }
+    };
+  }, []);
 
   if (showBlankDenied) return <main className="min-h-screen bg-white" />;
 
@@ -740,7 +1134,9 @@ export default function HiddenPdfVaultPage() {
               </div>
               <div>
                 <h1 className="text-2xl font-extrabold">Secure PDF Vault</h1>
-                <p className="text-sm text-slate-600 mt-1">Access verify karne ke liye answer submit kijiye.</p>
+                <p className="text-sm text-slate-600 mt-1">
+                  Access verify karne ke liye answer submit kijiye.
+                </p>
               </div>
             </div>
 
@@ -798,7 +1194,8 @@ export default function HiddenPdfVaultPage() {
 
               <h1 className="text-2xl font-extrabold mt-3">Bulk Product PDFs Vault</h1>
               <p className="text-sm text-slate-600 mt-1">
-                Hidden secure area. Current path: <b>{titlePath || "root"}</b>
+                Solved PDFs ab batch-based job system par upload honge. Current path:{" "}
+                <b>{titlePath || "root"}</b>
               </p>
             </div>
 
@@ -817,11 +1214,15 @@ export default function HiddenPdfVaultPage() {
 
               <button
                 type="button"
-                onClick={() => setShowTrash((p) => !p)}
-                className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl border transition font-semibold shadow-sm ${showTrash
+                onClick={() => {
+                  setShowTrash((p) => !p);
+                  setFilePage(1);
+                }}
+                className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl border transition font-semibold shadow-sm ${
+                  showTrash
                     ? "bg-rose-50 text-rose-700 border-rose-200 hover:bg-rose-100"
                     : "bg-white hover:bg-gray-50 border-gray-200"
-                  }`}
+                }`}
               >
                 <Trash2 size={18} />
                 {showTrash ? "Trash View On" : "Open Trash"}
@@ -846,15 +1247,211 @@ export default function HiddenPdfVaultPage() {
             </div>
           </div>
 
+          <div className="mt-4 rounded-2xl border border-blue-200 bg-blue-50 p-4">
+            <div className="flex items-start gap-3">
+              <Database size={18} className="mt-0.5 shrink-0 text-blue-800" />
+              <div>
+                <div className="text-sm font-extrabold text-blue-900">
+                  Solved PDFs ab browser-batch + job tracking mode me process honge
+                </div>
+                <div className="text-sm text-blue-800 mt-2 leading-6">
+                  Single long request ki jagah ab selected PDFs batches me process hongi.
+                  <br />
+                  Har batch complete hone par progress update hogi, aur failed/skipped files CSV me download ki ja
+                  sakti hain.
+                  <br />
+                  Best result ke liye upload ke dauran isi tab ko open rakho.
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {serverMessage ? (
+            <div
+              className={`mt-4 rounded-2xl border p-4 text-sm font-semibold ${
+                serverMessageType === "success"
+                  ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                  : serverMessageType === "error"
+                  ? "border-rose-200 bg-rose-50 text-rose-800"
+                  : "border-blue-200 bg-blue-50 text-blue-800"
+              }`}
+            >
+              <div className="flex items-start gap-2">
+                {serverMessageType === "success" ? (
+                  <CheckCircle2 size={18} className="mt-0.5 shrink-0" />
+                ) : serverMessageType === "error" ? (
+                  <AlertTriangle size={18} className="mt-0.5 shrink-0" />
+                ) : (
+                  <Info size={18} className="mt-0.5 shrink-0" />
+                )}
+                <div>{serverMessage}</div>
+              </div>
+            </div>
+          ) : null}
+
+          {activeJob ? (
+            <div className={`mt-4 rounded-2xl border p-4 ${statusTone(currentStatus)}`}>
+              <div className="flex items-start justify-between gap-4 flex-wrap">
+                <div>
+                  <div className="text-sm font-extrabold">
+                    Current Job: {safeText(activeJob.jobLabel) || "Bulk Solved PDFs Upload"}
+                  </div>
+                  <div className="mt-1 text-xs font-semibold uppercase tracking-wide">
+                    Status: {safeText(activeJob.status) || "—"}
+                  </div>
+                  <div className="mt-2 text-xs leading-5">
+                    Job ID: <b>{activeJob._id}</b>
+                    <br />
+                    Started: <b>{formatDateTime(activeJob.startedAt || activeJob.createdAt)}</b>
+                    <br />
+                    Last heartbeat: <b>{formatDateTime(activeJob.lastHeartbeatAt)}</b>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 flex-wrap">
+                  {activeJobId ? (
+                    <a
+                      href={`/api/admin/bulk-jobs/${encodeURIComponent(activeJobId)}/failures`}
+                      className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl font-bold shadow-sm border ${
+                        Number(activeJob.failuresCount || 0) > 0
+                          ? "bg-white hover:bg-gray-50 border-gray-200 text-slate-900"
+                          : "bg-gray-100 border-gray-200 text-slate-400 pointer-events-none"
+                      }`}
+                    >
+                      <Download size={16} />
+                      Download Failed CSV
+                    </a>
+                  ) : null}
+
+                  {!isFinalStatus(currentStatus) ? (
+                    <button
+                      type="button"
+                      onClick={cancelCurrentJob}
+                      disabled={isCancelling}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold shadow-sm disabled:opacity-60"
+                    >
+                      <PauseCircle size={16} />
+                      {isCancelling ? "Cancelling..." : "Cancel Job"}
+                    </button>
+                  ) : null}
+                </div>
+              </div>
+
+              <div className="mt-4 rounded-2xl border border-white/70 bg-white/70 p-4">
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <div className="text-sm font-extrabold">Progress</div>
+                  <div className="text-sm font-bold">
+                    {progress?.processedItems ?? 0} / {progress?.totalItems ?? 0} processed
+                  </div>
+                </div>
+
+                <div className="mt-3 h-4 w-full overflow-hidden rounded-full bg-slate-200">
+                  <div
+                    className="h-full rounded-full bg-slate-900 transition-all"
+                    style={{ width: `${progress?.progressPercent ?? 0}%` }}
+                  />
+                </div>
+
+                <div className="mt-2 text-xs font-semibold text-slate-700">
+                  {progress?.progressPercent ?? 0}% complete
+                </div>
+
+                <div className="mt-4 grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
+                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
+                    <div className="text-xs text-slate-500 font-bold uppercase">Total Files</div>
+                    <div className="text-xl font-extrabold mt-1">
+                      {summary?.totalFiles ?? progress?.totalItems ?? 0}
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
+                    <div className="text-xs text-slate-500 font-bold uppercase">Valid Files</div>
+                    <div className="text-xl font-extrabold mt-1">{summary?.validFiles ?? 0}</div>
+                  </div>
+
+                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
+                    <div className="text-xs text-slate-500 font-bold uppercase">Uploaded</div>
+                    <div className="text-xl font-extrabold mt-1">{summary?.uploadedFiles ?? 0}</div>
+                  </div>
+
+                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
+                    <div className="text-xs text-slate-500 font-bold uppercase">Replaced</div>
+                    <div className="text-xl font-extrabold mt-1">{summary?.replacedFiles ?? 0}</div>
+                  </div>
+
+                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
+                    <div className="text-xs text-slate-500 font-bold uppercase">Ignored / Skipped</div>
+                    <div className="text-xl font-extrabold mt-1">
+                      {(summary?.ignoredFiles ?? 0) + (summary?.skippedFiles ?? 0)}
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
+                    <div className="text-xs text-slate-500 font-bold uppercase">Failed</div>
+                    <div className="text-xl font-extrabold mt-1">{summary?.failedFiles ?? 0}</div>
+                  </div>
+                </div>
+
+                <div className="mt-4 grid grid-cols-1 xl:grid-cols-3 gap-4">
+                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+                    <div className="text-sm font-extrabold">Batch Status</div>
+                    <div className="text-sm text-slate-600 mt-2 leading-6">
+                      Current Batch: <b>{progress?.currentBatchNumber ?? 0}</b> /{" "}
+                      <b>{progress?.batchCount ?? 0}</b>
+                      <br />
+                      Batch Size: <b>{progress?.batchSize ?? 0}</b>
+                      <br />
+                      Last Processed Index: <b>{progress?.lastProcessedIndex ?? -1}</b>
+                    </div>
+                    {activeJob?.lastBatch?.note ? (
+                      <div className="mt-2 text-xs text-slate-700">{activeJob.lastBatch.note}</div>
+                    ) : null}
+                  </div>
+
+                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+                    <div className="text-sm font-extrabold">Upload Summary</div>
+                    <div className="text-sm text-slate-600 mt-2 leading-6">
+                      Matched Products: <b>{summary?.matchedProducts ?? 0}</b>
+                      <br />
+                      Official Papers Deleted: <b>{summary?.officialPapersDeleted ?? 0}</b>
+                      <br />
+                      Conflict Mode: <b>{safeText(summary?.conflictMode || activeJob?.config?.conflictMode || "-")}</b>
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
+                    <div className="text-sm font-extrabold">Target Folder</div>
+                    <div className="text-sm text-slate-600 mt-2 leading-6">
+                      Path: <b className="break-all">{safeText(summary?.parentPath || activeJob?.config?.parentPath || "-")}</b>
+                      <br />
+                      Result: <b>{safeText(activeJob?.resultMessage || "-")}</b>
+                      <br />
+                      Failures Logged: <b>{Number(activeJob?.failuresCount || 0)}</b>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
+
+          {isJobActive ? (
+            <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900">
+              <div className="flex items-center gap-2">
+                <LoaderCircle size={18} className="animate-spin" />
+                Batch job running. Inactivity auto-logout temporarily paused hai jab tak job finish nahi hoti.
+              </div>
+            </div>
+          ) : null}
+
           {!showTrash && (
             <div className="mt-6 relative">
               <div className="relative">
                 <Search size={20} className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400" />
                 <input
                   value={globalSearch}
-                  onChange={(e) => setGlobalSearch(e.target.value)}
-                  onFocus={() => {
-                    if (globalSearch.trim()) setShowSuggestions(true);
+                  onChange={(e) => {
+                    setGlobalSearch(e.target.value);
+                    setFilePage(1);
                   }}
                   className="w-full pl-12 pr-12 py-4 rounded-2xl border border-slate-200 bg-white outline-none focus:border-blue-500 transition font-medium text-[15px]"
                   placeholder="Search any PDF from all folders and subfolders..."
@@ -864,8 +1461,7 @@ export default function HiddenPdfVaultPage() {
                     type="button"
                     onClick={() => {
                       setGlobalSearch("");
-                      setGlobalSuggestions([]);
-                      setShowSuggestions(false);
+                      setFilePage(1);
                     }}
                     className="absolute right-4 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-700"
                   >
@@ -873,27 +1469,6 @@ export default function HiddenPdfVaultPage() {
                   </button>
                 ) : null}
               </div>
-
-              {showSuggestions && globalSearch.trim() && globalSuggestions.length > 0 ? (
-                <div className="absolute z-20 left-0 right-0 mt-2 rounded-2xl border border-slate-200 bg-white shadow-xl overflow-hidden">
-                  {globalSuggestions.map((item) => (
-                    <button
-                      key={item._id}
-                      type="button"
-                      onClick={() => {
-                        setGlobalSearch(item.fileName);
-                        setShowSuggestions(false);
-                      }}
-                      className="w-full text-left px-4 py-3 hover:bg-slate-50 border-b border-slate-100 last:border-0"
-                    >
-                      <div className="font-semibold text-slate-800 break-all">{item.fileName}</div>
-                      <div className="text-xs text-slate-500 mt-1 break-all">
-                        SKU: <b>{item.skuNormalized || "-"}</b>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              ) : null}
             </div>
           )}
 
@@ -928,22 +1503,27 @@ export default function HiddenPdfVaultPage() {
             </div>
           ) : null}
 
-          <div className="mt-6 grid grid-cols-1 lg:grid-cols-[320px_minmax(0,1fr)] gap-6 items-start">
+          <div className="mt-6 grid grid-cols-1 lg:grid-cols-[340px_minmax(0,1fr)] gap-6 items-start">
             <div className="space-y-4 min-w-0">
               <div className="rounded-2xl border border-gray-200 bg-white p-4">
-                <div className="text-sm font-extrabold">Upload PDFs</div>
+                <div className="text-sm font-extrabold">Upload Solved PDFs</div>
 
                 <label
                   htmlFor="vault-upload-input"
-                  className={`mt-3 flex min-h-[120px] w-full cursor-pointer items-center justify-center rounded-2xl border-2 border-dashed border-emerald-300 bg-emerald-50 px-4 py-6 text-center transition ${showTrash ? "pointer-events-none opacity-60" : "hover:bg-emerald-100"
-                    }`}
+                  className={`mt-3 flex min-h-[120px] w-full cursor-pointer items-center justify-center rounded-2xl border-2 border-dashed border-emerald-300 bg-emerald-50 px-4 py-6 text-center transition ${
+                    showTrash || isJobActive ? "pointer-events-none opacity-60" : "hover:bg-emerald-100"
+                  }`}
                 >
                   <div>
                     <div className="mx-auto h-12 w-12 rounded-2xl bg-emerald-600 text-white flex items-center justify-center">
                       <Upload size={20} />
                     </div>
-                    <div className="mt-3 text-sm font-extrabold text-emerald-800">Click here to select PDFs</div>
-                    <div className="mt-1 text-xs text-emerald-700">Multiple PDF files choose kar sakte ho</div>
+                    <div className="mt-3 text-sm font-extrabold text-emerald-800">
+                      Click here to select PDFs
+                    </div>
+                    <div className="mt-1 text-xs text-emerald-700">
+                      Multiple PDF files choose kar sakte ho
+                    </div>
                   </div>
                 </label>
 
@@ -953,44 +1533,79 @@ export default function HiddenPdfVaultPage() {
                   accept="application/pdf,.pdf"
                   multiple
                   onChange={(e) => {
-                    const list = Array.from(e.target.files || []);
-                    setUploadFiles(list);
+                    const all = Array.from(e.target.files || []);
+                    const onlyPdf = all.filter((file) => safeText(file.name).toLowerCase().endsWith(".pdf"));
+
+                    setSelectedFiles(onlyPdf);
+
+                    if (onlyPdf.length !== all.length) {
+                      setServerMessage("Non-PDF files ignore kar di gayi hain. Sirf PDFs select hui hain.");
+                      setServerMessageType("info");
+                    }
                   }}
                   className="hidden"
-                  disabled={showTrash}
+                  disabled={showTrash || isJobActive}
                 />
 
                 <select
                   value={conflictMode}
                   onChange={(e) => setConflictMode(e.target.value as "ignore" | "replace")}
                   className="w-full mt-3 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none"
-                  disabled={showTrash}
+                  disabled={showTrash || isJobActive}
                 >
                   <option value="ignore">Duplicate mode: Ignore new</option>
                   <option value="replace">Duplicate mode: Replace old</option>
                 </select>
 
-                <div className="mt-3 text-xs text-slate-500 leading-5">
+                <select
+                  value={String(batchSize)}
+                  onChange={(e) => setBatchSize(Number(e.target.value))}
+                  className="w-full mt-3 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none"
+                  disabled={showTrash || isJobActive}
+                >
+                  <option value="25">25 files / batch</option>
+                  <option value="50">50 files / batch</option>
+                  <option value="100">100 files / batch</option>
+                  <option value="200">200 files / batch</option>
+                  <option value="300">300 files / batch</option>
+                  <option value="500">500 files / batch</option>
+                </select>
+
+                <div className="mt-3 text-xs text-slate-500 leading-6">
                   Current folder: <b>{currentPath}</b>
                   <br />
-                  Selected PDFs: <b>{uploadFiles.length}</b>
+                  Selected PDFs: <b>{selectedFiles.length}</b>
+                  <br />
+                  Selected size: <b>{formatBytes(selectedFilesSize)}</b>
                 </div>
 
                 <button
                   type="button"
-                  onClick={handleUpload}
-                  disabled={uploading || showTrash}
+                  onClick={createSolvedPdfJob}
+                  disabled={creatingJob || showTrash || isJobActive}
                   className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-slate-900 hover:bg-slate-950 text-white transition font-extrabold disabled:opacity-60 shadow-sm"
                 >
                   <Upload size={18} />
-                  {uploading ? "Uploading..." : "Upload PDFs"}
+                  {creatingJob ? "Starting..." : "Start PDF Upload Job"}
                 </button>
+
+                <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-800">
+                  Recommended filename format:
+                  <br />
+                  <b>BHIC131ENG202526.pdf</b>
+                  <br />
+                  <b>BEGC101HIN202526.pdf</b>
+                  <br />
+                  Filename se SKU parse hoga, isliye final PDF name product SKU-based hi rakho.
+                </div>
               </div>
 
               <div className="rounded-2xl border border-gray-200 bg-white overflow-hidden shadow-sm">
                 <div className="px-4 py-3 border-b border-gray-200 bg-gray-50">
                   <div className="flex items-center justify-between gap-3 flex-wrap">
-                    <div className="text-sm font-extrabold text-slate-900">{showTrash ? "Trashed Folders" : "Folders"}</div>
+                    <div className="text-sm font-extrabold text-slate-900">
+                      {showTrash ? "Trashed Folders" : "Folders"}
+                    </div>
 
                     <div className="flex items-center gap-2">
                       <select
@@ -1020,7 +1635,10 @@ export default function HiddenPdfVaultPage() {
                       <button
                         key={item.path}
                         type="button"
-                        onClick={() => setCurrentPath(item.path)}
+                        onClick={() => {
+                          setCurrentPath(item.path);
+                          setFilePage(1);
+                        }}
                         className="inline-flex items-center gap-2 hover:text-blue-700 transition-colors"
                       >
                         <span>{item.name}</span>
@@ -1033,7 +1651,9 @@ export default function HiddenPdfVaultPage() {
                 {folderLoading ? (
                   <div className="p-6 text-slate-600 font-bold">Loading folders...</div>
                 ) : folders.length === 0 ? (
-                  <div className="p-6 text-slate-600 font-bold">{showTrash ? "No trashed folders found." : "No folders found."}</div>
+                  <div className="p-6 text-slate-600 font-bold">
+                    {showTrash ? "No trashed folders found." : "No folders found."}
+                  </div>
                 ) : (
                   <div className="flex flex-col">
                     {folders.map((folder) => {
@@ -1070,7 +1690,7 @@ export default function HiddenPdfVaultPage() {
                                     type="button"
                                     onClick={(e) => {
                                       e.stopPropagation();
-                                      renameFolder(folder);
+                                      void renameFolder(folder);
                                     }}
                                     disabled={isBusy}
                                     className="px-4 py-2 rounded-xl bg-slate-900 text-white text-sm font-bold disabled:opacity-60 shadow-sm"
@@ -1095,6 +1715,7 @@ export default function HiddenPdfVaultPage() {
                                   onClick={() => {
                                     if (showTrash || isRenaming) return;
                                     setCurrentPath(folder.path);
+                                    setFilePage(1);
                                   }}
                                   className="w-full text-left min-w-0"
                                 >
@@ -1131,7 +1752,7 @@ export default function HiddenPdfVaultPage() {
                                         type="button"
                                         onClick={(e) => {
                                           e.stopPropagation();
-                                          moveFolderToTrash(folder);
+                                          void moveFolderToTrash(folder);
                                         }}
                                         disabled={isBusy}
                                         title="Move to Trash"
@@ -1145,6 +1766,7 @@ export default function HiddenPdfVaultPage() {
                                         onClick={(e) => {
                                           e.stopPropagation();
                                           setCurrentPath(folder.path);
+                                          setFilePage(1);
                                         }}
                                         className="inline-flex items-center gap-1 px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-sm font-bold transition-colors shadow-sm ml-1"
                                       >
@@ -1157,7 +1779,7 @@ export default function HiddenPdfVaultPage() {
                                         type="button"
                                         onClick={(e) => {
                                           e.stopPropagation();
-                                          restoreFolder(folder);
+                                          void restoreFolder(folder);
                                         }}
                                         disabled={isBusy}
                                         title="Restore Folder"
@@ -1170,7 +1792,7 @@ export default function HiddenPdfVaultPage() {
                                         type="button"
                                         onClick={(e) => {
                                           e.stopPropagation();
-                                          purgeFolder(folder);
+                                          void purgeFolder(folder);
                                         }}
                                         disabled={isBusy}
                                         title="Permanently Delete"
@@ -1190,54 +1812,6 @@ export default function HiddenPdfVaultPage() {
                   </div>
                 )}
               </div>
-
-              {uploadResult && !showTrash ? (
-                <div className="rounded-2xl border border-indigo-200 bg-indigo-50 p-4">
-                  <div className="text-sm font-extrabold text-indigo-900">Last Upload Result</div>
-                  <div className="text-xs text-indigo-800 mt-2 leading-6">
-                    Total: <b>{Number(uploadResult.summary?.total || 0)}</b> | Uploaded:{" "}
-                    <b>{Number(uploadResult.summary?.uploaded || 0)}</b> | Replaced:{" "}
-                    <b>{Number(uploadResult.summary?.replaced || 0)}</b> | Ignored:{" "}
-                    <b>{Number(uploadResult.summary?.ignored || 0)}</b> | Failed:{" "}
-                    <b>{Number(uploadResult.summary?.failed || 0)}</b> | Product matched:{" "}
-                    <b>{Number(uploadResult.summary?.matchedProducts || 0)}</b>
-                  </div>
-
-                  {Array.isArray(uploadResult.results) && uploadResult.results.length ? (
-                    <div className="mt-3 space-y-2 max-h-[340px] overflow-auto pr-1">
-                      {uploadResult.results.map((row, idx) => (
-                        <div
-                          key={`${row.fileName || "row"}-${idx}`}
-                          className="rounded-xl border border-indigo-100 bg-white px-3 py-2 text-xs"
-                        >
-                          <div className="font-bold text-slate-800 break-all">{row.fileName || "-"}</div>
-                          <div className="mt-1 text-slate-600">
-                            Action: <b>{row.action || "-"}</b>
-                            {row.skuNormalized ? (
-                              <>
-                                {" "}
-                                | SKU: <b>{row.skuNormalized}</b>
-                              </>
-                            ) : null}
-                            {row.productMatched ? (
-                              <>
-                                {" "}
-                                | Product: <b>{row.productSku || "matched"}</b>
-                              </>
-                            ) : null}
-                            {row.reason ? (
-                              <>
-                                {" "}
-                                | Reason: <b>{row.reason}</b>
-                              </>
-                            ) : null}
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  ) : null}
-                </div>
-              ) : null}
             </div>
 
             <div className="min-w-0 space-y-6">
@@ -1283,18 +1857,25 @@ export default function HiddenPdfVaultPage() {
                   <div className="flex items-center gap-2 flex-wrap">
                     <select
                       value={fileSortBy}
-                      onChange={(e) => setFileSortBy(e.target.value)}
+                      onChange={(e) => {
+                        setFileSortBy(e.target.value);
+                        setFilePage(1);
+                      }}
                       className="px-3 py-2 rounded-lg border border-slate-200 bg-white text-xs font-semibold outline-none"
                     >
                       <option value="uploadedAt">By Uploaded Date</option>
                       <option value="name">By Name</option>
                       <option value="productExists">By Product Exists</option>
                       <option value="updatedAt">By Updated Date</option>
+                      <option value="pageCount">By Page Count</option>
                     </select>
 
                     <select
                       value={fileSortDir}
-                      onChange={(e) => setFileSortDir(e.target.value as "asc" | "desc")}
+                      onChange={(e) => {
+                        setFileSortDir(e.target.value as "asc" | "desc");
+                        setFilePage(1);
+                      }}
                       className="px-3 py-2 rounded-lg border border-slate-200 bg-white text-xs font-semibold outline-none"
                     >
                       <option value="asc">Asc</option>
@@ -1316,7 +1897,7 @@ export default function HiddenPdfVaultPage() {
                     </select>
 
                     <div className="text-xs font-bold text-slate-600 bg-white px-3 py-2 rounded-lg border border-slate-200">
-                      Total: {files.length}
+                      Total: {serverTotal}
                     </div>
                   </div>
                 </div>
@@ -1328,14 +1909,15 @@ export default function HiddenPdfVaultPage() {
                     {showTrash
                       ? "No trashed PDF files found."
                       : searchActive
-                        ? "No matching PDF files found."
-                        : "No PDF files found in this folder."}
+                      ? "No matching PDF files found."
+                      : "No PDF files found in this folder."}
                   </div>
                 ) : (
                   <>
                     <div className="flex flex-col">
-                      {pagedFiles.map((file) => {
-                        const isGreen = file.productExists && String(file.titleColor).toLowerCase() === "green";
+                      {files.map((file) => {
+                        const isGreen =
+                          file.productExists && String(file.titleColor).toLowerCase() === "green";
                         const isBusy = fileActionLoadingId === file._id;
 
                         return (
@@ -1350,8 +1932,8 @@ export default function HiddenPdfVaultPage() {
                                     showTrash
                                       ? "h-11 w-11 rounded-2xl bg-rose-100 text-rose-700 flex items-center justify-center shrink-0"
                                       : isGreen
-                                        ? "h-11 w-11 rounded-2xl bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0"
-                                        : "h-11 w-11 rounded-2xl bg-red-100 text-red-700 flex items-center justify-center shrink-0"
+                                      ? "h-11 w-11 rounded-2xl bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0"
+                                      : "h-11 w-11 rounded-2xl bg-red-100 text-red-700 flex items-center justify-center shrink-0"
                                   }
                                 >
                                   <FileText size={20} />
@@ -1363,8 +1945,8 @@ export default function HiddenPdfVaultPage() {
                                       showTrash
                                         ? "font-extrabold text-rose-700 break-words whitespace-normal"
                                         : isGreen
-                                          ? "font-extrabold text-emerald-700 break-words whitespace-normal"
-                                          : "font-extrabold text-red-700 break-words whitespace-normal"
+                                        ? "font-extrabold text-emerald-700 break-words whitespace-normal"
+                                        : "font-extrabold text-red-700 break-words whitespace-normal"
                                     }
                                     style={{
                                       wordBreak: "break-word",
@@ -1379,24 +1961,42 @@ export default function HiddenPdfVaultPage() {
                                   </div>
 
                                   {!showTrash ? (
-                                    <div className="text-xs text-slate-500 mt-1 break-words">
-                                      Product:{" "}
-                                      {file.productExists ? (
-                                        <span className="font-bold text-emerald-700">
-                                          Exists {file.productSku ? `(${file.productSku})` : ""}
-                                        </span>
-                                      ) : (
-                                        <span className="font-bold text-red-700">Not found</span>
-                                      )}
-                                    </div>
+                                    <>
+                                      <div className="text-xs text-slate-500 mt-1 break-words">
+                                        Product:{" "}
+                                        {file.productExists ? (
+                                          <span className="font-bold text-emerald-700">
+                                            Exists {file.productSku ? `(${file.productSku})` : ""}
+                                          </span>
+                                        ) : (
+                                          <span className="font-bold text-red-700">Not found</span>
+                                        )}
+                                      </div>
+
+                                      {searchActive && file.folderPath ? (
+                                        <div className="text-xs text-slate-500 mt-1 break-all">
+                                          Folder: <b>{file.folderPath}</b>
+                                        </div>
+                                      ) : null}
+                                    </>
                                   ) : (
                                     <div className="text-xs text-rose-600 mt-1 break-words font-semibold">
                                       Trashed: {formatDate(file.deletedAt)}
                                     </div>
                                   )}
 
-                                  <div className="text-xs text-slate-500 mt-1 break-words">
-                                    Pages: <b>{Number(file.pageCount || 0)}</b>
+                                  <div className="flex items-center gap-2 flex-wrap mt-1 text-xs text-slate-500">
+                                    <span className="inline-flex items-center gap-1 rounded-full px-2 py-1 border border-slate-200 bg-slate-50">
+                                      Uploaded: <b>{formatDate(file.uploadedAt)}</b>
+                                    </span>
+
+                                    <span className="inline-flex items-center gap-1 rounded-full px-2 py-1 border border-slate-200 bg-slate-50">
+                                      Size: <b>{formatBytes(Number(file.sizeBytes || 0))}</b>
+                                    </span>
+
+                                    <span className="inline-flex items-center gap-1 rounded-full px-2 py-1 border border-slate-200 bg-slate-50">
+                                      Pages: <b>{Number(file.pageCount || 0)}</b>
+                                    </span>
                                   </div>
 
                                   <div className="flex items-center gap-2 flex-wrap mt-3">
@@ -1404,7 +2004,7 @@ export default function HiddenPdfVaultPage() {
                                       <>
                                         <button
                                           type="button"
-                                          onClick={() => openPdf(file)}
+                                          onClick={() => void openPdf(file)}
                                           disabled={isBusy}
                                           className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 text-sm font-bold shadow-sm disabled:opacity-60"
                                         >
@@ -1414,7 +2014,7 @@ export default function HiddenPdfVaultPage() {
 
                                         <button
                                           type="button"
-                                          onClick={() => downloadPdf(file)}
+                                          onClick={() => void downloadPdf(file)}
                                           disabled={isBusy}
                                           className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 text-sm font-bold shadow-sm disabled:opacity-60"
                                         >
@@ -1436,7 +2036,7 @@ export default function HiddenPdfVaultPage() {
 
                                         <button
                                           type="button"
-                                          onClick={() => moveFileToTrash(file)}
+                                          onClick={() => void moveFileToTrash(file)}
                                           disabled={isBusy}
                                           className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 text-sm font-bold shadow-sm disabled:opacity-60"
                                         >
@@ -1448,7 +2048,7 @@ export default function HiddenPdfVaultPage() {
                                       <>
                                         <button
                                           type="button"
-                                          onClick={() => restoreFile(file)}
+                                          onClick={() => void restoreFile(file)}
                                           disabled={isBusy}
                                           className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-700 text-sm font-bold shadow-sm disabled:opacity-60"
                                         >
@@ -1458,7 +2058,7 @@ export default function HiddenPdfVaultPage() {
 
                                         <button
                                           type="button"
-                                          onClick={() => purgeFile(file)}
+                                          onClick={() => void purgeFile(file)}
                                           disabled={isBusy}
                                           className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 text-sm font-bold shadow-sm disabled:opacity-60"
                                         >
@@ -1470,21 +2070,6 @@ export default function HiddenPdfVaultPage() {
                                   </div>
                                 </div>
                               </div>
-
-                              <div className="hidden md:block text-xs text-slate-500 space-y-1.5 min-w-[190px] bg-white p-2.5 rounded-xl border border-slate-100">
-                                <div>
-                                  Pages: <b className="text-slate-700">{Number(file.pageCount || 0)}</b>
-                                </div>
-                                <div>
-                                  Size: <b className="text-slate-700">{formatBytes(Number(file.sizeBytes || 0))}</b>
-                                </div>
-                                <div>
-                                  Uploaded: <b className="text-slate-700">{formatDate(file.uploadedAt)}</b>
-                                </div>
-                                <div>
-                                  Updated: <b className="text-slate-700">{formatDate(file.updatedAt)}</b>
-                                </div>
-                              </div>
                             </div>
                           </div>
                         );
@@ -1494,7 +2079,7 @@ export default function HiddenPdfVaultPage() {
                     <div className="px-4 py-4 border-t border-gray-200 bg-white">
                       <div className="flex items-center justify-between gap-4 flex-wrap">
                         <div className="text-sm text-slate-600 font-semibold">
-                          Showing <b>{startItem}</b> to <b>{endItem}</b> of <b>{files.length}</b> results
+                          Showing <b>{fromItem}</b> to <b>{toItem}</b> of <b>{serverTotal}</b> results
                         </div>
 
                         <div className="flex items-center gap-2 flex-wrap">
@@ -1507,10 +2092,10 @@ export default function HiddenPdfVaultPage() {
                             Previous
                           </button>
 
-                          {Array.from({ length: totalPages }, (_, i) => i + 1)
+                          {Array.from({ length: serverTotalPages }, (_, i) => i + 1)
                             .filter((p) => {
-                              if (totalPages <= 7) return true;
-                              if (p === 1 || p === totalPages) return true;
+                              if (serverTotalPages <= 7) return true;
+                              if (p === 1 || p === serverTotalPages) return true;
                               return Math.abs(p - filePage) <= 1;
                             })
                             .map((p, idx, arr) => {
@@ -1523,10 +2108,11 @@ export default function HiddenPdfVaultPage() {
                                   <button
                                     type="button"
                                     onClick={() => setFilePage(p)}
-                                    className={`min-w-[42px] px-3 py-2 rounded-xl text-sm font-bold border ${p === filePage
+                                    className={`min-w-[42px] px-3 py-2 rounded-xl text-sm font-bold border ${
+                                      p === filePage
                                         ? "bg-slate-900 text-white border-slate-900"
                                         : "bg-white hover:bg-gray-50 border-slate-200 text-slate-700"
-                                      }`}
+                                    }`}
                                   >
                                     {p}
                                   </button>
@@ -1536,8 +2122,8 @@ export default function HiddenPdfVaultPage() {
 
                           <button
                             type="button"
-                            onClick={() => setFilePage((p) => Math.min(totalPages, p + 1))}
-                            disabled={filePage >= totalPages}
+                            onClick={() => setFilePage((p) => Math.min(serverTotalPages, p + 1))}
+                            disabled={filePage >= serverTotalPages}
                             className="px-4 py-2 rounded-xl border border-slate-200 bg-white hover:bg-gray-50 text-sm font-bold disabled:opacity-50"
                           >
                             Next
@@ -1548,6 +2134,73 @@ export default function HiddenPdfVaultPage() {
                   </>
                 )}
               </div>
+
+              {activeJob ? (
+                <div className="rounded-2xl border border-gray-200 bg-white p-5">
+                  <div className="flex items-center gap-2 text-lg font-extrabold">
+                    <BarChart3 size={20} />
+                    Recent Failed / Skipped Files
+                  </div>
+
+                  <div className="mt-1 text-sm text-slate-500">
+                    Table me recent 100 failed/skipped files dikh rahe hain. Full list ke liye CSV download karo.
+                  </div>
+
+                  <div className="mt-5 overflow-auto">
+                    <table className="min-w-full text-sm border border-gray-200 rounded-xl overflow-hidden">
+                      <thead className="bg-gray-50">
+                        <tr>
+                          <th className="text-left px-3 py-2 border-b">Batch</th>
+                          <th className="text-left px-3 py-2 border-b">Row</th>
+                          <th className="text-left px-3 py-2 border-b">SKU</th>
+                          <th className="text-left px-3 py-2 border-b">File</th>
+                          <th className="text-left px-3 py-2 border-b">Status</th>
+                          <th className="text-left px-3 py-2 border-b">Reason</th>
+                          <th className="text-left px-3 py-2 border-b">Logged At</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {recentFailures.map((item, idx) => (
+                          <tr
+                            key={`${item.rowNumber}-${idx}`}
+                            className="border-b last:border-b-0 align-top"
+                          >
+                            <td className="px-3 py-2">{item.batchNumber || "—"}</td>
+                            <td className="px-3 py-2">{item.rowNumber || "—"}</td>
+                            <td className="px-3 py-2 font-semibold">{item.sku || "—"}</td>
+                            <td className="px-3 py-2">{item.fileName || item.identifier || "—"}</td>
+                            <td className="px-3 py-2">
+                              <span
+                                className={`inline-flex rounded-full px-2 py-1 text-xs font-bold ${
+                                  safeText(item.status) === "skipped"
+                                    ? "bg-amber-100 text-amber-800"
+                                    : "bg-rose-100 text-rose-800"
+                                }`}
+                              >
+                                {safeText(item.status) || "failed"}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 min-w-[320px] text-slate-700">
+                              {item.reason || "—"}
+                            </td>
+                            <td className="px-3 py-2 whitespace-nowrap">
+                              {formatDateTime(item.createdAt)}
+                            </td>
+                          </tr>
+                        ))}
+
+                        {recentFailures.length === 0 ? (
+                          <tr>
+                            <td colSpan={7} className="px-4 py-8 text-center text-slate-500">
+                              No failed/skipped files recorded yet.
+                            </td>
+                          </tr>
+                        ) : null}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              ) : null}
             </div>
           </div>
         </div>
