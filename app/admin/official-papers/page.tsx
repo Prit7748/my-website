@@ -140,6 +140,18 @@ type BulkJobState = {
   updatedAt?: string | null;
 };
 
+type SignedUploadInitItem = {
+  clientFileId: string;
+  originalName: string;
+  fileName: string;
+  sizeBytes: number;
+  stagedPdfKey: string;
+  stagedBucket?: string;
+  blockId: string;
+  uploadUrl: string;
+  headers?: Record<string, string>;
+};
+
 type DirectStagedItem = {
   clientFileId: string;
   originalName: string;
@@ -156,10 +168,21 @@ type StageFailureItem = {
   reason?: string;
 };
 
-type StageBlockResponse = {
+type StageInitResponse = {
   ok?: boolean;
   message?: string;
   blockId?: string;
+  blockNumber?: number;
+  totalBlocks?: number;
+  uploads?: SignedUploadInitItem[];
+  failures?: StageFailureItem[];
+  error?: string;
+};
+
+type StageFinalizeResponse = {
+  ok?: boolean;
+  message?: string;
+  action?: string;
   items?: DirectStagedItem[];
   failures?: StageFailureItem[];
   error?: string;
@@ -306,7 +329,6 @@ export default function OfficialPapersPage() {
   const [currentBlockLoadedBytes, setCurrentBlockLoadedBytes] = useState(0);
   const [completedBlockBytes, setCompletedBlockBytes] = useState(0);
   const [currentBlockLabel, setCurrentBlockLabel] = useState("");
-  const [currentBlockFileIds, setCurrentBlockFileIds] = useState<string[]>([]);
   const [stagingAbortEnabled, setStagingAbortEnabled] = useState(false);
 
   const [activeJob, setActiveJob] = useState<BulkJobState | null>(null);
@@ -318,7 +340,8 @@ export default function OfficialPapersPage() {
   const processInFlightRef = useRef(false);
   const longTaskActiveRef = useRef(false);
   const finalRefreshDoneRef = useRef(false);
-  const stagingXhrRef = useRef<XMLHttpRequest | null>(null);
+  const currentUploadXhrRef = useRef<XMLHttpRequest | null>(null);
+  const stagingCancelledRef = useRef(false);
 
   const currentStatus = safeText(activeJob?.status);
   const isJobActive = Boolean(activeJobId) && !isFinalStatus(currentStatus);
@@ -384,9 +407,9 @@ export default function OfficialPapersPage() {
     setCurrentBlockLoadedBytes(0);
     setCompletedBlockBytes(0);
     setCurrentBlockLabel("");
-    setCurrentBlockFileIds([]);
     setStagingAbortEnabled(false);
-    stagingXhrRef.current = null;
+    currentUploadXhrRef.current = null;
+    stagingCancelledRef.current = false;
 
     if (!keepSelection) {
       setSelectedPdfFiles([]);
@@ -555,7 +578,7 @@ export default function OfficialPapersPage() {
     }));
   }
 
-  function setTrackerStatusForBlock(
+  function setTrackerStatusForIds(
     clientIds: string[],
     status: SelectedPdfTracker["status"],
     reasonMap?: Record<string, string>
@@ -586,71 +609,67 @@ export default function OfficialPapersPage() {
     }
 
     if (!failIds.length) return;
-    setTrackerStatusForBlock(failIds, "failed", reasonMap);
+    setTrackerStatusForIds(failIds, "failed", reasonMap);
   }
 
-  function uploadOneStageBlock(args: {
-    files: File[];
-    trackers: SelectedPdfTracker[];
-    blockNumber: number;
-    totalBlocks: number;
+  function uploadSingleSignedPdf(args: {
+    file: File;
+    uploadUrl: string;
+    headers?: Record<string, string>;
+    alreadyUploadedBytesInBlock: number;
+    blockBytes: number;
   }) {
-    return new Promise<StageBlockResponse>((resolve, reject) => {
-      const fd = new FormData();
+    return new Promise<void>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      currentUploadXhrRef.current = xhr;
 
-      const meta = args.trackers.map((tracker, idx) => ({
-        clientFileId: tracker.clientFileId,
-        originalName: args.files[idx]?.name || tracker.name,
-        fileName: args.files[idx]?.name || tracker.name,
-        sizeBytes: Number(args.files[idx]?.size || tracker.size || 0),
-      }));
+      xhr.open("PUT", args.uploadUrl, true);
 
-      args.files.forEach((file) => {
-        fd.append("files", file);
+      const headers = args.headers || {};
+      Object.entries(headers).forEach(([key, value]) => {
+        if (safeText(key) && safeText(value)) {
+          xhr.setRequestHeader(key, String(value));
+        }
       });
 
-      fd.append("meta", JSON.stringify(meta));
-      fd.append("blockNumber", String(args.blockNumber));
-      fd.append("totalBlocks", String(args.totalBlocks));
-
-      const xhr = new XMLHttpRequest();
-      stagingXhrRef.current = xhr;
-      setStagingAbortEnabled(true);
-
-      xhr.open("POST", "/api/admin/official-papers/blocks");
-      xhr.withCredentials = true;
-
       xhr.upload.onprogress = (event) => {
-        if (!event.lengthComputable) return;
-        setCurrentBlockPercent(Math.min(100, Math.round((event.loaded / event.total) * 100)));
-        setCurrentBlockLoadedBytes(Number(event.loaded || 0));
+        const loaded = event.lengthComputable
+          ? Number(event.loaded || 0)
+          : 0;
+
+        const blockLoaded = args.alreadyUploadedBytesInBlock + loaded;
+        setCurrentBlockLoadedBytes(blockLoaded);
+
+        const percent =
+          args.blockBytes > 0
+            ? Math.min(100, Math.round((blockLoaded / args.blockBytes) * 100))
+            : 0;
+
+        setCurrentBlockPercent(percent);
       };
 
       xhr.onerror = () => {
-        reject(new Error("Block upload failed"));
+        reject(new Error(`Failed to upload ${args.file.name}`));
       };
 
       xhr.onabort = () => {
-        reject(new Error("Block upload cancelled"));
+        reject(new Error("Upload cancelled"));
       };
 
       xhr.onload = () => {
-        try {
-          const raw = xhr.responseText || "";
-          const data = raw ? JSON.parse(raw) : {};
-
-          if (xhr.status < 200 || xhr.status >= 300 || !data?.ok) {
-            reject(new Error(data?.error || data?.message || "Block upload failed"));
-            return;
-          }
-
-          resolve(data as StageBlockResponse);
-        } catch {
-          reject(new Error("Invalid stage upload response"));
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve();
+          return;
         }
+
+        reject(
+          new Error(
+            `Upload failed for ${args.file.name}. HTTP ${xhr.status || 0}`
+          )
+        );
       };
 
-      xhr.send(fd);
+      xhr.send(args.file);
     });
   }
 
@@ -740,70 +759,197 @@ export default function OfficialPapersPage() {
     setCurrentBlockLoadedBytes(0);
     setCurrentBlockPercent(0);
     setCurrentBlockLabel("");
-    setCurrentBlockFileIds([]);
+    stagingCancelledRef.current = false;
 
     const initialTrackers = createInitialTrackers(usableFiles);
     setSelectedTrackers(initialTrackers);
 
     try {
-      const totalBlocks = Math.max(1, Math.ceil(usableFiles.length / Math.max(1, uploadBlockSize)));
+      const totalBlocks = Math.max(
+        1,
+        Math.ceil(usableFiles.length / Math.max(1, uploadBlockSize))
+      );
       setCurrentBlockTotal(totalBlocks);
 
       const allStagedItems: DirectStagedItem[] = [];
       let completedBytesAccumulator = 0;
 
       for (let blockIndex = 0; blockIndex < totalBlocks; blockIndex++) {
+        if (stagingCancelledRef.current) {
+          throw new Error("Block upload cancelled");
+        }
+
         const start = blockIndex * Math.max(1, uploadBlockSize);
-        const end = Math.min(usableFiles.length, start + Math.max(1, uploadBlockSize));
+        const end = Math.min(
+          usableFiles.length,
+          start + Math.max(1, uploadBlockSize)
+        );
 
         const blockFiles = usableFiles.slice(start, end);
         const blockTrackers = initialTrackers.slice(start, end);
+        const blockBytes = blockFiles.reduce(
+          (sum, file) => sum + Number(file.size || 0),
+          0
+        );
 
         const blockNumber = blockIndex + 1;
-        const blockBytes = blockFiles.reduce((sum, file) => sum + Number(file.size || 0), 0);
 
         setCurrentBlockNumber(blockNumber);
         setCurrentBlockLoadedBytes(0);
         setCurrentBlockPercent(0);
         setCurrentBlockLabel(`Block ${blockNumber} / ${totalBlocks}`);
-        setCurrentBlockFileIds(blockTrackers.map((item) => item.clientFileId));
+        setStagingAbortEnabled(true);
 
-        setTrackerStatusForBlock(
-          blockTrackers.map((item) => item.clientFileId),
-          "uploading"
-        );
-
-        const result = await uploadOneStageBlock({
-          files: blockFiles,
-          trackers: blockTrackers,
-          blockNumber,
-          totalBlocks,
+        const initRes = await fetch("/api/admin/official-papers/blocks", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({
+            action: "init",
+            blockNumber,
+            totalBlocks,
+            items: blockTrackers.map((tracker, idx) => ({
+              clientFileId: tracker.clientFileId,
+              originalName: blockFiles[idx]?.name || tracker.name,
+              fileName: blockFiles[idx]?.name || tracker.name,
+              sizeBytes: Number(blockFiles[idx]?.size || tracker.size || 0),
+            })),
+          }),
         });
 
-        const stagedBlockItems = Array.isArray(result?.items) ? result.items : [];
-        const stageFailures = Array.isArray(result?.failures) ? result.failures : [];
+        const initData = (await safeReadJson(initRes)) as StageInitResponse;
+
+        if (!initRes.ok || !initData?.ok) {
+          throw new Error(initData?.error || "Stage init failed");
+        }
+
+        const uploads = Array.isArray(initData?.uploads) ? initData.uploads : [];
+        const initFailures = Array.isArray(initData?.failures) ? initData.failures : [];
+
+        if (initFailures.length) {
+          markTrackerFailures(initFailures);
+        }
+
+        if (!uploads.length) {
+          throw new Error("No upload URLs received for this block");
+        }
+
+        const uploadMap = new Map<string, SignedUploadInitItem>();
+        for (const item of uploads) {
+          uploadMap.set(safeText(item.clientFileId), item);
+        }
+
+        let uploadedBytesWithinBlock = 0;
+        const finalizeCandidates: DirectStagedItem[] = [];
+
+        for (let i = 0; i < blockTrackers.length; i++) {
+          if (stagingCancelledRef.current) {
+            throw new Error("Block upload cancelled");
+          }
+
+          const tracker = blockTrackers[i];
+          const file = blockFiles[i];
+          const uploadItem = uploadMap.get(tracker.clientFileId);
+
+          if (!uploadItem) {
+            setTrackerStatusForIds([tracker.clientFileId], "failed", {
+              [tracker.clientFileId]: "Signed upload URL missing for this file",
+            });
+            continue;
+          }
+
+          setTrackerStatusForIds([tracker.clientFileId], "uploading");
+
+          try {
+            await uploadSingleSignedPdf({
+              file,
+              uploadUrl: uploadItem.uploadUrl,
+              headers: uploadItem.headers,
+              alreadyUploadedBytesInBlock: uploadedBytesWithinBlock,
+              blockBytes,
+            });
+
+            uploadedBytesWithinBlock += Number(file.size || 0);
+            setCurrentBlockLoadedBytes(uploadedBytesWithinBlock);
+
+            finalizeCandidates.push({
+              clientFileId: uploadItem.clientFileId,
+              originalName: uploadItem.originalName,
+              fileName: uploadItem.fileName,
+              sizeBytes: uploadItem.sizeBytes,
+              stagedPdfKey: uploadItem.stagedPdfKey,
+              stagedBucket: uploadItem.stagedBucket,
+              blockId: uploadItem.blockId,
+            });
+          } catch (error: any) {
+            setTrackerStatusForIds([tracker.clientFileId], "failed", {
+              [tracker.clientFileId]: safeText(
+                error?.message || "Signed upload failed"
+              ),
+            });
+          }
+        }
+
+        setCurrentBlockPercent(100);
+
+        if (!finalizeCandidates.length) {
+          completedBytesAccumulator += blockBytes;
+          setCompletedBlockBytes(completedBytesAccumulator);
+          continue;
+        }
+
+        const finalizeRes = await fetch("/api/admin/official-papers/blocks", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({
+            action: "finalize",
+            blockNumber,
+            totalBlocks,
+            items: finalizeCandidates,
+          }),
+        });
+
+        const finalizeData = (await safeReadJson(finalizeRes)) as StageFinalizeResponse;
+
+        if (!finalizeRes.ok || !finalizeData?.ok) {
+          throw new Error(finalizeData?.error || "Stage finalize failed");
+        }
+
+        const stagedBlockItems = Array.isArray(finalizeData?.items)
+          ? finalizeData.items
+          : [];
+        const stageFailures = Array.isArray(finalizeData?.failures)
+          ? finalizeData.failures
+          : [];
 
         const stagedIds = stagedBlockItems
           .map((item) => safeText(item.clientFileId))
           .filter(Boolean);
 
         if (stagedIds.length) {
-          setTrackerStatusForBlock(stagedIds, "staged");
+          setTrackerStatusForIds(stagedIds, "staged");
         }
 
         if (stageFailures.length) {
           markTrackerFailures(stageFailures);
         }
 
-        const missingIds = blockTrackers
-          .map((item) => item.clientFileId)
-          .filter((id) => !stagedIds.includes(id) && !stageFailures.some((f) => safeText(f.clientFileId) === id));
+        const finalizeCandidateIds = finalizeCandidates
+          .map((item) => safeText(item.clientFileId))
+          .filter(Boolean);
+
+        const missingIds = finalizeCandidateIds.filter(
+          (id) =>
+            !stagedIds.includes(id) &&
+            !stageFailures.some((f) => safeText(f.clientFileId) === id)
+        );
 
         if (missingIds.length) {
           const reasonMap = Object.fromEntries(
-            missingIds.map((id) => [id, "Block response returned no staged result for this file"])
+            missingIds.map((id) => [id, "Finalize verification missing for this file"])
           );
-          setTrackerStatusForBlock(missingIds, "failed", reasonMap);
+          setTrackerStatusForIds(missingIds, "failed", reasonMap);
         }
 
         allStagedItems.push(...stagedBlockItems);
@@ -816,7 +962,7 @@ export default function OfficialPapersPage() {
       }
 
       if (!allStagedItems.length) {
-        throw new Error("Koi bhi PDF stage nahi ho paayi");
+        throw new Error("Koi bhi PDF successfully stage nahi ho paayi");
       }
 
       const createJobRes = await fetch("/api/admin/official-papers/jobs", {
@@ -863,7 +1009,7 @@ export default function OfficialPapersPage() {
       setCreatingJob(false);
       setIsStaging(false);
       setStagingAbortEnabled(false);
-      stagingXhrRef.current = null;
+      currentUploadXhrRef.current = null;
     }
   }
 
@@ -871,8 +1017,10 @@ export default function OfficialPapersPage() {
     const ok = window.confirm("Current direct PDF staging cancel karna hai?");
     if (!ok) return;
 
+    stagingCancelledRef.current = true;
+
     try {
-      stagingXhrRef.current?.abort();
+      currentUploadXhrRef.current?.abort();
     } catch {
       // ignore
     }
@@ -1142,7 +1290,7 @@ export default function OfficialPapersPage() {
         longTaskActiveRef.current = false;
       }
       try {
-        stagingXhrRef.current?.abort();
+        currentUploadXhrRef.current?.abort();
       } catch {
         // ignore
       }
@@ -1459,7 +1607,7 @@ export default function OfficialPapersPage() {
               <div className="flex items-center gap-2">
                 <LoaderCircle size={18} className="animate-spin" />
                 {isStaging
-                  ? "Direct PDF blocks stage ho rahe hain. Progress safe blocks me chal raha hai."
+                  ? "Direct PDF blocks stage ho rahe hain. Upload browser se direct S3 par जा रहा hai."
                   : "Batch job running. Inactivity auto-logout temporarily paused hai jab tak job finish nahi hoti."}
               </div>
             </div>
@@ -1487,7 +1635,7 @@ export default function OfficialPapersPage() {
                       Click here to select multiple PDFs
                     </div>
                     <div className="mt-1 text-xs text-sky-700">
-                      3000+ PDFs ko safe blocks me upload kiya jayega
+                      3000+ PDFs ko safe blocks me direct upload kiya jayega
                     </div>
                   </div>
                 </label>
@@ -1694,7 +1842,7 @@ export default function OfficialPapersPage() {
               </div>
 
               <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900 leading-6">
-                <b>Direct flow:</b> PDFs select karo → safe upload blocks me stage karo → job create hoga → batch processing chalegi → failed CSV download available rahega.
+                <b>Direct flow:</b> PDFs select karo → signed URLs generate honge → browser se direct upload hoga → finalize verify hoga → job create hogi → batch processing chalegi.
               </div>
 
               <div className="rounded-2xl border border-gray-200 bg-white p-4">
@@ -2214,7 +2362,7 @@ export default function OfficialPapersPage() {
               ) : null}
 
               <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900 leading-6">
-                <b>Current status:</b> Direct block staging complete hote hi batch job auto-start hota hai, aur job finish / fail / cancel hone par stats aur file list automatically refresh ho jati hai.
+                <b>Current status:</b> Direct signed upload complete hote hi batch job auto-start hota hai, aur job finish / fail / cancel hone par stats aur file list automatically refresh ho jati hai.
               </div>
             </div>
           </div>
