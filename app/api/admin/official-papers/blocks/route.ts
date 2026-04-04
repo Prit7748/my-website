@@ -8,6 +8,7 @@ import {
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 import { getAuthUser, hasPermission } from "@/lib/auth";
+import { uploadOfficialPaperBlockPdfToS3 } from "@/lib/bulkOfficialPapersJob";
 
 export const runtime = "nodejs";
 
@@ -34,8 +35,11 @@ function safeNum(x: any, def = 0) {
   return Number.isFinite(n) ? n : def;
 }
 
-function badRequest(message: string) {
-  return NextResponse.json({ ok: false, error: message }, { status: 400 });
+function badRequest(message: string, extra?: Record<string, any>) {
+  return NextResponse.json(
+    { ok: false, error: message, ...(extra || {}) },
+    { status: 400 }
+  );
 }
 
 async function assertAdminWriteAccess() {
@@ -54,7 +58,10 @@ async function assertAdminWriteAccess() {
   if (!hasPermission(user, "products:write")) {
     return {
       ok: false as const,
-      res: NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 }),
+      res: NextResponse.json(
+        { ok: false, error: "Forbidden" },
+        { status: 403 }
+      ),
     };
   }
 
@@ -140,29 +147,16 @@ async function buildSignedUploadUrl(args: {
   return getSignedUrl(s3, command, { expiresIn: 15 * 60 });
 }
 
-export async function POST(req: Request) {
-  const guard = await assertAdminWriteAccess();
-  if (!guard.ok) return guard.res;
-
-  if (!ACCESS_KEY || !SECRET_KEY) {
-    return NextResponse.json(
-      { ok: false, error: "AWS credentials missing" },
-      { status: 500 }
-    );
-  }
-
-  if (!BUCKET_PRIVATE) {
-    return NextResponse.json(
-      { ok: false, error: "AWS_S3_BUCKET_PRIVATE missing" },
-      { status: 500 }
-    );
-  }
-
+async function handleJsonMode(req: Request, userEmail: string) {
   let body: any = {};
   try {
     body = parseJsonBody(await req.json());
   } catch {
-    return badRequest("Invalid JSON body");
+    return badRequest("Invalid JSON body", {
+      expectedMode: "application/json",
+      probableReason:
+        "Frontend old bundle may still be sending multipart/form-data",
+    });
   }
 
   const action = safeStr(body?.action).toLowerCase();
@@ -175,9 +169,7 @@ export async function POST(req: Request) {
       return badRequest("items required for init");
     }
 
-    const blockId = buildBlockId(
-      `${safeStr(guard.user.email)}-${blockNumber}-${Date.now()}`
-    );
+    const blockId = buildBlockId(`${safeStr(userEmail)}-${blockNumber}-${Date.now()}`);
 
     const uploads: Array<{
       clientFileId: string;
@@ -200,9 +192,7 @@ export async function POST(req: Request) {
     for (let i = 0; i < items.length; i++) {
       const item = items[i] as InitItem;
 
-      const originalName = cleanBaseFileName(
-        item?.originalName || item?.fileName || ""
-      );
+      const originalName = cleanBaseFileName(item?.originalName || item?.fileName || "");
       const fileName = cleanBaseFileName(item?.fileName || originalName);
       const clientFileId = safeStr(
         item?.clientFileId || `${fileName}__${safeNum(item?.sizeBytes, 0)}__${i}`
@@ -302,9 +292,7 @@ export async function POST(req: Request) {
     for (let i = 0; i < items.length; i++) {
       const item = items[i] as FinalizeItem;
 
-      const originalName = cleanBaseFileName(
-        item?.originalName || item?.fileName || ""
-      );
+      const originalName = cleanBaseFileName(item?.originalName || item?.fileName || "");
       const fileName = cleanBaseFileName(item?.fileName || originalName);
       const clientFileId = safeStr(item?.clientFileId);
       const stagedPdfKey = safeStr(item?.stagedPdfKey);
@@ -375,5 +363,162 @@ export async function POST(req: Request) {
     );
   }
 
-  return badRequest("Unsupported action");
+  return badRequest("Unsupported JSON action");
+}
+
+async function handleMultipartFallback(req: Request, userEmail: string) {
+  const formData = await req.formData();
+
+  const fileEntries = formData.getAll("files");
+  const files = fileEntries.filter((item): item is File => item instanceof File);
+
+  if (!files.length) {
+    return badRequest("At least one PDF file is required in multipart mode");
+  }
+
+  let meta: any[] = [];
+  try {
+    const rawMeta = safeStr(formData.get("meta"));
+    meta = rawMeta ? JSON.parse(rawMeta) : [];
+    if (!Array.isArray(meta)) meta = [];
+  } catch {
+    meta = [];
+  }
+
+  const blockNumber = Math.max(1, Math.trunc(safeNum(formData.get("blockNumber"), 1)));
+  const totalBlocks = Math.max(1, Math.trunc(safeNum(formData.get("totalBlocks"), 1)));
+  const blockId = buildBlockId(`${safeStr(userEmail)}-${blockNumber}-${Date.now()}`);
+
+  const items: Array<{
+    clientFileId: string;
+    originalName: string;
+    fileName: string;
+    sizeBytes: number;
+    stagedPdfKey: string;
+    stagedBucket?: string;
+    blockId: string;
+  }> = [];
+
+  const failures: Array<{
+    clientFileId?: string;
+    fileName?: string;
+    reason?: string;
+  }> = [];
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    const metaRow = meta[i] || {};
+
+    const originalName = cleanBaseFileName(metaRow?.originalName || file.name);
+    const fileName = cleanBaseFileName(metaRow?.fileName || file.name || originalName);
+    const clientFileId = safeStr(
+      metaRow?.clientFileId || `${fileName}__${file.size}__${i}`
+    );
+
+    if (!fileName.toLowerCase().endsWith(".pdf")) {
+      failures.push({
+        clientFileId,
+        fileName,
+        reason: "Only PDF files allowed",
+      });
+      continue;
+    }
+
+    try {
+      const pdfBuffer = Buffer.from(await file.arrayBuffer());
+
+      if (!pdfBuffer.length) {
+        failures.push({
+          clientFileId,
+          fileName,
+          reason: "Empty PDF file",
+        });
+        continue;
+      }
+
+      const staged = await uploadOfficialPaperBlockPdfToS3({
+        originalName,
+        pdfBuffer,
+        blockId,
+        rowNumber: i + 1,
+      });
+
+      items.push({
+        clientFileId,
+        originalName: staged.originalName,
+        fileName: staged.fileName,
+        sizeBytes: Number(staged.sizeBytes || pdfBuffer.length),
+        stagedPdfKey: safeStr(staged.key),
+        stagedBucket: safeStr(staged.bucket),
+        blockId,
+      });
+    } catch (error: any) {
+      failures.push({
+        clientFileId,
+        fileName,
+        reason: safeStr(error?.message || "Multipart fallback stage upload failed"),
+      });
+    }
+  }
+
+  return NextResponse.json(
+    {
+      ok: true,
+      message: `Fallback multipart block ${blockNumber}/${totalBlocks} staged. Success ${items.length}, Failed ${failures.length}.`,
+      action: "multipart-fallback",
+      blockId,
+      blockNumber,
+      totalBlocks,
+      items,
+      failures,
+      warning:
+        "Old frontend multipart mode detected. Large uploads ke liye latest signed-upload frontend use karo.",
+    },
+    { status: 200 }
+  );
+}
+
+export async function POST(req: Request) {
+  const guard = await assertAdminWriteAccess();
+  if (!guard.ok) return guard.res;
+
+  if (!ACCESS_KEY || !SECRET_KEY) {
+    return NextResponse.json(
+      { ok: false, error: "AWS credentials missing" },
+      { status: 500 }
+    );
+  }
+
+  if (!BUCKET_PRIVATE) {
+    return NextResponse.json(
+      { ok: false, error: "AWS_S3_BUCKET_PRIVATE missing" },
+      { status: 500 }
+    );
+  }
+
+  const contentType = safeStr(req.headers.get("content-type")).toLowerCase();
+  const userEmail = safeStr(guard.user.email);
+
+  try {
+    if (contentType.includes("application/json")) {
+      return await handleJsonMode(req, userEmail);
+    }
+
+    if (contentType.includes("multipart/form-data")) {
+      return await handleMultipartFallback(req, userEmail);
+    }
+
+    return badRequest("Unsupported content type", {
+      receivedContentType: contentType || "(empty)",
+      expectedContentTypes: ["application/json", "multipart/form-data"],
+    });
+  } catch (error: any) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: safeStr(error?.message || "Failed to handle block upload"),
+      },
+      { status: 500 }
+    );
+  }
 }
