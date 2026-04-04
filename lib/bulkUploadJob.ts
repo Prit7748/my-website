@@ -29,6 +29,25 @@ export type BulkJobFailureInput = {
   raw?: any;
 };
 
+export type BulkJobAppendProgressArgs = {
+  jobId: string;
+  createdBy: string;
+  processedDelta?: number;
+  successDelta?: number;
+  failedDelta?: number;
+  skippedDelta?: number;
+  validDelta?: number;
+  failures?: BulkJobFailureInput[];
+  summaryPatch?: Record<string, any>;
+  note?: string;
+  batchNumber?: number;
+  fromIndex?: number;
+  toIndex?: number;
+  attempted?: number;
+  startedAt?: Date | string | null;
+  heartbeatAt?: Date | string | null;
+};
+
 const FINAL_STATUSES = new Set<BulkJobStatus>([
   "completed",
   "completed_with_errors",
@@ -47,6 +66,12 @@ function safeNum(x: any, def = 0) {
 
 function clamp(n: number, min: number, max: number) {
   return Math.min(max, Math.max(min, n));
+}
+
+function asDateOrNull(input: any) {
+  if (!input) return null;
+  const d = new Date(input);
+  return Number.isNaN(d.getTime()) ? null : d;
 }
 
 function sanitizeRawRow(raw: any) {
@@ -79,6 +104,43 @@ function sanitizeFailure(row: BulkJobFailureInput) {
 
 function sanitizeFailures(rows: BulkJobFailureInput[] = []) {
   return rows.map(sanitizeFailure);
+}
+
+function mergeSummary(current: any, patch: any) {
+  const base =
+    current && typeof current === "object" && !Array.isArray(current) ? { ...current } : {};
+  const next =
+    patch && typeof patch === "object" && !Array.isArray(patch) ? patch : {};
+
+  for (const [key, value] of Object.entries(next)) {
+    if (value === undefined) continue;
+
+    const existing = (base as any)[key];
+
+    if (typeof value === "number" && Number.isFinite(value)) {
+      const existingNum = Number(existing);
+      if (Number.isFinite(existingNum)) {
+        (base as any)[key] = existingNum + value;
+      } else {
+        (base as any)[key] = value;
+      }
+      continue;
+    }
+
+    (base as any)[key] = value;
+  }
+
+  return base;
+}
+
+function computeFinalStatus(args: {
+  totalItems: number;
+  processedItems: number;
+  failedItems: number;
+}) {
+  if (args.totalItems <= 0) return "completed" as BulkJobStatus;
+  if (args.processedItems < args.totalItems) return "running" as BulkJobStatus;
+  return args.failedItems > 0 ? "completed_with_errors" : "completed";
 }
 
 export function isFinalBulkJobStatus(status: string) {
@@ -115,7 +177,10 @@ export function toPlainBulkJob(job: any) {
       batchSize: safeNum(job?.progress?.batchSize, 0),
       batchCount: safeNum(job?.progress?.batchCount, 0),
       currentBatchNumber: safeNum(job?.progress?.currentBatchNumber, 0),
-      lastProcessedIndex: Math.max(-1, Math.trunc(Number(job?.progress?.lastProcessedIndex ?? -1))),
+      lastProcessedIndex: Math.max(
+        -1,
+        Math.trunc(Number(job?.progress?.lastProcessedIndex ?? -1))
+      ),
       progressPercent,
     },
 
@@ -239,6 +304,340 @@ export async function getBulkUploadJob(jobId: string, createdBy?: string) {
 
   const job: any = await BulkUploadJob.findOne(query);
   return job || null;
+}
+
+export async function getLatestActiveBulkUploadJob(args: {
+  createdBy: string;
+  jobType?: BulkJobType | string;
+}) {
+  await dbConnect();
+
+  const query: any = {
+    createdBy: safeStr(args.createdBy),
+    status: { $nin: Array.from(FINAL_STATUSES) },
+  };
+
+  if (safeStr(args.jobType)) {
+    query.jobType = safeStr(args.jobType);
+  }
+
+  const job: any = await BulkUploadJob.findOne(query).sort({ createdAt: -1, _id: -1 });
+  return job || null;
+}
+
+export async function updateBulkUploadJobInput(args: {
+  jobId: string;
+  createdBy: string;
+  inputPatch?: Record<string, any>;
+  metaPatch?: Record<string, any>;
+  configPatch?: Record<string, any>;
+  summaryPatch?: Record<string, any>;
+}) {
+  await dbConnect();
+
+  const job: any = await BulkUploadJob.findOne({
+    _id: safeStr(args.jobId),
+    createdBy: safeStr(args.createdBy),
+  });
+
+  if (!job) {
+    throw new Error("Job not found");
+  }
+
+  if (isFinalBulkJobStatus(job.status)) {
+    return job;
+  }
+
+  const nextInput = mergeSummary(job.input || {}, args.inputPatch || {});
+  const nextMeta = mergeSummary(job.meta || {}, args.metaPatch || {});
+  const nextConfig = mergeSummary(job.config || {}, args.configPatch || {});
+  const nextSummary = mergeSummary(job.summary || {}, args.summaryPatch || {});
+
+  const updated: any = await BulkUploadJob.findOneAndUpdate(
+    {
+      _id: String(job._id),
+      createdBy: safeStr(args.createdBy),
+    },
+    {
+      $set: {
+        input: nextInput,
+        meta: nextMeta,
+        config: nextConfig,
+        summary: nextSummary,
+        lastHeartbeatAt: new Date(),
+      },
+    },
+    { new: true }
+  );
+
+  return updated;
+}
+
+export async function startBulkUploadJob(args: {
+  jobId: string;
+  createdBy: string;
+  message?: string;
+  summaryPatch?: Record<string, any>;
+}) {
+  await dbConnect();
+
+  const job: any = await BulkUploadJob.findOne({
+    _id: safeStr(args.jobId),
+    createdBy: safeStr(args.createdBy),
+  });
+
+  if (!job) {
+    throw new Error("Job not found");
+  }
+
+  if (isFinalBulkJobStatus(job.status)) {
+    return job;
+  }
+
+  const now = new Date();
+  const nextSummary = mergeSummary(job.summary || {}, args.summaryPatch || {});
+
+  const updated: any = await BulkUploadJob.findOneAndUpdate(
+    {
+      _id: String(job._id),
+      createdBy: safeStr(args.createdBy),
+    },
+    {
+      $set: {
+        status: "running",
+        startedAt: job?.startedAt || now,
+        lastHeartbeatAt: now,
+        resultMessage: safeStr(args.message || job?.resultMessage || ""),
+        summary: nextSummary,
+      },
+    },
+    { new: true }
+  );
+
+  return updated;
+}
+
+export async function touchBulkUploadJobHeartbeat(args: {
+  jobId: string;
+  createdBy: string;
+  note?: string;
+}) {
+  await dbConnect();
+
+  const job: any = await BulkUploadJob.findOne({
+    _id: safeStr(args.jobId),
+    createdBy: safeStr(args.createdBy),
+  });
+
+  if (!job) {
+    throw new Error("Job not found");
+  }
+
+  if (isFinalBulkJobStatus(job.status)) {
+    return job;
+  }
+
+  const updated: any = await BulkUploadJob.findOneAndUpdate(
+    {
+      _id: String(job._id),
+      createdBy: safeStr(args.createdBy),
+    },
+    {
+      $set: {
+        status: "running",
+        startedAt: job?.startedAt || new Date(),
+        lastHeartbeatAt: new Date(),
+        ...(safeStr(args.note) ? { resultMessage: safeStr(args.note) } : {}),
+      },
+    },
+    { new: true }
+  );
+
+  return updated;
+}
+
+export async function appendBulkUploadJobProgress(args: BulkJobAppendProgressArgs) {
+  await dbConnect();
+
+  const job: any = await BulkUploadJob.findOne({
+    _id: safeStr(args.jobId),
+    createdBy: safeStr(args.createdBy),
+  });
+
+  if (!job) {
+    throw new Error("Job not found");
+  }
+
+  if (isFinalBulkJobStatus(job.status)) {
+    return job;
+  }
+
+  const totalItems = safeNum(job?.progress?.totalItems, 0);
+  const currentProcessed = safeNum(job?.progress?.processedItems, 0);
+  const currentFailed = safeNum(job?.progress?.failedItems, 0);
+
+  const processedDelta = safeNum(args.processedDelta, 0);
+  const successDelta = safeNum(args.successDelta, 0);
+  const failedDelta = safeNum(args.failedDelta, 0);
+  const skippedDelta = safeNum(args.skippedDelta, 0);
+  const validDelta = safeNum(args.validDelta, 0);
+
+  const nextProcessed = Math.min(totalItems, currentProcessed + processedDelta);
+  const nextFailed = currentFailed + failedDelta;
+  const nextStatus = computeFinalStatus({
+    totalItems,
+    processedItems: nextProcessed,
+    failedItems: nextFailed,
+  });
+
+  const cleanFailures = sanitizeFailures(args.failures || []);
+  const nextSummary = mergeSummary(job.summary || {}, args.summaryPatch || {});
+
+  const startedAt =
+    asDateOrNull(args.startedAt) || asDateOrNull(job?.startedAt) || new Date();
+
+  const heartbeatAt = asDateOrNull(args.heartbeatAt) || new Date();
+
+  const safeFromIndex =
+    typeof args.fromIndex === "number"
+      ? Math.max(-1, Math.trunc(Number(args.fromIndex)))
+      : Math.max(-1, Math.trunc(Number(job?.lastBatch?.fromIndex ?? -1)));
+
+  const safeToIndex =
+    typeof args.toIndex === "number"
+      ? Math.max(-1, Math.trunc(Number(args.toIndex)))
+      : Math.max(-1, Math.trunc(Number(job?.progress?.lastProcessedIndex ?? -1)));
+
+  const safeBatchNumber =
+    typeof args.batchNumber === "number"
+      ? safeNum(args.batchNumber, 0)
+      : safeNum(job?.progress?.currentBatchNumber, 0);
+
+  const safeAttempted =
+    typeof args.attempted === "number"
+      ? safeNum(args.attempted, 0)
+      : processedDelta;
+
+  const updated: any = await BulkUploadJob.findOneAndUpdate(
+    {
+      _id: String(job._id),
+      createdBy: safeStr(args.createdBy),
+    },
+    {
+      $inc: {
+        "progress.processedItems": processedDelta,
+        "progress.successItems": successDelta,
+        "progress.failedItems": failedDelta,
+        "progress.skippedItems": skippedDelta,
+        "progress.validItems": validDelta,
+      },
+      $set: {
+        status: nextStatus,
+        summary: nextSummary,
+        startedAt,
+        lastHeartbeatAt: heartbeatAt,
+        completedAt:
+          nextStatus === "completed" || nextStatus === "completed_with_errors"
+            ? new Date()
+            : null,
+        resultMessage:
+          nextStatus === "completed"
+            ? "Bulk job completed successfully."
+            : nextStatus === "completed_with_errors"
+            ? "Bulk job completed with some failed items."
+            : safeStr(args.note || job?.resultMessage || ""),
+        "progress.currentBatchNumber": safeBatchNumber,
+        "progress.lastProcessedIndex": safeToIndex,
+        lastBatch: {
+          batchNumber: safeBatchNumber,
+          fromIndex: safeFromIndex,
+          toIndex: safeToIndex,
+          attempted: safeAttempted,
+          success: successDelta,
+          failed: failedDelta,
+          skipped: skippedDelta,
+          startedAt: asDateOrNull(args.startedAt) || heartbeatAt,
+          endedAt: heartbeatAt,
+          note: safeStr(args.note),
+        },
+        lockToken: "",
+        lockExpiresAt: null,
+      },
+      ...(cleanFailures.length
+        ? {
+            $push: {
+              failures: {
+                $each: cleanFailures,
+              },
+            },
+          }
+        : {}),
+    },
+    { new: true }
+  );
+
+  return updated;
+}
+
+export async function finalizeBulkUploadJob(args: {
+  jobId: string;
+  createdBy: string;
+  message?: string;
+  summaryPatch?: Record<string, any>;
+}) {
+  await dbConnect();
+
+  const job: any = await BulkUploadJob.findOne({
+    _id: safeStr(args.jobId),
+    createdBy: safeStr(args.createdBy),
+  });
+
+  if (!job) {
+    throw new Error("Job not found");
+  }
+
+  if (isFinalBulkJobStatus(job.status)) {
+    return job;
+  }
+
+  const totalItems = safeNum(job?.progress?.totalItems, 0);
+  const processedItems = safeNum(job?.progress?.processedItems, 0);
+  const failedItems = safeNum(job?.progress?.failedItems, 0);
+  const nextSummary = mergeSummary(job.summary || {}, args.summaryPatch || {});
+
+  const finalStatus: BulkJobStatus =
+    processedItems >= totalItems
+      ? failedItems > 0
+        ? "completed_with_errors"
+        : "completed"
+      : failedItems > 0
+      ? "completed_with_errors"
+      : "completed";
+
+  const updated: any = await BulkUploadJob.findOneAndUpdate(
+    {
+      _id: String(job._id),
+      createdBy: safeStr(args.createdBy),
+    },
+    {
+      $set: {
+        status: finalStatus,
+        summary: nextSummary,
+        completedAt: new Date(),
+        lastHeartbeatAt: new Date(),
+        lockToken: "",
+        lockExpiresAt: null,
+        resultMessage:
+          safeStr(args.message) ||
+          (finalStatus === "completed"
+            ? "Bulk job completed successfully."
+            : "Bulk job completed with some failed items."),
+      },
+    },
+    { new: true }
+  );
+
+  return updated;
 }
 
 export async function claimBulkUploadJobBatch(args: {

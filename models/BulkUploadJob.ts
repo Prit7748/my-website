@@ -174,7 +174,7 @@ const LastBatchSchema = new Schema(
       type: String,
       default: "",
       trim: true,
-      maxlength: 1000,
+      maxlength: 2000,
     },
   },
   { _id: false, minimize: true }
@@ -259,7 +259,7 @@ const BulkUploadJobSchema = new Schema(
       type: String,
       default: "",
       trim: true,
-      maxlength: 5000,
+      maxlength: 8000,
     },
 
     downloadFileName: {
@@ -274,7 +274,6 @@ const BulkUploadJobSchema = new Schema(
       default: "",
       trim: true,
       maxlength: 100,
-      index: true,
     },
 
     lockExpiresAt: {
@@ -328,6 +327,22 @@ BulkUploadJobSchema.pre("save", function () {
   doc.downloadFileName = safeStr(doc.downloadFileName);
   doc.lockToken = safeStr(doc.lockToken);
 
+  if (!doc.meta || typeof doc.meta !== "object" || Array.isArray(doc.meta)) {
+    doc.meta = {};
+  }
+
+  if (!doc.config || typeof doc.config !== "object" || Array.isArray(doc.config)) {
+    doc.config = {};
+  }
+
+  if (!doc.input || typeof doc.input !== "object" || Array.isArray(doc.input)) {
+    doc.input = {};
+  }
+
+  if (!doc.summary || typeof doc.summary !== "object" || Array.isArray(doc.summary)) {
+    doc.summary = {};
+  }
+
   if (!doc.progress) doc.progress = {};
 
   doc.progress.totalItems = safeNum(doc.progress.totalItems, 0);
@@ -350,6 +365,20 @@ BulkUploadJobSchema.pre("save", function () {
     Math.trunc(Number(doc.progress.lastProcessedIndex ?? -1))
   );
 
+  if (!doc.lastBatch) doc.lastBatch = {};
+
+  doc.lastBatch.batchNumber = safeNum(doc.lastBatch.batchNumber, 0);
+  doc.lastBatch.fromIndex = Math.max(
+    -1,
+    Math.trunc(Number(doc.lastBatch.fromIndex ?? -1))
+  );
+  doc.lastBatch.toIndex = Math.max(-1, Math.trunc(Number(doc.lastBatch.toIndex ?? -1)));
+  doc.lastBatch.attempted = safeNum(doc.lastBatch.attempted, 0);
+  doc.lastBatch.success = safeNum(doc.lastBatch.success, 0);
+  doc.lastBatch.failed = safeNum(doc.lastBatch.failed, 0);
+  doc.lastBatch.skipped = safeNum(doc.lastBatch.skipped, 0);
+  doc.lastBatch.note = safeStr(doc.lastBatch.note).slice(0, 2000);
+
   if (!Array.isArray(doc.failures)) doc.failures = [];
 
   doc.failures = doc.failures.map((row: any) => ({
@@ -361,7 +390,10 @@ BulkUploadJobSchema.pre("save", function () {
     fileName: safeStr(row?.fileName),
     status: safeStr(row?.status || "failed"),
     reason: safeStr(row?.reason).slice(0, 3000),
-    raw: row?.raw ?? null,
+    raw:
+      row?.raw && typeof row.raw === "object" && !Array.isArray(row.raw)
+        ? row.raw
+        : null,
     createdAt: row?.createdAt || new Date(),
   }));
 });
@@ -371,5 +403,6 @@ BulkUploadJobSchema.index({ createdBy: 1, status: 1, createdAt: -1 });
 BulkUploadJobSchema.index({ createdAt: -1 });
 BulkUploadJobSchema.index({ completedAt: -1 });
 BulkUploadJobSchema.index({ lockExpiresAt: 1 });
+BulkUploadJobSchema.index({ createdBy: 1, jobType: 1, createdAt: -1 });
 
 export default models.BulkUploadJob || model("BulkUploadJob", BulkUploadJobSchema);

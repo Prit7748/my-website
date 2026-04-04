@@ -18,7 +18,10 @@ async function assertAdminWriteAccess() {
   if (!user) {
     return {
       ok: false as const,
-      res: NextResponse.json({ ok: false, error: "Not authenticated" }, { status: 401 }),
+      res: NextResponse.json(
+        { ok: false, error: "Not authenticated" },
+        { status: 401 }
+      ),
     };
   }
 
@@ -32,7 +35,9 @@ async function assertAdminWriteAccess() {
   return { ok: true as const, user };
 }
 
-type ParamsMaybePromise = { params: Promise<{ jobId: string }> | { jobId: string } };
+type ParamsMaybePromise = {
+  params: Promise<{ jobId: string }> | { jobId: string };
+};
 
 async function getJobId(ctx: ParamsMaybePromise) {
   const p: any = await (ctx as any).params;
@@ -45,12 +50,18 @@ export async function GET(_req: NextRequest, ctx: ParamsMaybePromise) {
 
   const jobId = await getJobId(ctx);
   if (!jobId) {
-    return NextResponse.json({ ok: false, error: "jobId required" }, { status: 400 });
+    return NextResponse.json(
+      { ok: false, error: "jobId required" },
+      { status: 400 }
+    );
   }
 
   const job = await getBulkUploadJob(jobId, safeStr(guard.user.email));
   if (!job) {
-    return NextResponse.json({ ok: false, error: "Job not found" }, { status: 404 });
+    return NextResponse.json(
+      { ok: false, error: "Job not found" },
+      { status: 404 }
+    );
   }
 
   return NextResponse.json(
@@ -68,7 +79,10 @@ export async function POST(req: NextRequest, ctx: ParamsMaybePromise) {
 
   const jobId = await getJobId(ctx);
   if (!jobId) {
-    return NextResponse.json({ ok: false, error: "jobId required" }, { status: 400 });
+    return NextResponse.json(
+      { ok: false, error: "jobId required" },
+      { status: 400 }
+    );
   }
 
   let body: any = {};
@@ -80,7 +94,10 @@ export async function POST(req: NextRequest, ctx: ParamsMaybePromise) {
 
   const action = safeStr(body?.action).toLowerCase();
   if (action !== "cancel") {
-    return NextResponse.json({ ok: false, error: "Unsupported action" }, { status: 400 });
+    return NextResponse.json(
+      { ok: false, error: "Unsupported action" },
+      { status: 400 }
+    );
   }
 
   const cancelled = await cancelBulkUploadJob({
@@ -89,7 +106,10 @@ export async function POST(req: NextRequest, ctx: ParamsMaybePromise) {
   });
 
   if (!cancelled.ok) {
-    return NextResponse.json({ ok: false, error: cancelled.error || "Cancel failed" }, { status: 404 });
+    return NextResponse.json(
+      { ok: false, error: cancelled.error || "Cancel failed" },
+      { status: 404 }
+    );
   }
 
   return NextResponse.json(

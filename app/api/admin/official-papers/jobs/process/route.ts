@@ -28,7 +28,10 @@ async function assertAdminWriteAccess() {
   if (!user) {
     return {
       ok: false as const,
-      res: NextResponse.json({ ok: false, error: "Not authenticated" }, { status: 401 }),
+      res: NextResponse.json(
+        { ok: false, error: "Not authenticated" },
+        { status: 401 }
+      ),
     };
   }
 
@@ -55,14 +58,20 @@ export async function POST(req: Request) {
 
   const jobId = safeStr(body?.jobId);
   if (!jobId) {
-    return NextResponse.json({ ok: false, error: "jobId required" }, { status: 400 });
+    return NextResponse.json(
+      { ok: false, error: "jobId required" },
+      { status: 400 }
+    );
   }
 
   const createdBy = safeStr(guard.user.email);
   const currentJob = await getBulkUploadJob(jobId, createdBy);
 
   if (!currentJob) {
-    return NextResponse.json({ ok: false, error: "Job not found" }, { status: 404 });
+    return NextResponse.json(
+      { ok: false, error: "Job not found" },
+      { status: 404 }
+    );
   }
 
   if (isFinalBulkJobStatus(safeStr((currentJob as any)?.status))) {
@@ -70,6 +79,20 @@ export async function POST(req: Request) {
       {
         ok: true,
         message: "Job already finished.",
+        job: toPlainBulkJob(currentJob),
+      },
+      { status: 200 }
+    );
+  }
+
+  const totalItems = safeNum(currentJob?.progress?.totalItems, 0);
+  const alreadyProcessed = safeNum(currentJob?.progress?.processedItems, 0);
+
+  if (totalItems > 0 && alreadyProcessed >= totalItems) {
+    return NextResponse.json(
+      {
+        ok: true,
+        message: "All items already processed.",
         job: toPlainBulkJob(currentJob),
       },
       { status: 200 }
@@ -96,12 +119,42 @@ export async function POST(req: Request) {
   }
 
   const lockedJob = claim.job;
-  const totalItems = safeNum(lockedJob?.progress?.totalItems, 0);
-  const processedItems = safeNum(lockedJob?.progress?.processedItems, 0);
+  const lockedTotalItems = safeNum(lockedJob?.progress?.totalItems, 0);
+  const lockedProcessedItems = safeNum(lockedJob?.progress?.processedItems, 0);
   const batchSize = Math.max(1, safeNum(lockedJob?.progress?.batchSize, 100));
 
-  const fromIndex = processedItems;
-  const toIndex = Math.min(totalItems - 1, fromIndex + batchSize - 1);
+  if (lockedTotalItems <= 0 || lockedProcessedItems >= lockedTotalItems) {
+    const finished = await completeBulkUploadJobBatch({
+      jobId,
+      createdBy,
+      lockToken: claim.lockToken,
+      processedDelta: 0,
+      successDelta: 0,
+      failedDelta: 0,
+      skippedDelta: 0,
+      validDelta: 0,
+      nextLastProcessedIndex: Math.max(-1, lockedProcessedItems - 1),
+      batchNumber: safeNum(lockedJob?.progress?.currentBatchNumber, 0),
+      fromIndex: Math.max(-1, lockedProcessedItems - 1),
+      toIndex: Math.max(-1, lockedProcessedItems - 1),
+      attempted: 0,
+      failures: [],
+      note: "No pending items left to process.",
+      summaryPatch: {},
+    });
+
+    return NextResponse.json(
+      {
+        ok: true,
+        message: "No pending items left to process.",
+        job: toPlainBulkJob(finished),
+      },
+      { status: 200 }
+    );
+  }
+
+  const fromIndex = lockedProcessedItems;
+  const toIndex = Math.min(lockedTotalItems - 1, fromIndex + batchSize - 1);
   const batchNumber = Math.floor(fromIndex / batchSize) + 1;
 
   try {
@@ -144,13 +197,17 @@ export async function POST(req: Request) {
       jobId,
       createdBy,
       lockToken: claim.lockToken,
-      message: safeStr(error?.message || "Official papers batch processing failed"),
+      message: safeStr(
+        error?.message || "Official papers batch processing failed"
+      ),
     });
 
     return NextResponse.json(
       {
         ok: false,
-        error: safeStr(error?.message || "Official papers batch processing failed"),
+        error: safeStr(
+          error?.message || "Official papers batch processing failed"
+        ),
         job: toPlainBulkJob(failedJob),
       },
       { status: 500 }

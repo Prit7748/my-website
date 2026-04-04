@@ -16,14 +16,17 @@ async function assertAdminWriteAccess() {
   if (!user) {
     return {
       ok: false as const,
-      res: NextResponse.json({ error: "Not authenticated" }, { status: 401 }),
+      res: NextResponse.json(
+        { ok: false, error: "Not authenticated" },
+        { status: 401 }
+      ),
     };
   }
 
   if (!hasPermission(user, "products:write")) {
     return {
       ok: false as const,
-      res: NextResponse.json({ error: "Forbidden" }, { status: 403 }),
+      res: NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 }),
     };
   }
 
@@ -38,7 +41,7 @@ export async function GET(_req: NextRequest) {
 
   const [liveOfficialRows, liveSolvedRows, latestOfficialPaper] = await Promise.all([
     OfficialPaper.find({ deletedAt: null })
-      .select("skuNormalized productExists uploadedAt")
+      .select("skuNormalized productExists uploadedAt fileName")
       .lean(),
     PdfVaultFile.find({ deletedAt: null }).select("skuNormalized").lean(),
     OfficialPaper.findOne({ deletedAt: null })
@@ -47,21 +50,27 @@ export async function GET(_req: NextRequest) {
       .lean(),
   ]);
 
+  const liveOfficialList = Array.isArray(liveOfficialRows) ? liveOfficialRows : [];
+  const liveSolvedList = Array.isArray(liveSolvedRows) ? liveSolvedRows : [];
+
   const solvedSkuSet = new Set(
-    (Array.isArray(liveSolvedRows) ? liveSolvedRows : [])
+    liveSolvedList
       .map((x: any) => safeStr(x?.skuNormalized).toUpperCase())
       .filter(Boolean)
   );
-
-  const liveOfficialList = Array.isArray(liveOfficialRows) ? liveOfficialRows : [];
 
   const onlyUnsolvedWithoutSolvedCount = liveOfficialList.filter((row: any) => {
     const sku = safeStr(row?.skuNormalized).toUpperCase();
     return sku && !solvedSkuSet.has(sku);
   }).length;
 
-  const matchedProductsCount = liveOfficialList.filter((row: any) => Boolean(row?.productExists)).length;
-  const unmatchedProductsCount = liveOfficialList.filter((row: any) => !Boolean(row?.productExists)).length;
+  const matchedProductsCount = liveOfficialList.filter((row: any) =>
+    Boolean(row?.productExists)
+  ).length;
+
+  const unmatchedProductsCount = liveOfficialList.filter(
+    (row: any) => !Boolean(row?.productExists)
+  ).length;
 
   return NextResponse.json(
     {

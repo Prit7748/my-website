@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   ArrowLeft,
@@ -27,6 +27,9 @@ import {
   LoaderCircle,
   BarChart3,
   Database,
+  Files,
+  Layers3,
+  HardDriveUpload,
 } from "lucide-react";
 
 type OfficialPaperItem = {
@@ -108,9 +111,9 @@ type BulkJobState = {
   jobLabel: string;
   status: string;
   createdBy: string;
-  meta?: any;
-  config?: any;
-  summary?: any;
+  meta?: Record<string, any>;
+  config?: Record<string, any>;
+  summary?: Record<string, any>;
   progress?: BulkJobProgress;
   lastBatch?: {
     batchNumber?: number;
@@ -135,6 +138,40 @@ type BulkJobState = {
   lastHeartbeatAt?: string | null;
   createdAt?: string | null;
   updatedAt?: string | null;
+};
+
+type DirectStagedItem = {
+  clientFileId: string;
+  originalName: string;
+  fileName: string;
+  sizeBytes: number;
+  stagedPdfKey: string;
+  stagedBucket?: string;
+  blockId?: string;
+};
+
+type StageFailureItem = {
+  clientFileId?: string;
+  fileName?: string;
+  reason?: string;
+};
+
+type StageBlockResponse = {
+  ok?: boolean;
+  message?: string;
+  blockId?: string;
+  items?: DirectStagedItem[];
+  failures?: StageFailureItem[];
+  error?: string;
+};
+
+type SelectedPdfTracker = {
+  clientFileId: string;
+  name: string;
+  size: number;
+  status: "queued" | "uploading" | "staged" | "failed";
+  blockNumber: number;
+  reason?: string;
 };
 
 function formatBytes(bytes: number) {
@@ -251,10 +288,26 @@ export default function OfficialPapersPage() {
   const [serverTotal, setServerTotal] = useState(0);
   const [serverTotalPages, setServerTotalPages] = useState(1);
 
-  const [zipFile, setZipFile] = useState<File | null>(null);
+  const [legacyZipFile, setLegacyZipFile] = useState<File | null>(null);
+  const [showLegacyZip, setShowLegacyZip] = useState(false);
+
   const [conflictMode, setConflictMode] = useState<"ignore" | "replace">("ignore");
   const [batchSize, setBatchSize] = useState(100);
+  const [uploadBlockSize, setUploadBlockSize] = useState(50);
+
+  const [selectedPdfFiles, setSelectedPdfFiles] = useState<File[]>([]);
+  const [selectedTrackers, setSelectedTrackers] = useState<SelectedPdfTracker[]>([]);
+  const [stagedItems, setStagedItems] = useState<DirectStagedItem[]>([]);
+  const [isStaging, setIsStaging] = useState(false);
   const [creatingJob, setCreatingJob] = useState(false);
+  const [currentBlockNumber, setCurrentBlockNumber] = useState(0);
+  const [currentBlockTotal, setCurrentBlockTotal] = useState(0);
+  const [currentBlockPercent, setCurrentBlockPercent] = useState(0);
+  const [currentBlockLoadedBytes, setCurrentBlockLoadedBytes] = useState(0);
+  const [completedBlockBytes, setCompletedBlockBytes] = useState(0);
+  const [currentBlockLabel, setCurrentBlockLabel] = useState("");
+  const [currentBlockFileIds, setCurrentBlockFileIds] = useState<string[]>([]);
+  const [stagingAbortEnabled, setStagingAbortEnabled] = useState(false);
 
   const [activeJob, setActiveJob] = useState<BulkJobState | null>(null);
   const [activeJobId, setActiveJobId] = useState("");
@@ -265,14 +318,50 @@ export default function OfficialPapersPage() {
   const processInFlightRef = useRef(false);
   const longTaskActiveRef = useRef(false);
   const finalRefreshDoneRef = useRef(false);
+  const stagingXhrRef = useRef<XMLHttpRequest | null>(null);
 
   const currentStatus = safeText(activeJob?.status);
   const isJobActive = Boolean(activeJobId) && !isFinalStatus(currentStatus);
+  const isLongTaskBusy = isJobActive || isStaging;
   const progress = activeJob?.progress;
   const summary = activeJob?.summary || {};
   const recentFailures = Array.isArray(activeJob?.recentFailures)
     ? activeJob.recentFailures
     : [];
+
+  const selectedPdfTotalBytes = useMemo(
+    () => selectedPdfFiles.reduce((sum, file) => sum + Number(file.size || 0), 0),
+    [selectedPdfFiles]
+  );
+
+  const selectedPdfBlockCount = useMemo(() => {
+    if (!selectedPdfFiles.length) return 0;
+    return Math.ceil(selectedPdfFiles.length / Math.max(1, uploadBlockSize));
+  }, [selectedPdfFiles, uploadBlockSize]);
+
+  const totalStagePercent = useMemo(() => {
+    if (!selectedPdfTotalBytes) return 0;
+    const totalDone = Math.min(
+      selectedPdfTotalBytes,
+      Number(completedBlockBytes || 0) + Number(currentBlockLoadedBytes || 0)
+    );
+    return Math.min(100, Math.round((totalDone / selectedPdfTotalBytes) * 100));
+  }, [selectedPdfTotalBytes, completedBlockBytes, currentBlockLoadedBytes]);
+
+  const stagedCount = useMemo(
+    () => selectedTrackers.filter((item) => item.status === "staged").length,
+    [selectedTrackers]
+  );
+
+  const failedStageCount = useMemo(
+    () => selectedTrackers.filter((item) => item.status === "failed").length,
+    [selectedTrackers]
+  );
+
+  const currentBlockTrackers = useMemo(() => {
+    if (!currentBlockNumber) return [];
+    return selectedTrackers.filter((item) => item.blockNumber === currentBlockNumber);
+  }, [selectedTrackers, currentBlockNumber]);
 
   function resetMessages() {
     setServerMessage("");
@@ -283,6 +372,29 @@ export default function OfficialPapersPage() {
     setActiveJob(null);
     setActiveJobId("");
     finalRefreshDoneRef.current = false;
+  }
+
+  function resetStageState(keepSelection = true) {
+    setSelectedTrackers([]);
+    setStagedItems([]);
+    setIsStaging(false);
+    setCurrentBlockNumber(0);
+    setCurrentBlockTotal(0);
+    setCurrentBlockPercent(0);
+    setCurrentBlockLoadedBytes(0);
+    setCompletedBlockBytes(0);
+    setCurrentBlockLabel("");
+    setCurrentBlockFileIds([]);
+    setStagingAbortEnabled(false);
+    stagingXhrRef.current = null;
+
+    if (!keepSelection) {
+      setSelectedPdfFiles([]);
+      const input = document.getElementById(
+        "official-paper-direct-input"
+      ) as HTMLInputElement | null;
+      if (input) input.value = "";
+    }
   }
 
   async function safeReadJson(res: Response) {
@@ -411,8 +523,139 @@ export default function OfficialPapersPage() {
     await Promise.all([loadFiles(), loadStats()]);
   }
 
-  async function createJob() {
-    if (!zipFile) {
+  function buildClientFileId(file: File, index: number) {
+    return `${file.name}__${file.size}__${file.lastModified}__${index}`;
+  }
+
+  function normalizeSelectedPdfFiles(fileList: FileList | File[] | null | undefined) {
+    const arr = Array.from(fileList || []);
+    const onlyPdf = arr.filter((file) => {
+      const name = safeText(file?.name).toLowerCase();
+      return name.endsWith(".pdf");
+    });
+
+    const uniqueMap = new Map<string, File>();
+    for (const file of onlyPdf) {
+      const key = `${file.name}__${file.size}__${file.lastModified}`;
+      if (!uniqueMap.has(key)) {
+        uniqueMap.set(key, file);
+      }
+    }
+
+    return Array.from(uniqueMap.values());
+  }
+
+  function createInitialTrackers(filesToUse: File[]) {
+    return filesToUse.map((file, index) => ({
+      clientFileId: buildClientFileId(file, index),
+      name: file.name,
+      size: Number(file.size || 0),
+      status: "queued" as const,
+      blockNumber: Math.floor(index / Math.max(1, uploadBlockSize)) + 1,
+    }));
+  }
+
+  function setTrackerStatusForBlock(
+    clientIds: string[],
+    status: SelectedPdfTracker["status"],
+    reasonMap?: Record<string, string>
+  ) {
+    setSelectedTrackers((prev) =>
+      prev.map((item) => {
+        if (!clientIds.includes(item.clientFileId)) return item;
+        return {
+          ...item,
+          status,
+          reason: reasonMap?.[item.clientFileId] || item.reason,
+        };
+      })
+    );
+  }
+
+  function markTrackerFailures(failures: StageFailureItem[]) {
+    if (!failures.length) return;
+
+    const reasonMap: Record<string, string> = {};
+    const failIds: string[] = [];
+
+    for (const item of failures) {
+      const id = safeText(item.clientFileId);
+      if (!id) continue;
+      failIds.push(id);
+      reasonMap[id] = safeText(item.reason || "Stage upload failed");
+    }
+
+    if (!failIds.length) return;
+    setTrackerStatusForBlock(failIds, "failed", reasonMap);
+  }
+
+  function uploadOneStageBlock(args: {
+    files: File[];
+    trackers: SelectedPdfTracker[];
+    blockNumber: number;
+    totalBlocks: number;
+  }) {
+    return new Promise<StageBlockResponse>((resolve, reject) => {
+      const fd = new FormData();
+
+      const meta = args.trackers.map((tracker, idx) => ({
+        clientFileId: tracker.clientFileId,
+        originalName: args.files[idx]?.name || tracker.name,
+        fileName: args.files[idx]?.name || tracker.name,
+        sizeBytes: Number(args.files[idx]?.size || tracker.size || 0),
+      }));
+
+      args.files.forEach((file) => {
+        fd.append("files", file);
+      });
+
+      fd.append("meta", JSON.stringify(meta));
+      fd.append("blockNumber", String(args.blockNumber));
+      fd.append("totalBlocks", String(args.totalBlocks));
+
+      const xhr = new XMLHttpRequest();
+      stagingXhrRef.current = xhr;
+      setStagingAbortEnabled(true);
+
+      xhr.open("POST", "/api/admin/official-papers/blocks");
+      xhr.withCredentials = true;
+
+      xhr.upload.onprogress = (event) => {
+        if (!event.lengthComputable) return;
+        setCurrentBlockPercent(Math.min(100, Math.round((event.loaded / event.total) * 100)));
+        setCurrentBlockLoadedBytes(Number(event.loaded || 0));
+      };
+
+      xhr.onerror = () => {
+        reject(new Error("Block upload failed"));
+      };
+
+      xhr.onabort = () => {
+        reject(new Error("Block upload cancelled"));
+      };
+
+      xhr.onload = () => {
+        try {
+          const raw = xhr.responseText || "";
+          const data = raw ? JSON.parse(raw) : {};
+
+          if (xhr.status < 200 || xhr.status >= 300 || !data?.ok) {
+            reject(new Error(data?.error || data?.message || "Block upload failed"));
+            return;
+          }
+
+          resolve(data as StageBlockResponse);
+        } catch {
+          reject(new Error("Invalid stage upload response"));
+        }
+      };
+
+      xhr.send(fd);
+    });
+  }
+
+  async function createLegacyZipJob() {
+    if (!legacyZipFile) {
       alert("Pehle ZIP file select karo.");
       return;
     }
@@ -424,11 +667,12 @@ export default function OfficialPapersPage() {
 
     setCreatingJob(true);
     resetMessages();
+    resetStageState(true);
     resetJobState();
 
     try {
       const fd = new FormData();
-      fd.append("file", zipFile);
+      fd.append("file", legacyZipFile);
       fd.append("conflictMode", conflictMode);
       fd.append("batchSize", String(batchSize));
 
@@ -441,7 +685,7 @@ export default function OfficialPapersPage() {
       const data = await safeReadJson(res);
 
       if (!res.ok || !data?.ok) {
-        const errMsg = data?.error || "Job creation failed";
+        const errMsg = data?.error || "ZIP job creation failed";
         setServerMessage(errMsg);
         setServerMessageType("error");
         alert(errMsg);
@@ -452,12 +696,12 @@ export default function OfficialPapersPage() {
       setActiveJob(job);
       setActiveJobId(job?._id || "");
       finalRefreshDoneRef.current = false;
-      setServerMessage("Bulk official papers job started successfully.");
+      setServerMessage("Legacy ZIP official papers job started successfully.");
       setServerMessageType("success");
 
-      setZipFile(null);
+      setLegacyZipFile(null);
       const input = document.getElementById(
-        "official-paper-upload-input"
+        "official-paper-zip-input"
       ) as HTMLInputElement | null;
       if (input) input.value = "";
     } catch (e: any) {
@@ -467,6 +711,170 @@ export default function OfficialPapersPage() {
       alert(errMsg);
     } finally {
       setCreatingJob(false);
+    }
+  }
+
+  async function stageDirectPdfBlocksAndCreateJob() {
+    if (!selectedPdfFiles.length) {
+      alert("Pehle PDF files select karo.");
+      return;
+    }
+
+    if (showTrash) {
+      alert("Trash view me upload allowed nahi hai.");
+      return;
+    }
+
+    const usableFiles = normalizeSelectedPdfFiles(selectedPdfFiles);
+    if (!usableFiles.length) {
+      alert("Valid PDF files nahi mili.");
+      return;
+    }
+
+    setCreatingJob(true);
+    setIsStaging(true);
+    resetMessages();
+    resetJobState();
+    setStagedItems([]);
+    setCompletedBlockBytes(0);
+    setCurrentBlockLoadedBytes(0);
+    setCurrentBlockPercent(0);
+    setCurrentBlockLabel("");
+    setCurrentBlockFileIds([]);
+
+    const initialTrackers = createInitialTrackers(usableFiles);
+    setSelectedTrackers(initialTrackers);
+
+    try {
+      const totalBlocks = Math.max(1, Math.ceil(usableFiles.length / Math.max(1, uploadBlockSize)));
+      setCurrentBlockTotal(totalBlocks);
+
+      const allStagedItems: DirectStagedItem[] = [];
+      let completedBytesAccumulator = 0;
+
+      for (let blockIndex = 0; blockIndex < totalBlocks; blockIndex++) {
+        const start = blockIndex * Math.max(1, uploadBlockSize);
+        const end = Math.min(usableFiles.length, start + Math.max(1, uploadBlockSize));
+
+        const blockFiles = usableFiles.slice(start, end);
+        const blockTrackers = initialTrackers.slice(start, end);
+
+        const blockNumber = blockIndex + 1;
+        const blockBytes = blockFiles.reduce((sum, file) => sum + Number(file.size || 0), 0);
+
+        setCurrentBlockNumber(blockNumber);
+        setCurrentBlockLoadedBytes(0);
+        setCurrentBlockPercent(0);
+        setCurrentBlockLabel(`Block ${blockNumber} / ${totalBlocks}`);
+        setCurrentBlockFileIds(blockTrackers.map((item) => item.clientFileId));
+
+        setTrackerStatusForBlock(
+          blockTrackers.map((item) => item.clientFileId),
+          "uploading"
+        );
+
+        const result = await uploadOneStageBlock({
+          files: blockFiles,
+          trackers: blockTrackers,
+          blockNumber,
+          totalBlocks,
+        });
+
+        const stagedBlockItems = Array.isArray(result?.items) ? result.items : [];
+        const stageFailures = Array.isArray(result?.failures) ? result.failures : [];
+
+        const stagedIds = stagedBlockItems
+          .map((item) => safeText(item.clientFileId))
+          .filter(Boolean);
+
+        if (stagedIds.length) {
+          setTrackerStatusForBlock(stagedIds, "staged");
+        }
+
+        if (stageFailures.length) {
+          markTrackerFailures(stageFailures);
+        }
+
+        const missingIds = blockTrackers
+          .map((item) => item.clientFileId)
+          .filter((id) => !stagedIds.includes(id) && !stageFailures.some((f) => safeText(f.clientFileId) === id));
+
+        if (missingIds.length) {
+          const reasonMap = Object.fromEntries(
+            missingIds.map((id) => [id, "Block response returned no staged result for this file"])
+          );
+          setTrackerStatusForBlock(missingIds, "failed", reasonMap);
+        }
+
+        allStagedItems.push(...stagedBlockItems);
+        setStagedItems([...allStagedItems]);
+
+        completedBytesAccumulator += blockBytes;
+        setCompletedBlockBytes(completedBytesAccumulator);
+        setCurrentBlockLoadedBytes(0);
+        setCurrentBlockPercent(100);
+      }
+
+      if (!allStagedItems.length) {
+        throw new Error("Koi bhi PDF stage nahi ho paayi");
+      }
+
+      const createJobRes = await fetch("/api/admin/official-papers/jobs", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          action: "create_direct_job",
+          sourceType: "direct_pdf_blocks",
+          conflictMode,
+          batchSize,
+          uploadLabel: `Direct PDF Upload (${allStagedItems.length} PDFs)`,
+          items: allStagedItems,
+        }),
+      });
+
+      const createJobData = await safeReadJson(createJobRes);
+
+      if (!createJobRes.ok || !createJobData?.ok) {
+        throw new Error(createJobData?.error || "Direct PDF job creation failed");
+      }
+
+      const job = createJobData?.job as BulkJobState;
+      setActiveJob(job);
+      setActiveJobId(job?._id || "");
+      finalRefreshDoneRef.current = false;
+
+      setServerMessage(
+        `Direct PDF upload job started. ${allStagedItems.length} PDFs staged successfully.`
+      );
+      setServerMessageType("success");
+
+      setSelectedPdfFiles([]);
+      const input = document.getElementById(
+        "official-paper-direct-input"
+      ) as HTMLInputElement | null;
+      if (input) input.value = "";
+    } catch (e: any) {
+      const errMsg = e?.message || "Direct PDF upload failed";
+      setServerMessage(errMsg);
+      setServerMessageType("error");
+      alert(errMsg);
+    } finally {
+      setCreatingJob(false);
+      setIsStaging(false);
+      setStagingAbortEnabled(false);
+      stagingXhrRef.current = null;
+    }
+  }
+
+  function cancelCurrentStaging() {
+    const ok = window.confirm("Current direct PDF staging cancel karna hai?");
+    if (!ok) return;
+
+    try {
+      stagingXhrRef.current?.abort();
+    } catch {
+      // ignore
     }
   }
 
@@ -680,16 +1088,16 @@ export default function OfficialPapersPage() {
   }
 
   useEffect(() => {
-    if (isJobActive && !longTaskActiveRef.current) {
+    if (isLongTaskBusy && !longTaskActiveRef.current) {
       notifyLongTaskStart();
       longTaskActiveRef.current = true;
     }
 
-    if ((!isJobActive || isFinalStatus(currentStatus)) && longTaskActiveRef.current) {
+    if ((!isLongTaskBusy || isFinalStatus(currentStatus)) && longTaskActiveRef.current) {
       notifyLongTaskEnd();
       longTaskActiveRef.current = false;
     }
-  }, [isJobActive, currentStatus]);
+  }, [isLongTaskBusy, currentStatus]);
 
   useEffect(() => {
     if (!activeJobId) return;
@@ -733,6 +1141,11 @@ export default function OfficialPapersPage() {
         notifyLongTaskEnd();
         longTaskActiveRef.current = false;
       }
+      try {
+        stagingXhrRef.current?.abort();
+      } catch {
+        // ignore
+      }
     };
   }, []);
 
@@ -775,8 +1188,8 @@ export default function OfficialPapersPage() {
 
               <h1 className="text-2xl font-extrabold mt-3">IGNOU Official Papers</h1>
               <p className="text-sm text-slate-600 mt-1">
-                Ab official papers upload job-based batch system par chalega. Large ZIP uploads me
-                progress, cancel, aur failed CSV export available hai.
+                Ab official papers ke liye direct PDF block upload primary flow hai.
+                Bade uploads ko safe blocks me stage karke job batches me process kiya jayega.
               </p>
             </div>
 
@@ -862,14 +1275,11 @@ export default function OfficialPapersPage() {
               <Database size={18} className="mt-0.5 shrink-0 text-blue-800" />
               <div>
                 <div className="text-sm font-extrabold text-blue-900">
-                  Official papers ab ZIP + job batches me process honge
+                  Total count ka meaning clear
                 </div>
                 <div className="text-sm text-blue-800 mt-2 leading-6">
-                  Single-request upload hata diya gaya hai.
-                  <br />
-                  Bade upload ke liye ZIP select karo, batch size choose karo, fir job start karo.
-                  <br />
-                  Job complete hone ke baad failed/skipped items CSV me export ki ja sakti hain.
+                  Is page par jo total count dikh raha hai, woh current upload ka count nahi hai.
+                  Ye database me present <b>live official paper files</b> ka total hai.
                 </div>
               </div>
             </div>
@@ -948,7 +1358,7 @@ export default function OfficialPapersPage() {
 
               <div className="mt-4 rounded-2xl border border-white/70 bg-white/70 p-4">
                 <div className="flex items-center justify-between gap-3 flex-wrap">
-                  <div className="text-sm font-extrabold">Progress</div>
+                  <div className="text-sm font-extrabold">Processing Progress</div>
                   <div className="text-sm font-bold">
                     {progress?.processedItems ?? 0} / {progress?.totalItems ?? 0} processed
                   </div>
@@ -1024,13 +1434,9 @@ export default function OfficialPapersPage() {
                         )}
                       </b>
                       <br />
-                      Source ZIP:{" "}
+                      Source:{" "}
                       <b className="break-all">
-                        {safeText(
-                          summary?.originalFileName ||
-                            activeJob?.config?.originalFileName ||
-                            "-"
-                        )}
+                        {safeText(summary?.sourceType || activeJob?.config?.sourceType || "-")}
                       </b>
                     </div>
                   </div>
@@ -1048,56 +1454,63 @@ export default function OfficialPapersPage() {
             </div>
           ) : null}
 
-          {isJobActive ? (
+          {isLongTaskBusy ? (
             <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900">
               <div className="flex items-center gap-2">
                 <LoaderCircle size={18} className="animate-spin" />
-                Batch job running. Inactivity auto-logout temporarily paused hai jab tak job finish nahi hoti.
+                {isStaging
+                  ? "Direct PDF blocks stage ho rahe hain. Progress safe blocks me chal raha hai."
+                  : "Batch job running. Inactivity auto-logout temporarily paused hai jab tak job finish nahi hoti."}
               </div>
             </div>
           ) : null}
 
-          <div className="mt-6 grid grid-cols-1 lg:grid-cols-[340px_minmax(0,1fr)] gap-6 items-start">
+          <div className="mt-6 grid grid-cols-1 lg:grid-cols-[380px_minmax(0,1fr)] gap-6 items-start">
             <div className="space-y-4">
               <div className="rounded-2xl border border-gray-200 bg-white p-4">
-                <div className="text-sm font-extrabold">Upload Official Papers ZIP</div>
+                <div className="flex items-center gap-2">
+                  <HardDriveUpload size={18} className="text-sky-700" />
+                  <div className="text-sm font-extrabold">Direct PDF Block Upload</div>
+                </div>
 
                 <label
-                  htmlFor="official-paper-upload-input"
-                  className={`mt-3 flex min-h-[120px] w-full cursor-pointer items-center justify-center rounded-2xl border-2 border-dashed border-sky-300 bg-sky-50 px-4 py-6 text-center transition ${
-                    showTrash || isJobActive ? "pointer-events-none opacity-60" : "hover:bg-sky-100"
+                  htmlFor="official-paper-direct-input"
+                  className={`mt-3 flex min-h-[140px] w-full cursor-pointer items-center justify-center rounded-2xl border-2 border-dashed border-sky-300 bg-sky-50 px-4 py-6 text-center transition ${
+                    showTrash || isLongTaskBusy ? "pointer-events-none opacity-60" : "hover:bg-sky-100"
                   }`}
                 >
                   <div>
                     <div className="mx-auto h-12 w-12 rounded-2xl bg-sky-600 text-white flex items-center justify-center">
-                      <Upload size={20} />
+                      <Files size={20} />
                     </div>
                     <div className="mt-3 text-sm font-extrabold text-sky-800">
-                      Click here to select ZIP
+                      Click here to select multiple PDFs
                     </div>
                     <div className="mt-1 text-xs text-sky-700">
-                      ZIP ke andar PDF filenames ideally same SKU honi chahiye
+                      3000+ PDFs ko safe blocks me upload kiya jayega
                     </div>
                   </div>
                 </label>
 
                 <input
-                  id="official-paper-upload-input"
+                  id="official-paper-direct-input"
                   type="file"
-                  accept=".zip,application/zip"
+                  accept=".pdf,application/pdf"
+                  multiple
                   onChange={(e) => {
-                    const selected = e.target.files?.[0] || null;
-                    setZipFile(selected);
+                    const list = normalizeSelectedPdfFiles(e.target.files);
+                    setSelectedPdfFiles(list);
+                    resetStageState(true);
                   }}
                   className="hidden"
-                  disabled={showTrash || isJobActive}
+                  disabled={showTrash || isLongTaskBusy}
                 />
 
                 <select
                   value={conflictMode}
                   onChange={(e) => setConflictMode(e.target.value as "ignore" | "replace")}
                   className="w-full mt-3 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none"
-                  disabled={showTrash || isJobActive}
+                  disabled={showTrash || isLongTaskBusy}
                 >
                   <option value="ignore">Duplicate mode: Ignore new</option>
                   <option value="replace">Duplicate mode: Replace old</option>
@@ -1107,45 +1520,245 @@ export default function OfficialPapersPage() {
                   value={String(batchSize)}
                   onChange={(e) => setBatchSize(Number(e.target.value))}
                   className="w-full mt-3 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none"
-                  disabled={showTrash || isJobActive}
+                  disabled={showTrash || isLongTaskBusy}
                 >
-                  <option value="25">25 files / batch</option>
-                  <option value="50">50 files / batch</option>
-                  <option value="100">100 files / batch</option>
-                  <option value="200">200 files / batch</option>
-                  <option value="300">300 files / batch</option>
-                  <option value="500">500 files / batch</option>
+                  <option value="25">25 files / processing batch</option>
+                  <option value="50">50 files / processing batch</option>
+                  <option value="100">100 files / processing batch</option>
+                  <option value="200">200 files / processing batch</option>
+                  <option value="300">300 files / processing batch</option>
+                  <option value="500">500 files / processing batch</option>
                 </select>
 
-                <div className="mt-3 text-xs text-slate-500 leading-5">
-                  Selected ZIP: <b>{zipFile?.name || "No ZIP selected"}</b>
+                <select
+                  value={String(uploadBlockSize)}
+                  onChange={(e) => setUploadBlockSize(Number(e.target.value))}
+                  className="w-full mt-3 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none"
+                  disabled={showTrash || isLongTaskBusy}
+                >
+                  <option value="10">10 PDFs / upload block</option>
+                  <option value="25">25 PDFs / upload block</option>
+                  <option value="50">50 PDFs / upload block</option>
+                  <option value="100">100 PDFs / upload block</option>
+                  <option value="200">200 PDFs / upload block</option>
+                </select>
+
+                <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs leading-6 text-slate-700">
+                  Selected PDFs: <b>{selectedPdfFiles.length}</b>
                   <br />
-                  Solved PDF already hone par official paper upload auto-ignore ho jayegi.
+                  Total Size: <b>{formatBytes(selectedPdfTotalBytes)}</b>
+                  <br />
+                  Upload Blocks: <b>{selectedPdfBlockCount}</b>
+                  <br />
+                  Solved PDF already hone par official paper upload auto-skip ho jayegi.
                 </div>
 
-                <button
-                  type="button"
-                  onClick={createJob}
-                  disabled={creatingJob || showTrash || isJobActive}
-                  className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-slate-900 hover:bg-slate-950 text-white transition font-extrabold disabled:opacity-60 shadow-sm"
-                >
-                  <Upload size={18} />
-                  {creatingJob ? "Starting..." : "Start ZIP Upload Job"}
-                </button>
+                <div className="mt-3 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={stageDirectPdfBlocksAndCreateJob}
+                    disabled={creatingJob || showTrash || isLongTaskBusy || !selectedPdfFiles.length}
+                    className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-slate-900 hover:bg-slate-950 text-white transition font-extrabold disabled:opacity-60 shadow-sm"
+                  >
+                    <Upload size={18} />
+                    {creatingJob ? "Starting..." : "Start Direct PDF Upload"}
+                  </button>
 
-                <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-800">
-                  Recommended ZIP structure:
+                  <button
+                    type="button"
+                    onClick={() => resetStageState(false)}
+                    disabled={isLongTaskBusy && !isStaging}
+                    className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-white hover:bg-gray-50 border border-gray-200 transition font-extrabold disabled:opacity-60 shadow-sm"
+                  >
+                    <X size={18} />
+                    Clear
+                  </button>
+                </div>
+
+                {isStaging && stagingAbortEnabled ? (
+                  <button
+                    type="button"
+                    onClick={cancelCurrentStaging}
+                    className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-rose-600 hover:bg-rose-700 text-white transition font-extrabold shadow-sm"
+                  >
+                    <PauseCircle size={18} />
+                    Cancel Current Staging
+                  </button>
+                ) : null}
+
+                <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs leading-5 text-emerald-800">
+                  Recommended filename pattern:
                   <br />
                   <b>BHIC131ENG202526.pdf</b>
                   <br />
                   <b>BEGC101ENG202526.pdf</b>
-                  <br />
-                  Nested folders bhi allowed hain, lekin final filename SKU-based hona chahiye.
                 </div>
               </div>
 
-              <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4 text-xs text-blue-900 leading-6">
-                <b>Job-based flow:</b> ZIP upload → job create → batch processing → progress tracking → failed CSV download.
+              <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
+                <div className="flex items-center gap-2 text-sm font-extrabold text-blue-900">
+                  <Layers3 size={16} />
+                  Block Upload Progress
+                </div>
+
+                <div className="mt-3 h-4 w-full overflow-hidden rounded-full bg-blue-100">
+                  <div
+                    className="h-full rounded-full bg-blue-700 transition-all"
+                    style={{ width: `${totalStagePercent}%` }}
+                  />
+                </div>
+
+                <div className="mt-2 text-xs font-semibold text-blue-900">
+                  Total staging progress: {totalStagePercent}% ({stagedCount} staged / {selectedPdfFiles.length} selected)
+                </div>
+
+                <div className="mt-4 grid grid-cols-2 gap-3">
+                  <div className="rounded-xl border border-blue-200 bg-white p-3">
+                    <div className="text-[11px] uppercase font-extrabold text-blue-700">
+                      Current Block
+                    </div>
+                    <div className="mt-1 text-sm font-extrabold text-slate-900">
+                      {currentBlockNumber || 0} / {currentBlockTotal || 0}
+                    </div>
+                    <div className="mt-1 text-xs text-slate-600">{currentBlockLabel || "—"}</div>
+                  </div>
+
+                  <div className="rounded-xl border border-blue-200 bg-white p-3">
+                    <div className="text-[11px] uppercase font-extrabold text-blue-700">
+                      Current Block %
+                    </div>
+                    <div className="mt-1 text-sm font-extrabold text-slate-900">
+                      {currentBlockPercent}%
+                    </div>
+                    <div className="mt-1 text-xs text-slate-600">
+                      {formatBytes(completedBlockBytes + currentBlockLoadedBytes)} / {formatBytes(selectedPdfTotalBytes)}
+                    </div>
+                  </div>
+
+                  <div className="rounded-xl border border-blue-200 bg-white p-3">
+                    <div className="text-[11px] uppercase font-extrabold text-blue-700">
+                      Staged Files
+                    </div>
+                    <div className="mt-1 text-sm font-extrabold text-slate-900">{stagedCount}</div>
+                  </div>
+
+                  <div className="rounded-xl border border-blue-200 bg-white p-3">
+                    <div className="text-[11px] uppercase font-extrabold text-blue-700">
+                      Failed Stage
+                    </div>
+                    <div className="mt-1 text-sm font-extrabold text-slate-900">{failedStageCount}</div>
+                  </div>
+                </div>
+
+                <div className="mt-4 rounded-xl border border-blue-200 bg-white p-3">
+                  <div className="text-xs font-extrabold text-blue-900 mb-2">
+                    Current Block PDFs
+                  </div>
+
+                  {currentBlockTrackers.length === 0 ? (
+                    <div className="text-xs text-slate-500">No active block yet.</div>
+                  ) : (
+                    <div className="space-y-2 max-h-56 overflow-auto">
+                      {currentBlockTrackers.map((item) => (
+                        <div
+                          key={item.clientFileId}
+                          className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 px-3 py-2"
+                        >
+                          <div className="min-w-0">
+                            <div className="text-xs font-bold text-slate-900 break-all">
+                              {item.name}
+                            </div>
+                            <div className="text-[11px] text-slate-500">
+                              {formatBytes(item.size)}
+                            </div>
+                          </div>
+
+                          <span
+                            className={`inline-flex rounded-full px-2 py-1 text-[11px] font-extrabold ${
+                              item.status === "staged"
+                                ? "bg-emerald-100 text-emerald-800"
+                                : item.status === "failed"
+                                ? "bg-rose-100 text-rose-800"
+                                : item.status === "uploading"
+                                ? "bg-blue-100 text-blue-800"
+                                : "bg-slate-100 text-slate-700"
+                            }`}
+                          >
+                            {item.status}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900 leading-6">
+                <b>Direct flow:</b> PDFs select karo → safe upload blocks me stage karo → job create hoga → batch processing chalegi → failed CSV download available rahega.
+              </div>
+
+              <div className="rounded-2xl border border-gray-200 bg-white p-4">
+                <button
+                  type="button"
+                  onClick={() => setShowLegacyZip((p) => !p)}
+                  className="w-full flex items-center justify-between gap-3 text-left"
+                >
+                  <div>
+                    <div className="text-sm font-extrabold">Legacy ZIP Fallback</div>
+                    <div className="text-xs text-slate-500 mt-1">
+                      Old system ko break nahi kiya gaya. Need ho to ZIP fallback use kar sakte ho.
+                    </div>
+                  </div>
+                  <span className="text-xs font-extrabold text-slate-600">
+                    {showLegacyZip ? "Hide" : "Show"}
+                  </span>
+                </button>
+
+                {showLegacyZip ? (
+                  <div className="mt-4 border-t border-gray-200 pt-4">
+                    <label
+                      htmlFor="official-paper-zip-input"
+                      className={`flex min-h-[110px] w-full cursor-pointer items-center justify-center rounded-2xl border-2 border-dashed border-slate-300 bg-slate-50 px-4 py-6 text-center transition ${
+                        showTrash || isLongTaskBusy ? "pointer-events-none opacity-60" : "hover:bg-slate-100"
+                      }`}
+                    >
+                      <div>
+                        <div className="mx-auto h-10 w-10 rounded-2xl bg-slate-800 text-white flex items-center justify-center">
+                          <Upload size={18} />
+                        </div>
+                        <div className="mt-3 text-sm font-extrabold text-slate-800">
+                          Click here to select ZIP
+                        </div>
+                        <div className="mt-1 text-xs text-slate-600">
+                          Fallback only. Preferred flow direct PDF blocks hai.
+                        </div>
+                      </div>
+                    </label>
+
+                    <input
+                      id="official-paper-zip-input"
+                      type="file"
+                      accept=".zip,application/zip"
+                      onChange={(e) => setLegacyZipFile(e.target.files?.[0] || null)}
+                      className="hidden"
+                      disabled={showTrash || isLongTaskBusy}
+                    />
+
+                    <div className="mt-3 text-xs text-slate-500 leading-5">
+                      Selected ZIP: <b>{legacyZipFile?.name || "No ZIP selected"}</b>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={createLegacyZipJob}
+                      disabled={creatingJob || showTrash || isLongTaskBusy || !legacyZipFile}
+                      className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-slate-900 hover:bg-slate-950 text-white transition font-extrabold disabled:opacity-60 shadow-sm"
+                    >
+                      <Upload size={18} />
+                      {creatingJob ? "Starting..." : "Start Legacy ZIP Upload"}
+                    </button>
+                  </div>
+                ) : null}
               </div>
             </div>
 
@@ -1290,7 +1903,7 @@ export default function OfficialPapersPage() {
                   </div>
 
                   <div className="text-xs font-bold text-slate-600 bg-white px-3 py-2 rounded-lg border border-slate-200">
-                    Total: {serverTotal}
+                    {showTrash ? "Total Trashed Official Papers" : "Total Live Official Papers"}: {serverTotal}
                   </div>
                 </div>
 
@@ -1601,7 +2214,7 @@ export default function OfficialPapersPage() {
               ) : null}
 
               <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900 leading-6">
-                <b>Current status:</b> Ab page job complete / failed / cancelled hote hi stats aur file list automatically refresh kar dega.
+                <b>Current status:</b> Direct block staging complete hote hi batch job auto-start hota hai, aur job finish / fail / cancel hone par stats aur file list automatically refresh ho jati hai.
               </div>
             </div>
           </div>

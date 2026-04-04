@@ -12,10 +12,12 @@ function safeStr(x: any) {
 }
 
 function safeFileName(input: string) {
-  return safeStr(input)
-    .replace(/[^a-zA-Z0-9-_]+/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "") || "bulk-job-failures";
+  return (
+    safeStr(input)
+      .replace(/[^a-zA-Z0-9-_]+/g, "-")
+      .replace(/-+/g, "-")
+      .replace(/^-|-$/g, "") || "bulk-job-failures"
+  );
 }
 
 async function assertAdminWriteAccess() {
@@ -24,7 +26,10 @@ async function assertAdminWriteAccess() {
   if (!user) {
     return {
       ok: false as const,
-      res: NextResponse.json({ ok: false, error: "Not authenticated" }, { status: 401 }),
+      res: NextResponse.json(
+        { ok: false, error: "Not authenticated" },
+        { status: 401 }
+      ),
     };
   }
 
@@ -38,7 +43,9 @@ async function assertAdminWriteAccess() {
   return { ok: true as const, user };
 }
 
-type ParamsMaybePromise = { params: Promise<{ jobId: string }> | { jobId: string } };
+type ParamsMaybePromise = {
+  params: Promise<{ jobId: string }> | { jobId: string };
+};
 
 async function getJobId(ctx: ParamsMaybePromise) {
   const p: any = await (ctx as any).params;
@@ -51,12 +58,18 @@ export async function GET(_req: NextRequest, ctx: ParamsMaybePromise) {
 
   const jobId = await getJobId(ctx);
   if (!jobId) {
-    return NextResponse.json({ ok: false, error: "jobId required" }, { status: 400 });
+    return NextResponse.json(
+      { ok: false, error: "jobId required" },
+      { status: 400 }
+    );
   }
 
   const job = await getBulkUploadJob(jobId, safeStr(guard.user.email));
   if (!job) {
-    return NextResponse.json({ ok: false, error: "Job not found" }, { status: 404 });
+    return NextResponse.json(
+      { ok: false, error: "Job not found" },
+      { status: 404 }
+    );
   }
 
   const csv = buildBulkJobFailuresCsv(job);

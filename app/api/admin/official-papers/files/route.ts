@@ -12,7 +12,10 @@ import {
   detectPdfPagesFromS3Key,
   findProductByExactSku,
 } from "@/lib/pdfVault";
-import { syncProductAvailabilityBySku } from "@/lib/productAvailability";
+import {
+  getDerivedAvailabilitySnapshotBySku,
+  syncProductAvailabilityBySku,
+} from "@/lib/productAvailability";
 
 export const runtime = "nodejs";
 
@@ -38,7 +41,7 @@ function normalizeSkuLike(input: string) {
 }
 
 function escapeRegex(input: string) {
-  return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return safeStr(input).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function parsePositiveInt(input: string, fallback: number) {
@@ -91,14 +94,14 @@ async function assertAdminWriteAccess() {
   if (!user) {
     return {
       ok: false as const,
-      res: NextResponse.json({ error: "Not authenticated" }, { status: 401 }),
+      res: NextResponse.json({ ok: false, error: "Not authenticated" }, { status: 401 }),
     };
   }
 
   if (!hasPermission(user, "products:write")) {
     return {
       ok: false as const,
-      res: NextResponse.json({ error: "Forbidden" }, { status: 403 }),
+      res: NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 }),
     };
   }
 
@@ -303,7 +306,7 @@ export async function POST(req: NextRequest) {
   try {
     body = await req.json();
   } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
+    return NextResponse.json({ ok: false, error: "Invalid JSON body" }, { status: 400 });
   }
 
   await dbConnect();
@@ -312,16 +315,16 @@ export async function POST(req: NextRequest) {
   const fileId = safeStr(body?.fileId);
 
   if (!action) {
-    return NextResponse.json({ error: "action required" }, { status: 400 });
+    return NextResponse.json({ ok: false, error: "action required" }, { status: 400 });
   }
 
   if (!fileId) {
-    return NextResponse.json({ error: "fileId required" }, { status: 400 });
+    return NextResponse.json({ ok: false, error: "fileId required" }, { status: 400 });
   }
 
   const file: any = await OfficialPaper.findById(fileId);
   if (!file) {
-    return NextResponse.json({ error: "File not found" }, { status: 404 });
+    return NextResponse.json({ ok: false, error: "File not found" }, { status: 404 });
   }
 
   if (action === "restore") {
@@ -342,18 +345,18 @@ export async function POST(req: NextRequest) {
 
     if (existingLive) {
       return NextResponse.json(
-        { error: "Another active official paper already exists for this SKU" },
+        { ok: false, error: "Another active official paper already exists for this SKU" },
         { status: 409 }
       );
     }
 
-    const snapshot: any = await import("@/lib/productAvailability").then((m) =>
-      m.getDerivedAvailabilitySnapshotBySku(safeStr(file.skuNormalized))
+    const snapshot = await getDerivedAvailabilitySnapshotBySku(
+      safeStr(file.skuNormalized)
     );
 
     if (snapshot?.hasSolvedPdf) {
       return NextResponse.json(
-        { error: "Solved PDF exists, official paper cannot be restored" },
+        { ok: false, error: "Solved PDF exists, official paper cannot be restored" },
         { status: 400 }
       );
     }
@@ -382,7 +385,7 @@ export async function POST(req: NextRequest) {
   if (action === "purge") {
     if (!file.deletedAt) {
       return NextResponse.json(
-        { error: "Only trashed files can be permanently deleted" },
+        { ok: false, error: "Only trashed files can be permanently deleted" },
         { status: 400 }
       );
     }
@@ -413,7 +416,7 @@ export async function POST(req: NextRequest) {
   }
 
   if (file.deletedAt) {
-    return NextResponse.json({ error: "File not found" }, { status: 404 });
+    return NextResponse.json({ ok: false, error: "File not found" }, { status: 404 });
   }
 
   if (action === "open") {
@@ -435,14 +438,14 @@ export async function POST(req: NextRequest) {
 
     if (!expected) {
       return NextResponse.json(
-        { error: "ADMIN_FILE_DOWNLOAD_PASSWORD missing in env" },
+        { ok: false, error: "ADMIN_FILE_DOWNLOAD_PASSWORD missing in env" },
         { status: 500 }
       );
     }
 
     if (!password || password !== expected) {
       return NextResponse.json(
-        { error: "Invalid download password" },
+        { ok: false, error: "Invalid download password" },
         { status: 403 }
       );
     }
@@ -494,7 +497,7 @@ export async function POST(req: NextRequest) {
 
     if (!nextSkuNormalized) {
       return NextResponse.json(
-        { error: "Valid SKU required for metadata update" },
+        { ok: false, error: "Valid SKU required for metadata update" },
         { status: 400 }
       );
     }
@@ -510,7 +513,7 @@ export async function POST(req: NextRequest) {
 
       if (existingLive) {
         return NextResponse.json(
-          { error: "Another active official paper already exists for this SKU" },
+          { ok: false, error: "Another active official paper already exists for this SKU" },
           { status: 409 }
         );
       }
@@ -548,7 +551,7 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  return NextResponse.json({ error: "Unsupported action" }, { status: 400 });
+  return NextResponse.json({ ok: false, error: "Unsupported action" }, { status: 400 });
 }
 
 export async function DELETE(req: NextRequest) {
@@ -561,12 +564,12 @@ export async function DELETE(req: NextRequest) {
   const fileId = safeStr(url.searchParams.get("fileId"));
 
   if (!fileId) {
-    return NextResponse.json({ error: "fileId required" }, { status: 400 });
+    return NextResponse.json({ ok: false, error: "fileId required" }, { status: 400 });
   }
 
   const file: any = await OfficialPaper.findById(fileId);
   if (!file || file.deletedAt) {
-    return NextResponse.json({ error: "File not found" }, { status: 404 });
+    return NextResponse.json({ ok: false, error: "File not found" }, { status: 404 });
   }
 
   file.deletedAt = new Date();
