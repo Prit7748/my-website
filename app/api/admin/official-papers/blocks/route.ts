@@ -2,9 +2,14 @@ import crypto from "crypto";
 import { NextResponse } from "next/server";
 
 import { getAuthUser, hasPermission } from "@/lib/auth";
-import { uploadPdfBufferToS3, getPdfBufferFromS3 } from "@/lib/pdfVault";
+import { uploadPdfBufferToS3 } from "@/lib/pdfVault";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const maxDuration = 300;
+
+const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024; // 20 MB
+const UPLOAD_TIMEOUT_MS = 120000; // 120 sec
 
 function safeStr(x: any) {
   return String(x ?? "").trim();
@@ -71,7 +76,7 @@ function buildBlockId(input?: string) {
 
 function isProbablyPdfBuffer(buf: Buffer) {
   if (!buf || !buf.length) return false;
-  const header = buf.subarray(0, Math.min(buf.length, 8)).toString("latin1");
+  const header = buf.subarray(0, Math.min(buf.length, 16)).toString("latin1");
   return header.includes("%PDF");
 }
 
@@ -91,6 +96,26 @@ function isFileLike(value: any): value is FileLike {
   );
 }
 
+async function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string
+): Promise<T> {
+  let timeoutId: NodeJS.Timeout | null = null;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
 async function stagePdfViaExistingVaultS3(args: {
   originalName: string;
   pdfBuffer: Buffer;
@@ -107,30 +132,37 @@ async function stagePdfViaExistingVaultS3(args: {
     throw new Error("Empty PDF file");
   }
 
+  if (args.pdfBuffer.length > MAX_FILE_SIZE_BYTES) {
+    throw new Error(
+      `File exceeds 20MB limit. Current size: ${Math.round(
+        args.pdfBuffer.length / (1024 * 1024)
+      )}MB`
+    );
+  }
+
   if (!isProbablyPdfBuffer(args.pdfBuffer)) {
     throw new Error("Uploaded file is not a valid PDF binary");
   }
 
   const folderPath = `_staging/official-papers/direct-blocks/${safeStr(args.blockId)}`;
 
-  const uploaded = await uploadPdfBufferToS3({
-    folderPath,
-    originalName,
-    bytes: args.pdfBuffer,
-    mimeType: "application/pdf",
-  });
-
-  const verifyBytes = await getPdfBufferFromS3(safeStr(uploaded.key));
-  if (!verifyBytes?.length) {
-    throw new Error("Uploaded staged PDF not found or empty after upload");
-  }
+  const uploaded = await withTimeout(
+    uploadPdfBufferToS3({
+      folderPath,
+      originalName,
+      bytes: args.pdfBuffer,
+      mimeType: "application/pdf",
+    }),
+    UPLOAD_TIMEOUT_MS,
+    "S3 upload"
+  );
 
   return {
-    bucket: safeStr(uploaded.bucket),
-    key: safeStr(uploaded.key),
+    bucket: safeStr((uploaded as any)?.bucket),
+    key: safeStr((uploaded as any)?.key),
     originalName,
     fileName: originalName,
-    sizeBytes: verifyBytes.length,
+    sizeBytes: args.pdfBuffer.length,
   };
 }
 
@@ -139,6 +171,7 @@ export async function POST(req: Request) {
   if (!guard.ok) return guard.res;
 
   const contentType = safeStr(req.headers.get("content-type")).toLowerCase();
+  const contentLength = safeNum(req.headers.get("content-length"), 0);
   const userEmail = safeStr(guard.user.email);
 
   if (!contentType.includes("multipart/form-data")) {
@@ -238,6 +271,26 @@ export async function POST(req: Request) {
         continue;
       }
 
+      if (safeNum(file.size, 0) <= 0) {
+        failures.push({
+          clientFileId,
+          fileName,
+          reason: "Empty PDF file",
+        });
+        continue;
+      }
+
+      if (safeNum(file.size, 0) > MAX_FILE_SIZE_BYTES) {
+        failures.push({
+          clientFileId,
+          fileName,
+          reason: `File exceeds 20MB limit. Current size: ${Math.round(
+            safeNum(file.size, 0) / (1024 * 1024)
+          )}MB`,
+        });
+        continue;
+      }
+
       try {
         const pdfBuffer = Buffer.from(await file.arrayBuffer());
 
@@ -247,6 +300,10 @@ export async function POST(req: Request) {
           blockId,
           rowNumber: i + 1,
         });
+
+        if (!safeStr(staged.key)) {
+          throw new Error("S3 upload completed but key was empty");
+        }
 
         items.push({
           clientFileId,
@@ -266,6 +323,33 @@ export async function POST(req: Request) {
       }
     }
 
+    if (!items.length) {
+      const firstFailureReason =
+        safeStr(failures[0]?.reason) ||
+        "All PDFs failed inside official papers block route";
+
+      return NextResponse.json(
+        {
+          ok: false,
+          error: firstFailureReason,
+          message: `Official papers block ${blockNumber}/${totalBlocks} failed. Success 0, Failed ${failures.length}.`,
+          action: "multipart-staged-via-existing-s3-helper",
+          blockId,
+          blockNumber,
+          totalBlocks,
+          items: [],
+          failures,
+          diagnostics: {
+            receivedFiles: files.length,
+            contentLength,
+            maxFileSizeBytes: MAX_FILE_SIZE_BYTES,
+            routeMode: "server-proxy-upload-no-readback-verify",
+          },
+        },
+        { status: 422 }
+      );
+    }
+
     return NextResponse.json(
       {
         ok: true,
@@ -276,6 +360,12 @@ export async function POST(req: Request) {
         totalBlocks,
         items,
         failures,
+        diagnostics: {
+          receivedFiles: files.length,
+          contentLength,
+          maxFileSizeBytes: MAX_FILE_SIZE_BYTES,
+          routeMode: "server-proxy-upload-no-readback-verify",
+        },
       },
       { status: 200 }
     );
@@ -284,6 +374,8 @@ export async function POST(req: Request) {
       {
         ok: false,
         error: safeStr(error?.message || "Failed to handle block upload"),
+        probableRootCause:
+          "Request parsing failed before or during formData/file buffer handling. On deployed serverless environments this often means request body/file size pressure.",
       },
       { status: 500 }
     );
