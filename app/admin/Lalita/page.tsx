@@ -30,6 +30,8 @@ import {
   LoaderCircle,
   BarChart3,
   Database,
+  Layers3,
+  Files,
 } from "lucide-react";
 
 type BootstrapResponse = {
@@ -153,6 +155,31 @@ type BulkJobState = {
   updatedAt?: string | null;
 };
 
+type CurrentBatchFileStatus =
+  | "queued"
+  | "uploading"
+  | "processed"
+  | "failed"
+  | "skipped";
+
+type CurrentBatchFileTracker = {
+  clientFileId: string;
+  itemIndex: number;
+  rowNumber: number;
+  name: string;
+  size: number;
+  status: CurrentBatchFileStatus;
+  reason?: string;
+};
+
+type ProcessBatchMeta = {
+  batchNumber: number;
+  fromIndex: number;
+  toIndex: number;
+  expectedCount: number;
+  totalBytes: number;
+};
+
 const ACTIVE_JOB_STORAGE_KEY = "isp_pdf_vault_active_job_id";
 
 function formatBytes(bytes: number) {
@@ -221,6 +248,28 @@ function statusTone(status: string) {
   return "border-blue-200 bg-blue-50 text-blue-800";
 }
 
+function buildClientFileId(file: File, index: number) {
+  return `${safeText(file.name)}__${Number(file.size || 0)}__${Number(
+    file.lastModified || 0
+  )}__${index}`;
+}
+
+function batchFileTone(status: CurrentBatchFileStatus) {
+  if (status === "processed") {
+    return "bg-emerald-100 text-emerald-800 border-emerald-200";
+  }
+  if (status === "failed") {
+    return "bg-rose-100 text-rose-800 border-rose-200";
+  }
+  if (status === "skipped") {
+    return "bg-amber-100 text-amber-800 border-amber-200";
+  }
+  if (status === "uploading") {
+    return "bg-blue-100 text-blue-800 border-blue-200";
+  }
+  return "bg-slate-100 text-slate-700 border-slate-200";
+}
+
 export default function HiddenPdfVaultPage() {
   const [bootLoading, setBootLoading] = useState(true);
   const [accessGranted, setAccessGranted] = useState(false);
@@ -276,9 +325,19 @@ export default function HiddenPdfVaultPage() {
   const [cutFileName, setCutFileName] = useState("");
   const [fileActionLoadingId, setFileActionLoadingId] = useState("");
 
+  const [currentBatchTrackers, setCurrentBatchTrackers] = useState<CurrentBatchFileTracker[]>([]);
+  const [currentBatchMeta, setCurrentBatchMeta] = useState<ProcessBatchMeta | null>(null);
+  const [currentBatchUploadPercent, setCurrentBatchUploadPercent] = useState(0);
+  const [currentBatchLoadedBytes, setCurrentBatchLoadedBytes] = useState(0);
+  const [currentBatchTotalBytes, setCurrentBatchTotalBytes] = useState(0);
+  const [processedItemStatusMap, setProcessedItemStatusMap] = useState<
+    Record<number, { status: "processed" | "failed" | "skipped"; reason?: string }>
+  >({});
+
   const processInFlightRef = useRef(false);
   const longTaskActiveRef = useRef(false);
   const finalRefreshDoneRef = useRef(false);
+  const currentBatchXhrRef = useRef<XMLHttpRequest | null>(null);
 
   const titlePath = useMemo(() => breadcrumbs.map((x) => x.name).join(" / "), [breadcrumbs]);
   const searchActive = globalSearch.trim().length > 0;
@@ -296,12 +355,53 @@ export default function HiddenPdfVaultPage() {
     [selectedFiles]
   );
 
+  const selectedFilesCount = selectedFiles.length;
+
+  const processedSelectionSummary = useMemo(() => {
+    const values = Object.values(processedItemStatusMap);
+    let processed = 0;
+    let success = 0;
+    let failed = 0;
+    let skipped = 0;
+
+    for (const item of values) {
+      processed += 1;
+      if (item.status === "processed") success += 1;
+      if (item.status === "failed") failed += 1;
+      if (item.status === "skipped") skipped += 1;
+    }
+
+    return {
+      processed,
+      success,
+      failed,
+      skipped,
+      pending: Math.max(0, selectedFilesCount - processed),
+    };
+  }, [processedItemStatusMap, selectedFilesCount]);
+
   const fromItem = serverTotal === 0 ? 0 : (filePage - 1) * filePageSize + 1;
   const toItem = Math.min(filePage * filePageSize, serverTotal);
 
   function resetMessages() {
     setServerMessage("");
     setServerMessageType("info");
+  }
+
+  function resetBatchUiProgress(clearSelected = false) {
+    setCurrentBatchTrackers([]);
+    setCurrentBatchMeta(null);
+    setCurrentBatchUploadPercent(0);
+    setCurrentBatchLoadedBytes(0);
+    setCurrentBatchTotalBytes(0);
+    setProcessedItemStatusMap({});
+    currentBatchXhrRef.current = null;
+
+    if (clearSelected) {
+      setSelectedFiles([]);
+      const input = document.getElementById("vault-upload-input") as HTMLInputElement | null;
+      if (input) input.value = "";
+    }
   }
 
   function safePersistActiveJobId(jobId: string) {
@@ -324,6 +424,20 @@ export default function HiddenPdfVaultPage() {
       return {
         ok: false,
         error: text.slice(0, 400) || "Invalid server response",
+      };
+    }
+  }
+
+  function parseTextJson(text: string) {
+    const raw = String(text || "").trim();
+    if (!raw) return { ok: false, error: "Server returned empty response" };
+
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return {
+        ok: false,
+        error: raw.slice(0, 400) || "Invalid server response",
       };
     }
   }
@@ -538,6 +652,7 @@ export default function HiddenPdfVaultPage() {
     setActiveJob(null);
     setActiveJobId("");
     finalRefreshDoneRef.current = false;
+    resetBatchUiProgress(false);
 
     try {
       const payload = {
@@ -587,6 +702,84 @@ export default function HiddenPdfVaultPage() {
     }
   }
 
+  function buildBatchTrackers(fromIndex: number, batchFiles: File[]) {
+    return batchFiles.map((file, idx) => ({
+      clientFileId: buildClientFileId(file, fromIndex + idx),
+      itemIndex: fromIndex + idx,
+      rowNumber: fromIndex + idx + 1,
+      name: file.name,
+      size: Number(file.size || 0),
+      status: "uploading" as CurrentBatchFileStatus,
+    }));
+  }
+
+  function applyBatchResultToUi(
+    updatedJob: BulkJobState,
+    meta: ProcessBatchMeta,
+    batchFiles: File[]
+  ) {
+    const failures = Array.isArray(updatedJob?.recentFailures)
+      ? updatedJob.recentFailures
+      : [];
+
+    const failureMap = new Map<
+      number,
+      { status: "failed" | "skipped"; reason: string }
+    >();
+
+    for (const item of failures) {
+      const itemIndex = Number(item?.itemIndex);
+      const batchNumber = Number(item?.batchNumber || 0);
+
+      if (!Number.isFinite(itemIndex)) continue;
+      if (itemIndex < meta.fromIndex || itemIndex > meta.toIndex) continue;
+      if (batchNumber && batchNumber !== meta.batchNumber) continue;
+
+      const status =
+        safeText(item?.status).toLowerCase() === "skipped" ? "skipped" : "failed";
+
+      failureMap.set(itemIndex, {
+        status,
+        reason: safeText(item?.reason || "Batch failed"),
+      });
+    }
+
+    const nextTrackers: CurrentBatchFileTracker[] = batchFiles.map((file, idx) => {
+      const itemIndex = meta.fromIndex + idx;
+      const hit = failureMap.get(itemIndex);
+
+      return {
+        clientFileId: buildClientFileId(file, itemIndex),
+        itemIndex,
+        rowNumber: itemIndex + 1,
+        name: file.name,
+        size: Number(file.size || 0),
+        status: hit ? hit.status : "processed",
+        reason: hit?.reason || "",
+      };
+    });
+
+    setCurrentBatchTrackers(nextTrackers);
+
+    setProcessedItemStatusMap((prev) => {
+      const next = { ...prev };
+
+      for (const tracker of nextTrackers) {
+        next[tracker.itemIndex] = {
+          status:
+            tracker.status === "failed"
+              ? "failed"
+              : tracker.status === "skipped"
+              ? "skipped"
+              : "processed",
+          reason: tracker.reason || "",
+        };
+      }
+
+      return next;
+    });
+  }
+
   async function processNextBatch(job: BulkJobState) {
     const jobId = safeText(job?._id);
     if (!jobId || processInFlightRef.current) return;
@@ -608,31 +801,99 @@ export default function HiddenPdfVaultPage() {
       return;
     }
 
-    processInFlightRef.current = true;
-    try {
-      const form = new FormData();
-      form.append("jobId", jobId);
-      for (const file of nextBatchFiles) {
-        form.append("files", file);
-      }
+    const batchNumber = Math.floor(processedItems / currentBatchSize) + 1;
+    const fromIndex = processedItems;
+    const toIndex = processedItems + nextBatchExpected - 1;
+    const totalBytes = nextBatchFiles.reduce(
+      (sum, file) => sum + Number(file.size || 0),
+      0
+    );
 
-      const res = await fetch("/api/admin/pdf-vault/jobs/process", {
-        method: "POST",
-        credentials: "include",
-        body: form,
+    const meta: ProcessBatchMeta = {
+      batchNumber,
+      fromIndex,
+      toIndex,
+      expectedCount: nextBatchExpected,
+      totalBytes,
+    };
+
+    setCurrentBatchMeta(meta);
+    setCurrentBatchTrackers(buildBatchTrackers(fromIndex, nextBatchFiles));
+    setCurrentBatchUploadPercent(0);
+    setCurrentBatchLoadedBytes(0);
+    setCurrentBatchTotalBytes(totalBytes);
+
+    processInFlightRef.current = true;
+
+    try {
+      const updatedJob = await new Promise<BulkJobState>((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        currentBatchXhrRef.current = xhr;
+
+        const form = new FormData();
+        form.append("jobId", jobId);
+        for (const file of nextBatchFiles) {
+          form.append("files", file);
+        }
+
+        xhr.open("POST", "/api/admin/pdf-vault/jobs/process", true);
+        xhr.withCredentials = true;
+
+        xhr.upload.onprogress = (event) => {
+          const loaded = event.lengthComputable ? Number(event.loaded || 0) : 0;
+          const safeLoaded = Math.min(totalBytes, loaded);
+          setCurrentBatchLoadedBytes(safeLoaded);
+
+          const percent =
+            totalBytes > 0 ? Math.min(100, Math.round((safeLoaded / totalBytes) * 100)) : 0;
+
+          setCurrentBatchUploadPercent(percent);
+        };
+
+        xhr.onerror = () => {
+          reject(new Error("Batch upload request failed"));
+        };
+
+        xhr.onabort = () => {
+          reject(new Error("Batch upload cancelled"));
+        };
+
+        xhr.onload = () => {
+          const data = parseTextJson(xhr.responseText || "");
+          if (xhr.status >= 200 && xhr.status < 300 && data?.ok && data?.job) {
+            resolve(data.job as BulkJobState);
+            return;
+          }
+
+          reject(
+            new Error(
+              safeText(data?.error || data?.message || `HTTP ${xhr.status || 0}`) ||
+                "Batch processing failed"
+            )
+          );
+        };
+
+        xhr.send(form);
       });
 
-      const data = await safeReadJson(res);
-
-      if (!res.ok || !data?.ok) {
-        throw new Error(data?.error || "Batch processing failed");
-      }
-
-      if (data?.job) {
-        setActiveJob(data.job as BulkJobState);
-      }
+      setCurrentBatchUploadPercent(100);
+      setCurrentBatchLoadedBytes(totalBytes);
+      setActiveJob(updatedJob);
+      applyBatchResultToUi(updatedJob, meta, nextBatchFiles);
+    } catch (error: any) {
+      const reason = safeText(error?.message || "Batch processing failed");
+      setCurrentBatchTrackers((prev) =>
+        prev.map((item) => ({
+          ...item,
+          status: "failed",
+          reason,
+        }))
+      );
+      setServerMessage(reason);
+      setServerMessageType("error");
     } finally {
       processInFlightRef.current = false;
+      currentBatchXhrRef.current = null;
     }
   }
 
@@ -644,6 +905,12 @@ export default function HiddenPdfVaultPage() {
 
     setIsCancelling(true);
     try {
+      try {
+        currentBatchXhrRef.current?.abort();
+      } catch {
+        // ignore
+      }
+
       const res = await fetch(`/api/admin/bulk-jobs/${encodeURIComponent(activeJobId)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -1079,7 +1346,7 @@ export default function HiddenPdfVaultPage() {
 
     const timer = setTimeout(() => {
       void processNextBatch(activeJob);
-    }, 350);
+    }, 120);
 
     return () => clearTimeout(timer);
   }, [activeJobId, activeJob, currentStatus, selectedFiles, batchSize]);
@@ -1096,9 +1363,7 @@ export default function HiddenPdfVaultPage() {
     safePersistActiveJobId("");
 
     if (isFinalStatus(currentStatus)) {
-      setSelectedFiles([]);
-      const input = document.getElementById("vault-upload-input") as HTMLInputElement | null;
-      if (input) input.value = "";
+      resetBatchUiProgress(true);
     }
 
     void refreshAll();
@@ -1109,6 +1374,11 @@ export default function HiddenPdfVaultPage() {
       if (longTaskActiveRef.current) {
         notifyLongTaskEnd();
         longTaskActiveRef.current = false;
+      }
+      try {
+        currentBatchXhrRef.current?.abort();
+      } catch {
+        // ignore
       }
     };
   }, []);
@@ -1257,8 +1527,7 @@ export default function HiddenPdfVaultPage() {
                 <div className="text-sm text-blue-800 mt-2 leading-6">
                   Single long request ki jagah ab selected PDFs batches me process hongi.
                   <br />
-                  Har batch complete hone par progress update hogi, aur failed/skipped files CSV me download ki ja
-                  sakti hain.
+                  Ab current batch ke andar ki PDFs bhi alag se dikhengi, aur upload bytes progress live show hogi.
                   <br />
                   Best result ke liye upload ke dauran isi tab ko open rakho.
                 </div>
@@ -1430,6 +1699,116 @@ export default function HiddenPdfVaultPage() {
                     </div>
                   </div>
                 </div>
+
+                {selectedFilesCount > 0 ? (
+                  <div className="mt-4 grid grid-cols-2 md:grid-cols-5 gap-3">
+                    <div className="rounded-xl border border-blue-200 bg-blue-50 p-3">
+                      <div className="text-[11px] uppercase font-extrabold text-blue-700">
+                        Selected
+                      </div>
+                      <div className="mt-1 text-lg font-extrabold text-slate-900">
+                        {selectedFilesCount}
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-slate-200 bg-white p-3">
+                      <div className="text-[11px] uppercase font-extrabold text-slate-500">
+                        Processed
+                      </div>
+                      <div className="mt-1 text-lg font-extrabold text-slate-900">
+                        {processedSelectionSummary.processed}
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-emerald-200 bg-emerald-50 p-3">
+                      <div className="text-[11px] uppercase font-extrabold text-emerald-700">
+                        Success
+                      </div>
+                      <div className="mt-1 text-lg font-extrabold text-slate-900">
+                        {processedSelectionSummary.success}
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-amber-200 bg-amber-50 p-3">
+                      <div className="text-[11px] uppercase font-extrabold text-amber-700">
+                        Skipped
+                      </div>
+                      <div className="mt-1 text-lg font-extrabold text-slate-900">
+                        {processedSelectionSummary.skipped}
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-rose-200 bg-rose-50 p-3">
+                      <div className="text-[11px] uppercase font-extrabold text-rose-700">
+                        Failed
+                      </div>
+                      <div className="mt-1 text-lg font-extrabold text-slate-900">
+                        {processedSelectionSummary.failed}
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+
+                {currentBatchMeta ? (
+                  <div className="mt-4 rounded-2xl border border-blue-200 bg-blue-50 p-4">
+                    <div className="flex items-center gap-2 text-sm font-extrabold text-blue-900">
+                      <Layers3 size={16} />
+                      Current Batch PDF Progress
+                    </div>
+
+                    <div className="mt-2 text-xs text-blue-900 font-semibold leading-6">
+                      Batch {currentBatchMeta.batchNumber} | Items {currentBatchMeta.fromIndex + 1} to{" "}
+                      {currentBatchMeta.toIndex + 1} | {currentBatchMeta.expectedCount} PDFs
+                    </div>
+
+                    <div className="mt-3 h-4 w-full overflow-hidden rounded-full bg-blue-100">
+                      <div
+                        className="h-full rounded-full bg-blue-700 transition-all"
+                        style={{ width: `${currentBatchUploadPercent}%` }}
+                      />
+                    </div>
+
+                    <div className="mt-2 text-xs font-semibold text-blue-900">
+                      Current batch upload: {currentBatchUploadPercent}% (
+                      {formatBytes(currentBatchLoadedBytes)} / {formatBytes(currentBatchTotalBytes)})
+                    </div>
+
+                    <div className="mt-4 space-y-2 max-h-80 overflow-auto">
+                      {currentBatchTrackers.map((item) => (
+                        <div
+                          key={item.clientFileId}
+                          className="flex items-start justify-between gap-3 rounded-xl border border-slate-200 bg-white px-3 py-2"
+                        >
+                          <div className="min-w-0">
+                            <div className="text-xs font-bold text-slate-900 break-all">
+                              {item.rowNumber}. {item.name}
+                            </div>
+                            <div className="text-[11px] text-slate-500">
+                              {formatBytes(item.size)}
+                            </div>
+                            {item.reason ? (
+                              <div className="mt-1 text-[11px] text-slate-600 break-words">
+                                {item.reason}
+                              </div>
+                            ) : null}
+                          </div>
+
+                          <span
+                            className={`inline-flex shrink-0 rounded-full border px-2 py-1 text-[11px] font-extrabold ${batchFileTone(
+                              item.status
+                            )}`}
+                          >
+                            {item.status}
+                          </span>
+                        </div>
+                      ))}
+
+                      {currentBatchTrackers.length === 0 ? (
+                        <div className="text-xs text-slate-500">Current batch files not available.</div>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
               </div>
             </div>
           ) : null}
@@ -1536,6 +1915,7 @@ export default function HiddenPdfVaultPage() {
                     const all = Array.from(e.target.files || []);
                     const onlyPdf = all.filter((file) => safeText(file.name).toLowerCase().endsWith(".pdf"));
 
+                    resetBatchUiProgress(false);
                     setSelectedFiles(onlyPdf);
 
                     if (onlyPdf.length !== all.length) {
@@ -1577,6 +1957,8 @@ export default function HiddenPdfVaultPage() {
                   Selected PDFs: <b>{selectedFiles.length}</b>
                   <br />
                   Selected size: <b>{formatBytes(selectedFilesSize)}</b>
+                  <br />
+                  Recommended stable batch size: <b>25 or 50</b>
                 </div>
 
                 <button
@@ -1588,6 +1970,53 @@ export default function HiddenPdfVaultPage() {
                   <Upload size={18} />
                   {creatingJob ? "Starting..." : "Start PDF Upload Job"}
                 </button>
+
+                {selectedFiles.length > 0 ? (
+                  <div className="mt-4 rounded-2xl border border-blue-200 bg-blue-50 p-4">
+                    <div className="flex items-center gap-2 text-sm font-extrabold text-blue-900">
+                      <Files size={16} />
+                      Selected Upload Selection Status
+                    </div>
+
+                    <div className="mt-3 grid grid-cols-2 gap-3">
+                      <div className="rounded-xl border border-blue-200 bg-white p-3">
+                        <div className="text-[11px] uppercase font-extrabold text-blue-700">
+                          Total Selected
+                        </div>
+                        <div className="mt-1 text-lg font-extrabold text-slate-900">
+                          {selectedFilesCount}
+                        </div>
+                      </div>
+
+                      <div className="rounded-xl border border-slate-200 bg-white p-3">
+                        <div className="text-[11px] uppercase font-extrabold text-slate-500">
+                          Pending
+                        </div>
+                        <div className="mt-1 text-lg font-extrabold text-slate-900">
+                          {processedSelectionSummary.pending}
+                        </div>
+                      </div>
+
+                      <div className="rounded-xl border border-emerald-200 bg-white p-3">
+                        <div className="text-[11px] uppercase font-extrabold text-emerald-700">
+                          Success
+                        </div>
+                        <div className="mt-1 text-lg font-extrabold text-slate-900">
+                          {processedSelectionSummary.success}
+                        </div>
+                      </div>
+
+                      <div className="rounded-xl border border-rose-200 bg-white p-3">
+                        <div className="text-[11px] uppercase font-extrabold text-rose-700">
+                          Failed
+                        </div>
+                        <div className="mt-1 text-lg font-extrabold text-slate-900">
+                          {processedSelectionSummary.failed}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
 
                 <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-800">
                   Recommended filename format:

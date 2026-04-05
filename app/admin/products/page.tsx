@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   Plus,
@@ -18,6 +18,7 @@ import {
   Clock3,
   ChevronLeft,
   ChevronRight,
+  LoaderCircle,
 } from "lucide-react";
 
 type Product = {
@@ -34,6 +35,10 @@ type Product = {
   availability?: "available" | "on_demand" | "want_to_buy" | string;
   createdAt?: string;
   deletedAt?: string | null;
+  thumbnailUrl?: string;
+  quickUrl?: string;
+  pages?: number;
+  pdfKey?: string;
 };
 
 type SortKey =
@@ -46,6 +51,37 @@ type SortKey =
   | "sku_asc"
   | "active_first"
   | "availability";
+
+type ProductsApiResponse = {
+  ok?: boolean;
+  error?: string;
+  products?: Product[];
+  filters?: {
+    trash?: boolean;
+    q?: string;
+    category?: string;
+    availability?: string;
+    isActive?: string;
+    sortBy?: SortKey;
+  };
+  pagination?: {
+    page: number;
+    limit: number;
+    skip: number;
+    totalPages: number;
+    hasPrevPage: boolean;
+    hasNextPage: boolean;
+  };
+  totals?: {
+    filtered: number;
+    currentPage: number;
+    allProducts: number;
+    activeProducts: number;
+    inactiveProducts: number;
+    availableProducts: number;
+    trashCount: number;
+  };
+};
 
 function formatDate(input?: string | null) {
   if (!input) return "-";
@@ -79,47 +115,128 @@ function availabilityBadgeClass(input?: string) {
 export default function AdminProductsPage() {
   const [items, setItems] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
+  const [fetching, setFetching] = useState(false);
   const [busyId, setBusyId] = useState<string>("");
-  const [trashCount, setTrashCount] = useState<number>(0);
+  const [error, setError] = useState("");
 
   const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
   const [availabilityFilter, setAvailabilityFilter] = useState("all");
   const [activeFilter, setActiveFilter] = useState("all");
   const [sortBy, setSortBy] = useState<SortKey>("latest");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
+  const [reloadKey, setReloadKey] = useState(0);
 
-  async function load() {
-    setLoading(true);
-    try {
-      const res = await fetch("/api/admin/products?limit=500", { credentials: "include", cache: "no-store" });
-      const data = await res.json().catch(() => ({}));
-      if (!res.ok) {
-        alert((data as any)?.error || "Failed to load products");
-        return;
-      }
+  const [totalFiltered, setTotalFiltered] = useState(0);
+  const [totalPages, setTotalPages] = useState(1);
+  const [trashCount, setTrashCount] = useState(0);
+  const [stats, setStats] = useState({
+    total: 0,
+    active: 0,
+    inactive: 0,
+    available: 0,
+  });
 
-      const list = ((data as any)?.products || []) as Product[];
-      setItems(list.filter((p) => !p.deletedAt));
+  const requestSeq = useRef(0);
 
-      const resTrash = await fetch("/api/admin/products?trash=1&limit=500", {
-        credentials: "include",
-        cache: "no-store",
-      });
-      const dataTrash = await resTrash.json().catch(() => ({}));
-      if (resTrash.ok) {
-        const t = (((dataTrash as any)?.products || []) as Product[]).filter((p) => p.deletedAt);
-        setTrashCount(t.length);
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      setDebouncedSearch(search.trim());
+    }, 350);
+
+    return () => window.clearTimeout(t);
+  }, [search]);
+
+  useEffect(() => {
+    setPage(1);
+  }, [debouncedSearch, availabilityFilter, activeFilter, sortBy, pageSize]);
+
+  useEffect(() => {
+    const seq = ++requestSeq.current;
+    const controller = new AbortController();
+
+    async function load() {
+      if (loading) {
+        setError("");
       } else {
-        setTrashCount(0);
+        setFetching(true);
+        setError("");
       }
-    } finally {
-      setLoading(false);
+
+      try {
+        const params = new URLSearchParams();
+        params.set("page", String(page));
+        params.set("limit", String(pageSize));
+        params.set("sortBy", sortBy);
+
+        if (debouncedSearch) params.set("q", debouncedSearch);
+        if (availabilityFilter !== "all") params.set("availability", availabilityFilter);
+        if (activeFilter === "active") params.set("isActive", "true");
+        if (activeFilter === "inactive") params.set("isActive", "false");
+
+        const res = await fetch(`/api/admin/products?${params.toString()}`, {
+          credentials: "include",
+          cache: "no-store",
+          signal: controller.signal,
+        });
+
+        const data: ProductsApiResponse = await res.json().catch(() => ({}));
+
+        if (!res.ok) {
+          throw new Error(data?.error || "Failed to load products");
+        }
+
+        if (seq !== requestSeq.current) return;
+
+        const nextItems = Array.isArray(data?.products) ? data.products : [];
+        const nextPagination = data?.pagination;
+        const nextTotals = data?.totals;
+
+        const nextTotalPages = Math.max(1, Number(nextPagination?.totalPages || 1));
+
+        if (page > nextTotalPages) {
+          setPage(nextTotalPages);
+          return;
+        }
+
+        setItems(nextItems);
+        setTotalFiltered(Number(nextTotals?.filtered || 0));
+        setTotalPages(nextTotalPages);
+        setTrashCount(Number(nextTotals?.trashCount || 0));
+        setStats({
+          total: Number(nextTotals?.allProducts || 0),
+          active: Number(nextTotals?.activeProducts || 0),
+          inactive: Number(nextTotals?.inactiveProducts || 0),
+          available: Number(nextTotals?.availableProducts || 0),
+        });
+      } catch (e: any) {
+        if (controller.signal.aborted) return;
+        if (seq !== requestSeq.current) return;
+
+        setError(e?.message || "Failed to load products");
+        setItems([]);
+        setTotalFiltered(0);
+        setTotalPages(1);
+      } finally {
+        if (seq === requestSeq.current) {
+          setLoading(false);
+          setFetching(false);
+        }
+      }
     }
+
+    load();
+
+    return () => controller.abort();
+  }, [page, pageSize, debouncedSearch, availabilityFilter, activeFilter, sortBy, reloadKey, loading]);
+
+  async function reload() {
+    setReloadKey((x) => x + 1);
   }
 
   async function softDelete(id: string) {
-    const ok = confirm("Move this product to Trash? (You can restore later)");
+    const ok = window.confirm("Move this product to Trash? (You can restore later)");
     if (!ok) return;
 
     setBusyId(id);
@@ -130,17 +247,22 @@ export default function AdminProductsPage() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        alert((data as any)?.error || "Delete failed");
+        window.alert((data as any)?.error || "Delete failed");
         return;
       }
-      await load();
+
+      if (items.length === 1 && page > 1) {
+        setPage((p) => Math.max(1, p - 1));
+      } else {
+        await reload();
+      }
     } finally {
       setBusyId("");
     }
   }
 
   async function duplicate(id: string) {
-    const ok = confirm("Duplicate this product? A new draft copy will be created.");
+    const ok = window.confirm("Duplicate this product? A new draft copy will be created.");
     if (!ok) return;
 
     setBusyId(id);
@@ -151,12 +273,14 @@ export default function AdminProductsPage() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        alert((data as any)?.error || "Duplicate failed");
+        window.alert((data as any)?.error || "Duplicate failed");
         return;
       }
-      await load();
+
+      await reload();
+
       if ((data as any)?.product?.sku) {
-        alert(`Duplicated! New SKU: ${(data as any).product.sku}`);
+        window.alert(`Duplicated! New SKU: ${(data as any).product.sku}`);
       }
     } finally {
       setBusyId("");
@@ -177,99 +301,34 @@ export default function AdminProductsPage() {
 
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        alert((data as any)?.error || "Status update failed");
+        window.alert((data as any)?.error || "Status update failed");
         return;
       }
 
-      setItems((prev) =>
-        prev.map((p) =>
-          p._id === product._id ? { ...p, isActive: !product.isActive } : p
-        )
-      );
+      await reload();
     } finally {
       setBusyId("");
     }
   }
 
-  const stats = useMemo(() => {
-    const total = items.length;
-    const active = items.filter((x) => x.isActive).length;
-    const inactive = total - active;
-    const available = items.filter((x) => String(x.availability || "") === "available").length;
+  const startItem = useMemo(() => {
+    if (!totalFiltered) return 0;
+    return (page - 1) * pageSize + 1;
+  }, [page, pageSize, totalFiltered]);
 
-    return { total, active, inactive, available };
-  }, [items]);
+  const endItem = useMemo(() => {
+    if (!totalFiltered) return 0;
+    return Math.min(page * pageSize, totalFiltered);
+  }, [page, pageSize, totalFiltered]);
 
-  const filteredItems = useMemo(() => {
-    const q = search.trim().toLowerCase();
-
-    let list = [...items];
-
-    if (q) {
-      list = list.filter((p) => {
-        const hay =
-          `${p.title} ${p.sku} ${p.category} ${p.subjectCode} ${p.session} ${p.language} ${p.availability || ""}`.toLowerCase();
-        return hay.includes(q);
-      });
-    }
-
-    if (availabilityFilter !== "all") {
-      list = list.filter((p) => String(p.availability || "") === availabilityFilter);
-    }
-
-    if (activeFilter === "active") {
-      list = list.filter((p) => p.isActive);
-    } else if (activeFilter === "inactive") {
-      list = list.filter((p) => !p.isActive);
-    }
-
-    list.sort((a, b) => {
-      if (sortBy === "latest") {
-        return new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime();
-      }
-      if (sortBy === "oldest") {
-        return new Date(a.createdAt || 0).getTime() - new Date(b.createdAt || 0).getTime();
-      }
-      if (sortBy === "title_asc") {
-        return a.title.localeCompare(b.title);
-      }
-      if (sortBy === "title_desc") {
-        return b.title.localeCompare(a.title);
-      }
-      if (sortBy === "price_low") {
-        return Number(a.price || 0) - Number(b.price || 0);
-      }
-      if (sortBy === "price_high") {
-        return Number(b.price || 0) - Number(a.price || 0);
-      }
-      if (sortBy === "sku_asc") {
-        return String(a.sku || "").localeCompare(String(b.sku || ""));
-      }
-      if (sortBy === "active_first") {
-        if (a.isActive === b.isActive) return a.title.localeCompare(b.title);
-        return a.isActive ? -1 : 1;
-      }
-      if (sortBy === "availability") {
-        return safeAvailabilityLabel(a.availability).localeCompare(safeAvailabilityLabel(b.availability));
-      }
-      return 0;
+  const visiblePages = useMemo(() => {
+    const pages = Array.from({ length: totalPages }, (_, i) => i + 1).filter((p) => {
+      if (totalPages <= 7) return true;
+      if (p === 1 || p === totalPages) return true;
+      return Math.abs(p - page) <= 1;
     });
-
-    return list;
-  }, [items, search, availabilityFilter, activeFilter, sortBy]);
-
-  const totalPages = useMemo(() => {
-    const total = Math.ceil(filteredItems.length / pageSize);
-    return total > 0 ? total : 1;
-  }, [filteredItems.length, pageSize]);
-
-  const pagedItems = useMemo(() => {
-    const start = (page - 1) * pageSize;
-    return filteredItems.slice(start, start + pageSize);
-  }, [filteredItems, page, pageSize]);
-
-  const startItem = filteredItems.length ? (page - 1) * pageSize + 1 : 0;
-  const endItem = Math.min(page * pageSize, filteredItems.length);
+    return pages;
+  }, [page, totalPages]);
 
   const trashBadge = useMemo(() => {
     if (!trashCount) return null;
@@ -279,14 +338,6 @@ export default function AdminProductsPage() {
       </span>
     );
   }, [trashCount]);
-
-  useEffect(() => {
-    load();
-  }, []);
-
-  useEffect(() => {
-    setPage(1);
-  }, [search, availabilityFilter, activeFilter, sortBy, pageSize]);
 
   return (
     <main className="min-h-screen bg-[#F8FAFC] text-slate-900">
@@ -302,10 +353,11 @@ export default function AdminProductsPage() {
 
             <div className="flex items-center gap-2 flex-wrap">
               <button
-                onClick={load}
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-semibold shadow-sm"
+                onClick={reload}
+                disabled={fetching}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-semibold shadow-sm disabled:opacity-60"
               >
-                <RefreshCcw size={18} />
+                {fetching ? <LoaderCircle size={18} className="animate-spin" /> : <RefreshCcw size={18} />}
                 Refresh
               </button>
 
@@ -427,6 +479,25 @@ export default function AdminProductsPage() {
                 <option value="200">200 / page</option>
               </select>
             </div>
+
+            <div className="mt-3 flex items-center justify-between gap-3 flex-wrap text-sm">
+              <div className="text-slate-600 font-semibold">
+                Filtered Results: <b>{totalFiltered}</b>
+                {debouncedSearch ? (
+                  <>
+                    {" "}
+                    for <span className="text-slate-900">“{debouncedSearch}”</span>
+                  </>
+                ) : null}
+              </div>
+
+              {fetching ? (
+                <div className="inline-flex items-center gap-2 text-slate-500 font-semibold">
+                  <LoaderCircle size={16} className="animate-spin" />
+                  Updating results...
+                </div>
+              ) : null}
+            </div>
           </div>
 
           <div className="mt-6">
@@ -434,13 +505,17 @@ export default function AdminProductsPage() {
               <div className="rounded-2xl border border-gray-200 bg-gray-50 p-6 text-slate-600 font-semibold">
                 Loading products...
               </div>
-            ) : filteredItems.length === 0 ? (
+            ) : error ? (
+              <div className="rounded-2xl border border-rose-200 bg-rose-50 p-6 text-rose-700 font-semibold">
+                {error}
+              </div>
+            ) : items.length === 0 ? (
               <div className="rounded-2xl border border-gray-200 bg-gray-50 p-8 text-slate-600 text-center font-semibold">
                 No products found.
               </div>
             ) : (
               <div className="space-y-3">
-                {pagedItems.map((p) => {
+                {items.map((p) => {
                   const isBusy = busyId === p._id;
                   const isActive = Boolean(p.isActive);
                   const availabilityText = safeAvailabilityLabel(p.availability);
@@ -458,7 +533,9 @@ export default function AdminProductsPage() {
                             </div>
 
                             <div className="min-w-0 flex-1">
-                              <div className="font-extrabold text-[17px] leading-snug break-words">{p.title}</div>
+                              <div className="font-extrabold text-[17px] leading-snug break-words">
+                                {p.title}
+                              </div>
 
                               <div className="mt-2 flex items-center gap-2 flex-wrap">
                                 <span className="inline-flex items-center rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-bold text-slate-700">
@@ -591,7 +668,9 @@ export default function AdminProductsPage() {
                 <div className="rounded-2xl border border-gray-200 bg-white px-4 py-4">
                   <div className="flex items-center justify-between gap-4 flex-wrap">
                     <div className="text-sm text-slate-600 font-semibold">
-                      Showing <b>{startItem}</b> to <b>{endItem}</b> of <b>{filteredItems.length}</b> results
+                      Showing <b>{startItem}</b> to <b>{endItem}</b> of <b>{totalFiltered}</b> filtered results
+                      <span className="text-slate-400"> • </span>
+                      Total products: <b>{stats.total}</b>
                     </div>
 
                     <div className="flex items-center gap-2 flex-wrap">
@@ -605,33 +684,27 @@ export default function AdminProductsPage() {
                         Previous
                       </button>
 
-                      {Array.from({ length: totalPages }, (_, i) => i + 1)
-                        .filter((p) => {
-                          if (totalPages <= 7) return true;
-                          if (p === 1 || p === totalPages) return true;
-                          return Math.abs(p - page) <= 1;
-                        })
-                        .map((p, idx, arr) => {
-                          const prev = arr[idx - 1];
-                          const showGap = idx > 0 && prev && p - prev > 1;
+                      {visiblePages.map((p, idx, arr) => {
+                        const prev = arr[idx - 1];
+                        const showGap = idx > 0 && prev && p - prev > 1;
 
-                          return (
-                            <div key={`page-${p}`} className="flex items-center gap-2">
-                              {showGap ? <span className="text-slate-400 px-1">...</span> : null}
-                              <button
-                                type="button"
-                                onClick={() => setPage(p)}
-                                className={`min-w-[42px] px-3 py-2 rounded-xl text-sm font-bold border ${
-                                  p === page
-                                    ? "bg-slate-900 text-white border-slate-900"
-                                    : "bg-white hover:bg-gray-50 border-slate-200 text-slate-700"
-                                }`}
-                              >
-                                {p}
-                              </button>
-                            </div>
-                          );
-                        })}
+                        return (
+                          <div key={`page-${p}`} className="flex items-center gap-2">
+                            {showGap ? <span className="text-slate-400 px-1">...</span> : null}
+                            <button
+                              type="button"
+                              onClick={() => setPage(p)}
+                              className={`min-w-[42px] px-3 py-2 rounded-xl text-sm font-bold border ${
+                                p === page
+                                  ? "bg-slate-900 text-white border-slate-900"
+                                  : "bg-white hover:bg-gray-50 border-slate-200 text-slate-700"
+                              }`}
+                            >
+                              {p}
+                            </button>
+                          </div>
+                        );
+                      })}
 
                       <button
                         type="button"
@@ -651,7 +724,7 @@ export default function AdminProductsPage() {
 
           <div className="mt-6 text-xs text-slate-500 flex items-center gap-2">
             <Clock3 size={14} />
-            Next recommended upgrade: server-side search, sorting, and pagination for very large product volume.
+            Admin products page is now using server-side search, sorting, counts, and pagination for large product volume.
           </div>
         </div>
       </div>

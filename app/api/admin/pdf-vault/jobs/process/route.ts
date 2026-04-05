@@ -19,6 +19,66 @@ function safeNum(x: any, def = 0) {
   return Number.isFinite(n) ? n : def;
 }
 
+function clamp(n: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, n));
+}
+
+function normalizeName(name: string) {
+  return safeStr(name).replace(/\\/g, "/").split("/").pop() || "";
+}
+
+function isPdfName(name: string) {
+  return normalizeName(name).toLowerCase().endsWith(".pdf");
+}
+
+function getBatchPayloadStats(files: File[]) {
+  const count = Array.isArray(files) ? files.length : 0;
+  const totalBytes = (Array.isArray(files) ? files : []).reduce(
+    (sum, file) => sum + Number(file?.size || 0),
+    0
+  );
+
+  return {
+    count,
+    totalBytes,
+    totalMB: totalBytes / (1024 * 1024),
+  };
+}
+
+function computeDynamicLockMs(files: File[]) {
+  const { totalMB } = getBatchPayloadStats(files);
+
+  // Base 4 min + size-based buffer, max 15 min
+  const estimatedMinutes = 4 + Math.ceil(totalMB / 75);
+  return clamp(estimatedMinutes * 60 * 1000, 2 * 60 * 1000, 15 * 60 * 1000);
+}
+
+function getExpectedBatchWindow(job: any) {
+  const totalItems = safeNum(job?.progress?.totalItems, 0);
+  const processedItems = safeNum(job?.progress?.processedItems, 0);
+  const batchSize = Math.max(1, safeNum(job?.progress?.batchSize, 100));
+
+  const fromIndex = processedItems;
+  const toIndex = Math.min(totalItems - 1, fromIndex + batchSize - 1);
+  const batchNumber = Math.floor(fromIndex / batchSize) + 1;
+  const expectedBatchCount = Math.max(0, toIndex - fromIndex + 1);
+
+  return {
+    totalItems,
+    processedItems,
+    batchSize,
+    fromIndex,
+    toIndex,
+    batchNumber,
+    expectedBatchCount,
+  };
+}
+
+function getExpectedBatchRows(job: any, fromIndex: number, toIndex: number) {
+  const rows = Array.isArray(job?.input?.rows) ? job.input.rows : [];
+  return rows.slice(fromIndex, toIndex + 1);
+}
+
 async function assertVaultWriteAccess() {
   const user = await getAuthUser();
 
@@ -56,6 +116,39 @@ async function assertVaultWriteAccess() {
   return { ok: true as const, user };
 }
 
+async function unlockBatchWithoutProgress(args: {
+  jobId: string;
+  createdBy: string;
+  lockToken: string;
+  note: string;
+  batchNumber: number;
+  fromIndex: number;
+  toIndex: number;
+}) {
+  try {
+    return await completeBulkUploadJobBatch({
+      jobId: args.jobId,
+      createdBy: args.createdBy,
+      lockToken: args.lockToken,
+      processedDelta: 0,
+      successDelta: 0,
+      failedDelta: 0,
+      skippedDelta: 0,
+      validDelta: 0,
+      nextLastProcessedIndex: Math.max(-1, args.fromIndex - 1),
+      batchNumber: args.batchNumber,
+      fromIndex: args.fromIndex,
+      toIndex: args.toIndex,
+      attempted: 0,
+      failures: [],
+      note: args.note,
+      summaryPatch: {},
+    });
+  } catch {
+    return null;
+  }
+}
+
 export async function POST(req: NextRequest) {
   const guard = await assertVaultWriteAccess();
   if (!guard.ok) return guard.res;
@@ -72,7 +165,7 @@ export async function POST(req: NextRequest) {
 
   const batchFiles = formData
     .getAll("files")
-    .filter((x) => x instanceof File) as File[];
+    .filter((x): x is File => x instanceof File);
 
   const createdBy = safeStr(guard.user.email);
   const currentJob = await getBulkUploadJob(jobId, createdBy);
@@ -102,10 +195,44 @@ export async function POST(req: NextRequest) {
     );
   }
 
+  const preWindow = getExpectedBatchWindow(currentJob);
+
+  if (preWindow.expectedBatchCount <= 0) {
+    return NextResponse.json(
+      {
+        ok: true,
+        message: "No pending items left for processing.",
+        job: toPlainBulkJob(currentJob),
+      },
+      { status: 200 }
+    );
+  }
+
+  if (!batchFiles.length) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "No PDF files received for current batch.",
+      },
+      { status: 400 }
+    );
+  }
+
+  const nonPdf = batchFiles.find((file) => !isPdfName(file.name));
+  if (nonPdf) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: `Only PDF files allowed. Invalid file: ${normalizeName(nonPdf.name)}`,
+      },
+      { status: 400 }
+    );
+  }
+
   const claim = await claimBulkUploadJobBatch({
     jobId,
     createdBy,
-    lockMs: 5 * 60 * 1000,
+    lockMs: computeDynamicLockMs(batchFiles),
   });
 
   if (!claim.ok) {
@@ -122,52 +249,97 @@ export async function POST(req: NextRequest) {
   }
 
   const lockedJob = claim.job;
-  const totalItems = safeNum(lockedJob?.progress?.totalItems, 0);
-  const processedItems = safeNum(lockedJob?.progress?.processedItems, 0);
-  const batchSize = Math.max(1, safeNum(lockedJob?.progress?.batchSize, 100));
+  const lockedWindow = getExpectedBatchWindow(lockedJob);
 
-  const fromIndex = processedItems;
-  const toIndex = Math.min(totalItems - 1, fromIndex + batchSize - 1);
-  const batchNumber = Math.floor(fromIndex / batchSize) + 1;
-  const expectedBatchCount = Math.max(0, toIndex - fromIndex + 1);
-
-  if (!expectedBatchCount) {
-    const latest = await getBulkUploadJob(jobId, createdBy);
+  if (lockedWindow.expectedBatchCount <= 0) {
+    const released = await unlockBatchWithoutProgress({
+      jobId,
+      createdBy,
+      lockToken: claim.lockToken,
+      note: "No pending items left for processing.",
+      batchNumber: lockedWindow.batchNumber,
+      fromIndex: lockedWindow.fromIndex,
+      toIndex: lockedWindow.toIndex,
+    });
 
     return NextResponse.json(
       {
         ok: true,
         message: "No pending items left for processing.",
-        job: toPlainBulkJob(latest),
+        job: toPlainBulkJob(released || lockedJob),
       },
       { status: 200 }
     );
   }
 
-  if (batchFiles.length !== expectedBatchCount) {
-    const failedJob = await failBulkUploadJob({
+  if (batchFiles.length !== lockedWindow.expectedBatchCount) {
+    const message = `Batch file count mismatch. Expected ${lockedWindow.expectedBatchCount}, received ${batchFiles.length}. Same selected PDF list dubara choose karke retry karo.`;
+
+    const released = await unlockBatchWithoutProgress({
       jobId,
       createdBy,
       lockToken: claim.lockToken,
-      message: `Batch file count mismatch. Expected ${expectedBatchCount}, received ${batchFiles.length}.`,
+      note: message,
+      batchNumber: lockedWindow.batchNumber,
+      fromIndex: lockedWindow.fromIndex,
+      toIndex: lockedWindow.toIndex,
     });
 
     return NextResponse.json(
       {
         ok: false,
-        error: `Batch file count mismatch. Expected ${expectedBatchCount}, received ${batchFiles.length}.`,
-        job: toPlainBulkJob(failedJob),
+        error: message,
+        retryable: true,
+        job: toPlainBulkJob(released || lockedJob),
       },
-      { status: 400 }
+      { status: 409 }
     );
+  }
+
+  const expectedRows = getExpectedBatchRows(
+    lockedJob,
+    lockedWindow.fromIndex,
+    lockedWindow.toIndex
+  );
+
+  for (let i = 0; i < expectedRows.length; i++) {
+    const expectedName = normalizeName(safeStr(expectedRows[i]?.fileName));
+    const receivedName = normalizeName(batchFiles[i]?.name);
+
+    if (!expectedName || !receivedName || expectedName !== receivedName) {
+      const message =
+        `Batch file order mismatch at position ${i + 1}. ` +
+        `Expected "${expectedName || "-"}", received "${receivedName || "-"}". ` +
+        `Agar page refresh hua tha to same original PDF list dubara select karke retry karo.`;
+
+      const released = await unlockBatchWithoutProgress({
+        jobId,
+        createdBy,
+        lockToken: claim.lockToken,
+        note: message,
+        batchNumber: lockedWindow.batchNumber,
+        fromIndex: lockedWindow.fromIndex,
+        toIndex: lockedWindow.toIndex,
+      });
+
+      return NextResponse.json(
+        {
+          ok: false,
+          error: message,
+          retryable: true,
+          job: toPlainBulkJob(released || lockedJob),
+        },
+        { status: 409 }
+      );
+    }
   }
 
   try {
     const batchResult = await processBulkSolvedPdfsJobBatch({
       job: lockedJob,
-      batchNumber,
-      fromIndex,
-      toIndex,
+      batchNumber: lockedWindow.batchNumber,
+      fromIndex: lockedWindow.fromIndex,
+      toIndex: lockedWindow.toIndex,
       batchFiles,
     });
 
