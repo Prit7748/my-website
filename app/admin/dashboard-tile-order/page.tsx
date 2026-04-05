@@ -26,6 +26,7 @@ import {
   IndianRupee,
   FolderOpen,
   ImageIcon,
+  FileSpreadsheet,
   BarChart3,
   TrendingUp,
   Clock3,
@@ -41,7 +42,6 @@ import {
   getAdminDashboardTileDisplayTitle,
   getDefaultAdminDashboardTileSettings,
   normalizeAdminDashboardTileSettings,
-  type AdminDashboardTileConfig,
   type AdminDashboardTileKey,
   type AdminDashboardTileSettings,
   type AdminDashboardTileTone,
@@ -140,6 +140,7 @@ const TONE_CLASSES: Record<NonDefaultTone, ToneClasses> = {
 
 const DEFAULT_TILE_TONES: Record<AdminDashboardTileKey, NonDefaultTone> = {
   products: "gray",
+  "bulk-product-details": "indigo",
   "bulk-product-images": "cyan",
   combos: "violet",
   "want-to-buy": "blue",
@@ -368,6 +369,7 @@ export default function DashboardTileOrderPage() {
           setComingSoonEnabled(Boolean(cfg.enabled));
         }
       } catch {
+        // ignore
       } finally {
         setCsLoading(false);
       }
@@ -571,6 +573,20 @@ export default function DashboardTileOrderPage() {
           <div>
             <div className={`font-extrabold ${tone.title}`}>{getDisplayTitle(row)}</div>
             <div className="text-xs text-slate-600 mt-1">Add / edit products</div>
+          </div>
+        </div>
+      );
+    }
+
+    if (row.key === "bulk-product-details") {
+      return (
+        <div className="flex items-center gap-3">
+          <FileSpreadsheet className={tone.icon} />
+          <div>
+            <div className={`font-extrabold ${tone.title}`}>{getDisplayTitle(row)}</div>
+            <div className="text-xs text-slate-600 mt-1">
+              Bulk details upload + default patterns
+            </div>
           </div>
         </div>
       );
@@ -971,9 +987,7 @@ export default function DashboardTileOrderPage() {
           ) : null}
         </div>
 
-        <div className="min-h-[112px] pt-7">
-          {renderTileVisual(row)}
-        </div>
+        <div className="min-h-[112px] pt-7">{renderTileVisual(row)}</div>
 
         <div className="mt-4 rounded-2xl border border-white/80 bg-white/85 p-3 backdrop-blur-sm">
           <div className="flex items-center justify-between gap-3 flex-wrap">
