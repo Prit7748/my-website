@@ -170,6 +170,11 @@ type StageMultipartResponse = {
   error?: string;
 };
 
+const LOGICAL_BLOCK_OPTIONS = [100, 200, 500];
+const TRANSPORT_CONCURRENCY = 3;
+const TRANSPORT_MAX_RETRIES = 3;
+const RETRY_BASE_DELAY_MS = 1200;
+
 function formatBytes(bytes: number) {
   const n = Number(bytes || 0);
   if (n < 1024) return `${n} B`;
@@ -194,6 +199,10 @@ function formatDateTime(input?: string | null) {
 
 function safeText(x: any) {
   return String(x ?? "").trim();
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function notifyLongTaskStart() {
@@ -309,7 +318,11 @@ export default function OfficialPapersPage() {
   const processInFlightRef = useRef(false);
   const longTaskActiveRef = useRef(false);
   const finalRefreshDoneRef = useRef(false);
-  const currentUploadXhrRef = useRef<XMLHttpRequest | null>(null);
+
+  const currentUploadXhrsRef = useRef<Map<string, XMLHttpRequest>>(new Map());
+  const activeTransportLoadedRef = useRef<Record<string, number>>({});
+  const currentLogicalBlockFinishedBytesRef = useRef(0);
+  const currentLogicalBlockTotalBytesRef = useRef(0);
   const stagingCancelledRef = useRef(false);
 
   const currentStatus = safeText(activeJob?.status);
@@ -351,6 +364,36 @@ export default function OfficialPapersPage() {
     finalRefreshDoneRef.current = false;
   }
 
+  function abortAllCurrentUploads() {
+    currentUploadXhrsRef.current.forEach((xhr) => {
+      try {
+        xhr.abort();
+      } catch {
+        // ignore
+      }
+    });
+    currentUploadXhrsRef.current.clear();
+    activeTransportLoadedRef.current = {};
+  }
+
+  function refreshCurrentBlockProgress() {
+    const activeLoaded = Object.values(activeTransportLoadedRef.current).reduce(
+      (sum, val) => sum + Number(val || 0),
+      0
+    );
+
+    setCurrentBlockLoadedBytes(activeLoaded);
+
+    const totalBytes = Number(currentLogicalBlockTotalBytesRef.current || 0);
+    const finishedBytes = Number(currentLogicalBlockFinishedBytesRef.current || 0);
+    const currentDone = Math.min(totalBytes, finishedBytes + activeLoaded);
+
+    const percent =
+      totalBytes > 0 ? Math.min(100, Math.round((currentDone / totalBytes) * 100)) : 0;
+
+    setCurrentBlockPercent(percent);
+  }
+
   function resetStageState(keepSelection = true) {
     setIsStaging(false);
     setCurrentBlockNumber(0);
@@ -361,7 +404,10 @@ export default function OfficialPapersPage() {
     setCurrentBlockLabel("");
     setCurrentBlockFileCount(0);
     setStagingAbortEnabled(false);
-    currentUploadXhrRef.current = null;
+
+    abortAllCurrentUploads();
+    currentLogicalBlockFinishedBytesRef.current = 0;
+    currentLogicalBlockTotalBytesRef.current = 0;
     stagingCancelledRef.current = false;
 
     if (!keepSelection) {
@@ -537,33 +583,30 @@ export default function OfficialPapersPage() {
     return Array.from(uniqueMap.values());
   }
 
-  function uploadBlockViaServer(args: {
+  function uploadSinglePdfViaServer(args: {
     blockNumber: number;
     totalBlocks: number;
-    files: File[];
-    blockBytes: number;
-    globalStartIndex: number;
+    file: File;
+    globalIndex: number;
+    requestId: string;
   }) {
     return new Promise<StageMultipartResponse>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      currentUploadXhrRef.current = xhr;
+      currentUploadXhrsRef.current.set(args.requestId, xhr);
 
       const formData = new FormData();
-      args.files.forEach((file) => {
-        formData.append("files", file);
-      });
-
+      formData.append("files", args.file);
       formData.append("blockNumber", String(args.blockNumber));
       formData.append("totalBlocks", String(args.totalBlocks));
       formData.append(
         "meta",
-        JSON.stringify(
-          args.files.map((file, index) => ({
-            clientFileId: buildClientFileId(file, args.globalStartIndex + index),
-            originalName: file.name,
-            fileName: file.name,
-          }))
-        )
+        JSON.stringify([
+          {
+            clientFileId: buildClientFileId(args.file, args.globalIndex),
+            originalName: args.file.name,
+            fileName: args.file.name,
+          },
+        ])
       );
 
       xhr.open("POST", "/api/admin/official-papers/blocks", true);
@@ -571,26 +614,30 @@ export default function OfficialPapersPage() {
 
       xhr.upload.onprogress = (event) => {
         const loaded = event.lengthComputable ? Number(event.loaded || 0) : 0;
-        const safeLoaded = Math.min(args.blockBytes, loaded);
-        setCurrentBlockLoadedBytes(safeLoaded);
-
-        const percent =
-          args.blockBytes > 0
-            ? Math.min(100, Math.round((safeLoaded / args.blockBytes) * 100))
-            : 0;
-
-        setCurrentBlockPercent(percent);
+        const safeLoaded = Math.min(Number(args.file.size || 0), loaded);
+        activeTransportLoadedRef.current[args.requestId] = safeLoaded;
+        refreshCurrentBlockProgress();
       };
 
       xhr.onerror = () => {
-        reject(new Error("Block upload request failed"));
+        delete activeTransportLoadedRef.current[args.requestId];
+        currentUploadXhrsRef.current.delete(args.requestId);
+        refreshCurrentBlockProgress();
+        reject(new Error("Single PDF upload request failed"));
       };
 
       xhr.onabort = () => {
+        delete activeTransportLoadedRef.current[args.requestId];
+        currentUploadXhrsRef.current.delete(args.requestId);
+        refreshCurrentBlockProgress();
         reject(new Error("Upload cancelled"));
       };
 
       xhr.onload = () => {
+        delete activeTransportLoadedRef.current[args.requestId];
+        currentUploadXhrsRef.current.delete(args.requestId);
+        refreshCurrentBlockProgress();
+
         const data = parseTextJson(xhr.responseText || "");
         if (xhr.status >= 200 && xhr.status < 300 && data?.ok) {
           resolve(data as StageMultipartResponse);
@@ -600,13 +647,161 @@ export default function OfficialPapersPage() {
         reject(
           new Error(
             safeText(data?.error || data?.message || `HTTP ${xhr.status || 0}`) ||
-              "Block upload failed"
+              "Single PDF upload failed"
           )
         );
       };
 
       xhr.send(formData);
     });
+  }
+
+  async function stageSinglePdfWithRetry(args: {
+    blockNumber: number;
+    totalBlocks: number;
+    file: File;
+    globalIndex: number;
+  }) {
+    let lastError = "";
+
+    for (let attempt = 1; attempt <= TRANSPORT_MAX_RETRIES; attempt++) {
+      if (stagingCancelledRef.current) {
+        throw new Error("Block upload cancelled");
+      }
+
+      const requestId = `${args.globalIndex}-${attempt}-${Date.now()}-${Math.random()
+        .toString(36)
+        .slice(2, 8)}`;
+
+      try {
+        const data = await uploadSinglePdfViaServer({
+          blockNumber: args.blockNumber,
+          totalBlocks: args.totalBlocks,
+          file: args.file,
+          globalIndex: args.globalIndex,
+          requestId,
+        });
+
+        const items = Array.isArray(data?.items) ? data.items : [];
+        const failures = Array.isArray(data?.failures) ? data.failures : [];
+
+        if (items.length > 0) {
+          return {
+            ok: true as const,
+            items,
+            failures: [] as StageFailureItem[],
+          };
+        }
+
+        if (failures.length > 0) {
+          return {
+            ok: false as const,
+            items: [] as DirectStagedItem[],
+            failures,
+            error:
+              safeText(failures[0]?.reason) || "Single PDF stage failed on server",
+          };
+        }
+
+        lastError =
+          safeText(data?.warning || data?.error || data?.message) ||
+          "Single PDF stage verification failed";
+      } catch (error: any) {
+        lastError = safeText(error?.message || "Single PDF upload failed");
+
+        if (
+          stagingCancelledRef.current ||
+          lastError.toLowerCase().includes("cancelled")
+        ) {
+          throw new Error("Block upload cancelled");
+        }
+      }
+
+      if (attempt < TRANSPORT_MAX_RETRIES) {
+        await sleep(RETRY_BASE_DELAY_MS * attempt);
+      }
+    }
+
+    return {
+      ok: false as const,
+      items: [] as DirectStagedItem[],
+      failures: [
+        {
+          clientFileId: buildClientFileId(args.file, args.globalIndex),
+          fileName: args.file.name,
+          reason: lastError || "Single PDF upload failed after retries",
+        },
+      ],
+      error: lastError || "Single PDF upload failed after retries",
+    };
+  }
+
+  async function stageLogicalBlockWithParallelSingleUploads(args: {
+    blockFiles: File[];
+    blockNumber: number;
+    totalBlocks: number;
+    globalStartIndex: number;
+  }) {
+    const stagedItems: DirectStagedItem[] = [];
+    let failedCount = 0;
+    let nextLocalIndex = 0;
+
+    currentLogicalBlockFinishedBytesRef.current = 0;
+    currentLogicalBlockTotalBytesRef.current = args.blockFiles.reduce(
+      (sum, file) => sum + Number(file.size || 0),
+      0
+    );
+    activeTransportLoadedRef.current = {};
+    setCurrentBlockLoadedBytes(0);
+    setCurrentBlockPercent(0);
+
+    const workerCount = Math.min(TRANSPORT_CONCURRENCY, args.blockFiles.length);
+
+    async function worker() {
+      while (true) {
+        if (stagingCancelledRef.current) {
+          throw new Error("Block upload cancelled");
+        }
+
+        const localIndex = nextLocalIndex;
+        nextLocalIndex += 1;
+
+        if (localIndex >= args.blockFiles.length) {
+          return;
+        }
+
+        const file = args.blockFiles[localIndex];
+        const globalIndex = args.globalStartIndex + localIndex;
+
+        const result = await stageSinglePdfWithRetry({
+          blockNumber: args.blockNumber,
+          totalBlocks: args.totalBlocks,
+          file,
+          globalIndex,
+        });
+
+        if (result.ok) {
+          stagedItems.push(...result.items);
+        } else {
+          failedCount += 1;
+        }
+
+        currentLogicalBlockFinishedBytesRef.current += Number(file.size || 0);
+        setCompletedBlockBytes((prev) => prev + Number(file.size || 0));
+        refreshCurrentBlockProgress();
+      }
+    }
+
+    await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+    setCurrentBlockPercent(100);
+    setCurrentBlockLoadedBytes(0);
+    activeTransportLoadedRef.current = {};
+
+    return {
+      stagedItems,
+      failedCount,
+    };
   }
 
   async function stageDirectPdfBlocksAndCreateJob() {
@@ -645,7 +840,6 @@ export default function OfficialPapersPage() {
       setCurrentBlockTotal(totalBlocks);
 
       const allStagedItems: DirectStagedItem[] = [];
-      let completedBytesAccumulator = 0;
       let stageFailedCount = 0;
 
       for (let blockIndex = 0; blockIndex < totalBlocks; blockIndex++) {
@@ -660,61 +854,30 @@ export default function OfficialPapersPage() {
         );
 
         const blockFiles = usableFiles.slice(start, end);
-        const blockBytes = blockFiles.reduce(
-          (sum, file) => sum + Number(file.size || 0),
-          0
-        );
-
         const blockNumber = blockIndex + 1;
 
         setCurrentBlockNumber(blockNumber);
-        setCurrentBlockLoadedBytes(0);
-        setCurrentBlockPercent(0);
         setCurrentBlockFileCount(blockFiles.length);
-        setCurrentBlockLabel(`Block ${blockNumber} / ${totalBlocks}`);
+        setCurrentBlockLabel(
+          `Block ${blockNumber} / ${totalBlocks} • ${TRANSPORT_CONCURRENCY} parallel uploads • auto retry ${TRANSPORT_MAX_RETRIES}x`
+        );
         setStagingAbortEnabled(true);
 
-        let stageData: StageMultipartResponse | null = null;
+        const result = await stageLogicalBlockWithParallelSingleUploads({
+          blockFiles,
+          blockNumber,
+          totalBlocks,
+          globalStartIndex: start,
+        });
 
-        try {
-          stageData = await uploadBlockViaServer({
-            blockNumber,
-            totalBlocks,
-            files: blockFiles,
-            blockBytes,
-            globalStartIndex: start,
-          });
-        } catch (error: any) {
-          stageFailedCount += blockFiles.length;
-          completedBytesAccumulator += blockBytes;
-          setCompletedBlockBytes(completedBytesAccumulator);
-          setCurrentBlockLoadedBytes(0);
-          setCurrentBlockPercent(0);
-          continue;
-        }
-
-        setCurrentBlockPercent(100);
-
-        const stagedBlockItems = Array.isArray(stageData?.items) ? stageData.items : [];
-        const stageFailures = Array.isArray(stageData?.failures) ? stageData.failures : [];
-
-        const knownFailureCount = stageFailures.length;
-        const missingCount = Math.max(
-          0,
-          blockFiles.length - stagedBlockItems.length - knownFailureCount
-        );
-
-        stageFailedCount += knownFailureCount + missingCount;
-        allStagedItems.push(...stagedBlockItems);
-
-        completedBytesAccumulator += blockBytes;
-        setCompletedBlockBytes(completedBytesAccumulator);
-        setCurrentBlockLoadedBytes(0);
-        setCurrentBlockPercent(100);
+        allStagedItems.push(...result.stagedItems);
+        stageFailedCount += result.failedCount;
       }
 
       if (!allStagedItems.length) {
-        throw new Error("Koi bhi PDF successfully block upload nahi ho paayi");
+        throw new Error(
+          "Koi bhi PDF successfully stage nahi ho paayi. Ab system one-file-per-request + auto-retry mode me hai, isliye agar ye error fir aaye to next step backend request limit tune karna hoga."
+        );
       }
 
       const createJobRes = await fetch("/api/admin/official-papers/jobs", {
@@ -744,8 +907,8 @@ export default function OfficialPapersPage() {
 
       setServerMessage(
         stageFailedCount > 0
-          ? `Official papers upload job started. ${allStagedItems.length} PDFs block upload ho gayi, ${stageFailedCount} PDFs stage nahi ho paayi.`
-          : `Official papers upload job started. ${allStagedItems.length} PDFs block upload successfully queue ho gayi.`
+          ? `Official papers upload job started. ${allStagedItems.length} PDFs successfully queue ho gayi, ${stageFailedCount} PDFs retries ke baad bhi stage nahi ho paayi.`
+          : `Official papers upload job started successfully. ${allStagedItems.length} PDFs strong upload mode me queue ho gayi.`
       );
       setServerMessageType("success");
 
@@ -763,7 +926,7 @@ export default function OfficialPapersPage() {
       setCreatingJob(false);
       setIsStaging(false);
       setStagingAbortEnabled(false);
-      currentUploadXhrRef.current = null;
+      abortAllCurrentUploads();
     }
   }
 
@@ -772,12 +935,7 @@ export default function OfficialPapersPage() {
     if (!ok) return;
 
     stagingCancelledRef.current = true;
-
-    try {
-      currentUploadXhrRef.current?.abort();
-    } catch {
-      // ignore
-    }
+    abortAllCurrentUploads();
   }
 
   async function cancelCurrentJob() {
@@ -1043,11 +1201,7 @@ export default function OfficialPapersPage() {
         notifyLongTaskEnd();
         longTaskActiveRef.current = false;
       }
-      try {
-        currentUploadXhrRef.current?.abort();
-      } catch {
-        // ignore
-      }
+      abortAllCurrentUploads();
     };
   }, []);
 
@@ -1091,8 +1245,8 @@ export default function OfficialPapersPage() {
               <h1 className="text-2xl font-extrabold mt-3">IGNOU Official Papers</h1>
               <p className="text-sm text-slate-600 mt-1">
                 Ye page unsolved question papers ke liye hai. Is flow ko intentionally
-                product PDF vault se alag rakha gaya hai, taki safer block-wise server upload
-                aur batch processing ho sake.
+                product PDF vault se alag rakha gaya hai, taki strong one-file-per-request
+                upload + logical block processing ho sake.
               </p>
             </div>
 
@@ -1362,7 +1516,7 @@ export default function OfficialPapersPage() {
               <div className="flex items-center gap-2">
                 <LoaderCircle size={18} className="animate-spin" />
                 {isStaging
-                  ? "Official papers block upload chal raha hai. UI sirf block-wise progress dikhayegi taki extra re-render aur unnecessary front-end load kam rahe."
+                  ? "Strong upload mode active hai: one-file-per-request, 3 parallel uploads, auto retry enabled."
                   : "Batch job running. Inactivity auto-logout temporarily paused hai jab tak job finish nahi hoti."}
               </div>
             </div>
@@ -1390,7 +1544,7 @@ export default function OfficialPapersPage() {
                       Click here to select multiple PDFs
                     </div>
                     <div className="mt-1 text-xs text-sky-700">
-                      Yahan sirf large block upload system rakha gaya hai
+                      Strong mode: one-file-per-request + parallel + retry
                     </div>
                   </div>
                 </label>
@@ -1439,9 +1593,11 @@ export default function OfficialPapersPage() {
                   className="w-full mt-3 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none"
                   disabled={showTrash || isLongTaskBusy}
                 >
-                  <option value="100">100 PDFs / block</option>
-                  <option value="200">200 PDFs / block</option>
-                  <option value="500">500 PDFs / block</option>
+                  {LOGICAL_BLOCK_OPTIONS.map((n) => (
+                    <option key={n} value={n}>
+                      {n} PDFs / logical block
+                    </option>
+                  ))}
                 </select>
 
                 <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs leading-6 text-slate-700">
@@ -1449,11 +1605,13 @@ export default function OfficialPapersPage() {
                   <br />
                   Total Size: <b>{formatBytes(selectedPdfTotalBytes)}</b>
                   <br />
-                  Upload Blocks: <b>{selectedPdfBlockCount}</b>
+                  Logical Blocks: <b>{selectedPdfBlockCount}</b>
                   <br />
-                  Recommended stable block size: <b>100 ya 200</b>
+                  Parallel uploads: <b>{TRANSPORT_CONCURRENCY}</b>
                   <br />
-                  500 PDFs / block tab choose karo jab files ka combined size manageable ho.
+                  Auto retry: <b>{TRANSPORT_MAX_RETRIES} attempts / file</b>
+                  <br />
+                  Recommended stable logical block: <b>100 ya 200</b>
                   <br />
                   Solved PDF already hone par official paper upload auto-skip ho jayegi.
                 </div>
@@ -1487,7 +1645,7 @@ export default function OfficialPapersPage() {
                     className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-rose-600 hover:bg-rose-700 text-white transition font-extrabold shadow-sm"
                   >
                     <PauseCircle size={18} />
-                    Cancel Current Block Upload
+                    Cancel Current Upload
                   </button>
                 ) : null}
 
@@ -1503,7 +1661,7 @@ export default function OfficialPapersPage() {
               <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
                 <div className="flex items-center gap-2 text-sm font-extrabold text-blue-900">
                   <Layers3 size={16} />
-                  Block Upload Progress
+                  Strong Upload Progress
                 </div>
 
                 <div className="mt-3 h-4 w-full overflow-hidden rounded-full bg-blue-100">
@@ -1514,7 +1672,7 @@ export default function OfficialPapersPage() {
                 </div>
 
                 <div className="mt-2 text-xs font-semibold text-blue-900">
-                  Total block upload progress: {totalStagePercent}%
+                  Total upload progress: {totalStagePercent}%
                 </div>
 
                 <div className="mt-4 grid grid-cols-2 gap-3">
@@ -1552,25 +1710,24 @@ export default function OfficialPapersPage() {
 
                   <div className="rounded-xl border border-blue-200 bg-white p-3">
                     <div className="text-[11px] uppercase font-extrabold text-blue-700">
-                      Total Blocks
+                      Parallel Uploads
                     </div>
                     <div className="mt-1 text-sm font-extrabold text-slate-900">
-                      {currentBlockTotal || selectedPdfBlockCount || 0}
+                      {TRANSPORT_CONCURRENCY}
                     </div>
                   </div>
                 </div>
 
                 <div className="mt-4 rounded-xl border border-blue-200 bg-white p-3 text-xs leading-6 text-slate-700">
-                  Yahan per-file <b>Staged Files</b> aur <b>Failed Stage</b> tracker intentionally
-                  hata diya gaya hai. Ab UI sirf large block-wise progress dikhayegi, jisse extra re-render
-                  aur unnecessary front-end load kam rahega.
+                  Logical block 100/200/500 ka rahega, lekin actual transport one-file-per-request
+                  mode me hota hai. Isi wajah se large multipart request failure ka bottleneck hat gaya.
                 </div>
               </div>
 
               <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900 leading-6">
-                <b>Current upload flow:</b> PDFs select karo → 100/200/500 ke large blocks me upload hoga →
-                direct bulk job create hogi → batches process honge. Per-file staged/failed stage UI remove kar
-                di gayi hai.
+                <b>Strong upload flow:</b> PDFs select karo → logical block banta hai → har PDF alag
+                request me parallel upload hoti hai → auto retry hota hai → final job create hoti hai →
+                batches process hote hain.
               </div>
 
               <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-xs text-emerald-900 leading-6">
@@ -2036,9 +2193,8 @@ export default function OfficialPapersPage() {
               ) : null}
 
               <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900 leading-6">
-                <b>Current status:</b> Official papers upload me ab UI sirf large block upload system dikhati hai.
-                Staged Files aur Failed Stage wale extra front-end trackers hata diye gaye hain, jabki backend
-                batch processing aur failure logs same tarah safe rahenge.
+                <b>Current status:</b> Ab system ka sabse bada bottleneck remove kar diya gaya hai:
+                large multipart request ke bajay har PDF alag request me upload hoti hai, parallel aur retry ke saath.
               </div>
             </div>
           </div>
