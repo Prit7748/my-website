@@ -15,7 +15,6 @@ import {
   Trash2,
   X,
   Search,
-  BarChart3,
   LoaderCircle,
   PauseCircle,
   CheckCircle2,
@@ -72,66 +71,38 @@ type ImageFileItem = {
 
 type FileListResponse = { ok?: boolean; files?: ImageFileItem[]; total?: number };
 
-type RecentFailureItem = {
-  itemIndex?: number;
-  rowNumber?: number;
-  batchNumber?: number;
-  identifier?: string;
-  sku?: string;
-  fileName?: string;
-  status?: string;
-  reason?: string;
-  createdAt?: string | null;
+type DirectFolderUploadResponse = {
+  ok?: boolean;
+  error?: string;
+  mode?: string;
+  folder?: {
+    _id: string;
+    name: string;
+    path: string;
+  };
+  summary?: {
+    sku?: string;
+    uploadedImages?: number;
+    skippedImages?: number;
+    totalImagesNow?: number;
+    status?: string;
+  };
 };
 
-type BulkJobProgress = {
-  totalItems: number;
-  processedItems: number;
-  successItems: number;
-  failedItems: number;
-  skippedItems: number;
-  validItems: number;
-  batchSize: number;
-  batchCount: number;
-  currentBatchNumber: number;
-  lastProcessedIndex: number;
-  progressPercent: number;
+type BrowserFolderFile = File & {
+  webkitRelativePath?: string;
 };
 
-type BulkJobState = {
-  _id: string;
-  jobType: string;
-  jobLabel: string;
-  status: string;
-  createdBy: string;
-  meta?: any;
-  config?: any;
-  summary?: any;
-  progress?: BulkJobProgress;
-  lastBatch?: {
-    batchNumber?: number;
-    fromIndex?: number;
-    toIndex?: number;
-    attempted?: number;
-    success?: number;
-    failed?: number;
-    skipped?: number;
-    startedAt?: string | null;
-    endedAt?: string | null;
-    note?: string;
-  } | null;
-  failuresCount?: number;
-  recentFailures?: RecentFailureItem[];
-  resultMessage?: string;
-  downloadFileName?: string;
-  startedAt?: string | null;
-  completedAt?: string | null;
-  failedAt?: string | null;
-  cancelledAt?: string | null;
-  lastHeartbeatAt?: string | null;
-  createdAt?: string | null;
-  updatedAt?: string | null;
+type FolderUploadGroup = {
+  folderName: string;
+  files: BrowserFolderFile[];
+  totalBytes: number;
 };
+
+const DIRECT_FOLDER_CONCURRENCY = 3;
+const DIRECT_FOLDER_MAX_RETRIES = 3;
+const DIRECT_FOLDER_TIMEOUT_MS = 180000;
+const RETRY_BASE_DELAY_MS = 1200;
 
 function formatBytes(bytes: number) {
   const n = Number(bytes || 0);
@@ -148,15 +119,12 @@ function formatDate(input?: string | null) {
   return d.toLocaleString("en-IN");
 }
 
-function formatDateTime(input?: string | null) {
-  if (!input) return "—";
-  const d = new Date(input);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleString("en-IN");
-}
-
 function safeText(x: any) {
   return String(x ?? "").trim();
+}
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 function notifyLongTaskStart() {
@@ -171,32 +139,68 @@ function notifyLongTaskEnd() {
   }
 }
 
-function isFinalStatus(status: string) {
-  const s = safeText(status);
-  return (
-    s === "completed" ||
-    s === "completed_with_errors" ||
-    s === "failed" ||
-    s === "cancelled"
-  );
+function extractSkuFolderFromRelativePath(file: BrowserFolderFile) {
+  const rel = safeText(file.webkitRelativePath || "").replace(/\\/g, "/");
+  const parts = rel.split("/").filter(Boolean);
+
+  if (parts.length >= 3) {
+    return safeText(parts[1]);
+  }
+
+  if (parts.length === 2) {
+    return safeText(parts[0]);
+  }
+
+  return "";
 }
 
-function statusTone(status: string) {
-  const s = safeText(status);
+function normalizeSelectedFolderFiles(
+  fileList: FileList | File[] | null | undefined
+): BrowserFolderFile[] {
+  const arr = Array.from(fileList || []) as BrowserFolderFile[];
 
-  if (s === "completed") {
-    return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  const onlyImages = arr.filter((file) => {
+    const name = safeText(file?.name).toLowerCase();
+    return (
+      name.endsWith(".jpg") ||
+      name.endsWith(".jpeg") ||
+      name.endsWith(".png") ||
+      name.endsWith(".webp")
+    );
+  });
+
+  const uniqueMap = new Map<string, BrowserFolderFile>();
+  for (const file of onlyImages) {
+    const key = `${safeText(file.webkitRelativePath || file.name)}__${file.size}__${file.lastModified}`;
+    if (!uniqueMap.has(key)) {
+      uniqueMap.set(key, file);
+    }
   }
 
-  if (s === "completed_with_errors") {
-    return "border-amber-200 bg-amber-50 text-amber-800";
+  return Array.from(uniqueMap.values());
+}
+
+function buildFolderUploadGroups(files: BrowserFolderFile[]) {
+  const map = new Map<string, FolderUploadGroup>();
+
+  for (const file of files) {
+    const folderName = extractSkuFolderFromRelativePath(file);
+    if (!folderName) continue;
+
+    if (!map.has(folderName)) {
+      map.set(folderName, {
+        folderName,
+        files: [],
+        totalBytes: 0,
+      });
+    }
+
+    const group = map.get(folderName)!;
+    group.files.push(file);
+    group.totalBytes += Number(file.size || 0);
   }
 
-  if (s === "failed" || s === "cancelled") {
-    return "border-rose-200 bg-rose-50 text-rose-800";
-  }
-
-  return "border-blue-200 bg-blue-50 text-blue-800";
+  return Array.from(map.values()).sort((a, b) => a.folderName.localeCompare(b.folderName));
 }
 
 export default function BulkProductImagesPage() {
@@ -215,20 +219,11 @@ export default function BulkProductImagesPage() {
   const [newFolderName, setNewFolderName] = useState("");
   const [creatingFolder, setCreatingFolder] = useState(false);
 
-  const [zipFile, setZipFile] = useState<File | null>(null);
   const [uploadMode, setUploadMode] = useState<"append" | "replace">("append");
-  const [batchSize, setBatchSize] = useState(100);
+  const [selectedFolderFiles, setSelectedFolderFiles] = useState<BrowserFolderFile[]>([]);
 
   const [serverMessage, setServerMessage] = useState("");
   const [serverMessageType, setServerMessageType] = useState<"success" | "error" | "info">("info");
-
-  const [activeJob, setActiveJob] = useState<BulkJobState | null>(null);
-  const [activeJobId, setActiveJobId] = useState("");
-  const [creatingJob, setCreatingJob] = useState(false);
-  const [isCancelling, setIsCancelling] = useState(false);
-
-  const processInFlightRef = useRef(false);
-  const longTaskActiveRef = useRef(false);
 
   const [folderActionLoadingId, setFolderActionLoadingId] = useState("");
   const [fileActionLoadingId, setFileActionLoadingId] = useState("");
@@ -246,6 +241,16 @@ export default function BulkProductImagesPage() {
   const [productFolderSearch, setProductFolderSearch] = useState("");
   const [productFolderPage, setProductFolderPage] = useState(1);
   const [productFolderPageSize, setProductFolderPageSize] = useState(12);
+
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadTotalFolders, setUploadTotalFolders] = useState(0);
+  const [uploadDoneFolders, setUploadDoneFolders] = useState(0);
+  const [uploadFailedFolders, setUploadFailedFolders] = useState(0);
+  const [currentUploadingFolderName, setCurrentUploadingFolderName] = useState("");
+
+  const uploadCancelRef = useRef(false);
+  const uploadControllersRef = useRef<AbortController[]>([]);
+  const longTaskActiveRef = useRef(false);
 
   const titlePath = useMemo(() => breadcrumbs.map((x) => x.name).join(" / "), [breadcrumbs]);
 
@@ -289,11 +294,20 @@ export default function BulkProductImagesPage() {
     filteredUploadedProductFolders.length
   );
 
-  const currentStatus = safeText(activeJob?.status);
-  const isJobActive = Boolean(activeJobId) && !isFinalStatus(currentStatus);
-  const progress = activeJob?.progress;
-  const summary = activeJob?.summary || {};
-  const recentFailures = Array.isArray(activeJob?.recentFailures) ? activeJob.recentFailures : [];
+  const selectedUploadGroups = useMemo(
+    () => buildFolderUploadGroups(selectedFolderFiles),
+    [selectedFolderFiles]
+  );
+
+  const selectedUploadTotalBytes = useMemo(
+    () => selectedUploadGroups.reduce((sum, group) => sum + Number(group.totalBytes || 0), 0),
+    [selectedUploadGroups]
+  );
+
+  const uploadProgressPercent = useMemo(() => {
+    if (!uploadTotalFolders) return 0;
+    return Math.min(100, Math.round((uploadDoneFolders / uploadTotalFolders) * 100));
+  }, [uploadDoneFolders, uploadTotalFolders]);
 
   async function safeReadJson(res: Response) {
     const text = await res.text();
@@ -314,9 +328,20 @@ export default function BulkProductImagesPage() {
     setServerMessageType("info");
   }
 
-  function resetJobState() {
-    setActiveJob(null);
-    setActiveJobId("");
+  function resetUploadState() {
+    setIsUploading(false);
+    setUploadTotalFolders(0);
+    setUploadDoneFolders(0);
+    setUploadFailedFolders(0);
+    setCurrentUploadingFolderName("");
+    uploadCancelRef.current = false;
+    uploadControllersRef.current = [];
+  }
+
+  function clearSelectedFolderInput() {
+    setSelectedFolderFiles([]);
+    const input = document.getElementById("bulk-folder-images-input") as HTMLInputElement | null;
+    if (input) input.value = "";
   }
 
   async function loadBootstrap() {
@@ -390,144 +415,170 @@ export default function BulkProductImagesPage() {
     }
   }
 
-  async function fetchJobStatus(jobId: string) {
-    const res = await fetch(`/api/admin/bulk-jobs/${encodeURIComponent(jobId)}`, {
-      method: "GET",
-      credentials: "include",
-      cache: "no-store",
-    });
+  async function uploadFolderRequest(group: FolderUploadGroup) {
+    const controller = new AbortController();
+    uploadControllersRef.current.push(controller);
 
-    const data = await safeReadJson(res);
-    if (!res.ok || !data?.ok) {
-      throw new Error(data?.error || "Failed to fetch job status");
-    }
+    const timer = setTimeout(() => controller.abort(), DIRECT_FOLDER_TIMEOUT_MS);
 
-    const job = data?.job as BulkJobState;
-    setActiveJob(job);
-    return job;
-  }
-
-  async function processNextBatch(jobId: string) {
-    if (!jobId || processInFlightRef.current) return;
-
-    processInFlightRef.current = true;
     try {
-      const res = await fetch("/api/products/bulk-images/jobs/process", {
+      const form = new FormData();
+      form.append("parentPath", currentPath);
+      form.append("mode", uploadMode);
+      form.append("skuFolderName", group.folderName);
+
+      for (const file of group.files) {
+        form.append("files", file);
+      }
+
+      const res = await fetch("/api/products/bulk-images/upload", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ jobId }),
+        body: form,
+        signal: controller.signal,
       });
 
-      const data = await safeReadJson(res);
+      const data = (await safeReadJson(res)) as DirectFolderUploadResponse;
 
       if (!res.ok || !data?.ok) {
-        throw new Error(data?.error || "Image batch processing failed");
+        throw new Error(data?.error || "Folder upload failed");
       }
 
-      if (data?.job) {
-        setActiveJob(data.job as BulkJobState);
-      }
-
-      void loadFolders(currentPath);
-      if (modalOpen && modalFolder) {
-        void loadModalFiles(modalFolder.path);
-      }
+      return data;
     } finally {
-      processInFlightRef.current = false;
+      clearTimeout(timer);
+      uploadControllersRef.current = uploadControllersRef.current.filter((x) => x !== controller);
     }
   }
 
-  async function createImageJob() {
-    if (!zipFile) {
-      alert("Pehle ZIP file select karo.");
+  async function uploadFolderWithRetry(group: FolderUploadGroup) {
+    let lastError = "";
+
+    for (let attempt = 1; attempt <= DIRECT_FOLDER_MAX_RETRIES; attempt++) {
+      if (uploadCancelRef.current) {
+        throw new Error("Upload cancelled");
+      }
+
+      try {
+        return await uploadFolderRequest(group);
+      } catch (error: any) {
+        lastError = safeText(error?.message || "Folder upload failed");
+
+        const lower = lastError.toLowerCase();
+        const noRetry =
+          lower.includes("not authenticated") ||
+          lower.includes("forbidden") ||
+          lower.includes("sku not found") ||
+          lower.includes("already exists in another folder") ||
+          lower.includes("parent folder not found") ||
+          lower.includes("valid sku folder name required") ||
+          lower.includes("only") ||
+          lower.includes("max ");
+
+        if (noRetry || attempt === DIRECT_FOLDER_MAX_RETRIES) {
+          throw new Error(lastError);
+        }
+
+        await sleep(RETRY_BASE_DELAY_MS * attempt);
+      }
+    }
+
+    throw new Error(lastError || "Folder upload failed after retries");
+  }
+
+  async function startDirectFolderUpload() {
+    if (!selectedUploadGroups.length) {
+      alert("Pehle folders select karo.");
       return;
     }
 
     if (currentPath === "img-root") {
-      alert("Pehle koi website-created folder open karo. Direct img-root me ZIP upload allowed nahi hai.");
+      alert("Pehle koi website-created folder open karo. Direct upload img-root me allowed nahi hai.");
       return;
     }
 
-    setCreatingJob(true);
     resetMessages();
-    resetJobState();
+    setIsUploading(true);
+    setUploadTotalFolders(selectedUploadGroups.length);
+    setUploadDoneFolders(0);
+    setUploadFailedFolders(0);
+    setCurrentUploadingFolderName("");
+    uploadCancelRef.current = false;
+
+    let successCount = 0;
+    let failedCount = 0;
+    let nextIndex = 0;
+
+    async function worker() {
+      while (true) {
+        if (uploadCancelRef.current) return;
+
+        const currentIndex = nextIndex;
+        nextIndex += 1;
+
+        if (currentIndex >= selectedUploadGroups.length) {
+          return;
+        }
+
+        const group = selectedUploadGroups[currentIndex];
+        setCurrentUploadingFolderName(group.folderName);
+
+        try {
+          await uploadFolderWithRetry(group);
+          successCount += 1;
+          setUploadDoneFolders((prev) => prev + 1);
+        } catch {
+          failedCount += 1;
+          setUploadFailedFolders((prev) => prev + 1);
+        }
+      }
+    }
 
     try {
-      const form = new FormData();
-      form.append("file", zipFile);
-      form.append("mode", uploadMode);
-      form.append("parentPath", currentPath);
-      form.append("batchSize", String(batchSize));
+      const workerCount = Math.min(DIRECT_FOLDER_CONCURRENCY, selectedUploadGroups.length);
+      await Promise.all(Array.from({ length: workerCount }, () => worker()));
 
-      const res = await fetch("/api/products/bulk-images/jobs", {
-        method: "POST",
-        credentials: "include",
-        body: form,
-      });
-
-      const data = await safeReadJson(res);
-
-      if (!res.ok || !data?.ok) {
-        const errMsg = data?.error || "Image job creation failed";
-        setServerMessage(errMsg);
+      if (uploadCancelRef.current) {
+        setServerMessage(
+          `Upload cancelled. Done ${successCount} / ${selectedUploadGroups.length}, Failed ${failedCount}.`
+        );
+        setServerMessageType("info");
+      } else if (successCount > 0 && failedCount === 0) {
+        setServerMessage(`${successCount} folders successfully upload ho gaye.`);
+        setServerMessageType("success");
+      } else if (successCount > 0) {
+        setServerMessage(
+          `Upload complete. Uploaded folders ${successCount}, Failed folders ${failedCount}.`
+        );
+        setServerMessageType("info");
+      } else {
+        setServerMessage("Koi bhi folder successfully upload nahi ho paya.");
         setServerMessageType("error");
-        alert(errMsg);
-        return;
       }
 
-      const job = data?.job as BulkJobState;
-      setActiveJob(job);
-      setActiveJobId(job?._id || "");
-      setServerMessage("Bulk product images job started successfully.");
-      setServerMessageType("success");
-      setZipFile(null);
+      await loadFolders(currentPath);
+      if (modalOpen && modalFolder) {
+        await loadModalFiles(modalFolder.path);
+      }
 
-      const input = document.getElementById("bulk-images-zip-input") as HTMLInputElement | null;
-      if (input) input.value = "";
-    } catch (e: any) {
-      const errMsg = e?.message || "Server error";
-      setServerMessage(errMsg);
-      setServerMessageType("error");
-      alert(errMsg);
+      clearSelectedFolderInput();
     } finally {
-      setCreatingJob(false);
+      resetUploadState();
     }
   }
 
-  async function cancelCurrentJob() {
-    if (!activeJobId) return;
-
-    const ok = window.confirm("Current bulk image job ko cancel karna hai?");
+  function cancelCurrentUpload() {
+    const ok = window.confirm("Current folder upload process cancel karna hai?");
     if (!ok) return;
 
-    setIsCancelling(true);
-    try {
-      const res = await fetch(`/api/admin/bulk-jobs/${encodeURIComponent(activeJobId)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ action: "cancel" }),
-      });
+    uploadCancelRef.current = true;
 
-      const data = await safeReadJson(res);
-      if (!res.ok || !data?.ok) {
-        throw new Error(data?.error || "Cancel failed");
+    for (const controller of uploadControllersRef.current) {
+      try {
+        controller.abort();
+      } catch {
+        // ignore
       }
-
-      if (data?.job) {
-        setActiveJob(data.job as BulkJobState);
-      }
-
-      setServerMessage("Bulk image job cancelled.");
-      setServerMessageType("info");
-    } catch (e: any) {
-      const errMsg = e?.message || "Cancel failed";
-      setServerMessage(errMsg);
-      setServerMessageType("error");
-      alert(errMsg);
-    } finally {
-      setIsCancelling(false);
     }
   }
 
@@ -544,8 +595,8 @@ export default function BulkProductImagesPage() {
       return;
     }
 
-    if (isJobActive) {
-      alert("Bulk image job running hai. Folder create abhi disabled hai.");
+    if (isUploading) {
+      alert("Direct upload running hai. Folder create abhi disabled hai.");
       return;
     }
 
@@ -582,8 +633,8 @@ export default function BulkProductImagesPage() {
       return;
     }
 
-    if (isJobActive) {
-      alert("Bulk image job running hai. Single image upload abhi disabled hai.");
+    if (isUploading) {
+      alert("Direct upload running hai. Single image upload abhi disabled hai.");
       return;
     }
 
@@ -616,8 +667,8 @@ export default function BulkProductImagesPage() {
   }
 
   async function deleteImage(file: ImageFileItem) {
-    if (isJobActive) {
-      alert("Bulk image job running hai. Delete abhi disabled hai.");
+    if (isUploading) {
+      alert("Direct upload running hai. Delete abhi disabled hai.");
       return;
     }
 
@@ -655,8 +706,8 @@ export default function BulkProductImagesPage() {
       return;
     }
 
-    if (isJobActive) {
-      alert("Bulk image job running hai. Folder rename abhi disabled hai.");
+    if (isUploading) {
+      alert("Direct upload running hai. Folder rename abhi disabled hai.");
       return;
     }
 
@@ -684,8 +735,8 @@ export default function BulkProductImagesPage() {
   }
 
   async function deleteFolder(folder: FolderItem) {
-    if (isJobActive) {
-      alert("Bulk image job running hai. Folder delete abhi disabled hai.");
+    if (isUploading) {
+      alert("Direct upload running hai. Folder delete abhi disabled hai.");
       return;
     }
 
@@ -725,11 +776,6 @@ export default function BulkProductImagesPage() {
     if (modalOpen && modalFolder) {
       await loadModalFiles(modalFolder.path);
     }
-    if (activeJobId) {
-      void fetchJobStatus(activeJobId).catch(() => {
-        // ignore refresh job error
-      });
-    }
   }
 
   useEffect(() => {
@@ -749,50 +795,16 @@ export default function BulkProductImagesPage() {
   }, [fileSortBy, fileSortDir]);
 
   useEffect(() => {
-    if (isJobActive && !longTaskActiveRef.current) {
+    if (isUploading && !longTaskActiveRef.current) {
       notifyLongTaskStart();
       longTaskActiveRef.current = true;
     }
 
-    if ((!isJobActive || isFinalStatus(currentStatus)) && longTaskActiveRef.current) {
+    if (!isUploading && longTaskActiveRef.current) {
       notifyLongTaskEnd();
       longTaskActiveRef.current = false;
     }
-  }, [isJobActive, currentStatus]);
-
-  useEffect(() => {
-    if (!activeJobId) return;
-    if (isFinalStatus(currentStatus)) return;
-
-    const timer = setTimeout(() => {
-      void processNextBatch(activeJobId);
-    }, 400);
-
-    return () => clearTimeout(timer);
-  }, [activeJobId, currentStatus, activeJob?.progress?.processedItems]);
-
-  useEffect(() => {
-    if (!activeJobId) return;
-    if (isFinalStatus(currentStatus)) return;
-
-    const interval = setInterval(() => {
-      void fetchJobStatus(activeJobId).catch(() => {
-        // ignore polling error
-      });
-    }, 1200);
-
-    return () => clearInterval(interval);
-  }, [activeJobId, currentStatus]);
-
-  useEffect(() => {
-    if (!activeJobId) return;
-    if (!isFinalStatus(currentStatus)) return;
-
-    void loadFolders(currentPath);
-    if (modalOpen && modalFolder) {
-      void loadModalFiles(modalFolder.path);
-    }
-  }, [activeJobId, currentStatus, currentPath, modalOpen, modalFolder]);
+  }, [isUploading]);
 
   useEffect(() => {
     setProductFolderSearch("");
@@ -814,6 +826,15 @@ export default function BulkProductImagesPage() {
       if (longTaskActiveRef.current) {
         notifyLongTaskEnd();
         longTaskActiveRef.current = false;
+      }
+
+      uploadCancelRef.current = true;
+      for (const controller of uploadControllersRef.current) {
+        try {
+          controller.abort();
+        } catch {
+          // ignore
+        }
       }
     };
   }, []);
@@ -845,19 +866,11 @@ export default function BulkProductImagesPage() {
 
             <div className="flex items-center gap-2 flex-wrap">
               <Link
-                href="/admin/products/bulk"
+                href="/admin"
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-semibold shadow-sm"
               >
                 <ArrowLeft size={18} />
                 Back
-              </Link>
-
-              <Link
-                href="/admin/products/bulk/bulk-images/report"
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white border border-blue-600 transition font-semibold shadow-sm"
-              >
-                <BarChart3 size={18} />
-                Image Report
               </Link>
 
               <button
@@ -894,141 +907,11 @@ export default function BulkProductImagesPage() {
             </div>
           ) : null}
 
-          {activeJob ? (
-            <div className={`mt-4 rounded-2xl border p-4 ${statusTone(currentStatus)}`}>
-              <div className="flex items-start justify-between gap-4 flex-wrap">
-                <div>
-                  <div className="text-sm font-extrabold">
-                    Current Job: {safeText(activeJob.jobLabel) || "Bulk Product Images Upload"}
-                  </div>
-                  <div className="mt-1 text-xs font-semibold uppercase tracking-wide">
-                    Status: {safeText(activeJob.status) || "—"}
-                  </div>
-                  <div className="mt-2 text-xs leading-5">
-                    Job ID: <b>{activeJob._id}</b>
-                    <br />
-                    Started: <b>{formatDateTime(activeJob.startedAt || activeJob.createdAt)}</b>
-                    <br />
-                    Last heartbeat: <b>{formatDateTime(activeJob.lastHeartbeatAt)}</b>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2 flex-wrap">
-                  {activeJobId ? (
-                    <a
-                      href={`/api/admin/bulk-jobs/${encodeURIComponent(activeJobId)}/failures`}
-                      className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl font-bold shadow-sm border ${
-                        Number(activeJob.failuresCount || 0) > 0
-                          ? "bg-white hover:bg-gray-50 border-gray-200 text-slate-900"
-                          : "bg-gray-100 border-gray-200 text-slate-400 pointer-events-none"
-                      }`}
-                    >
-                      <Upload size={16} />
-                      Download Failed CSV
-                    </a>
-                  ) : null}
-
-                  {!isFinalStatus(currentStatus) ? (
-                    <button
-                      type="button"
-                      onClick={cancelCurrentJob}
-                      disabled={isCancelling}
-                      className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold shadow-sm disabled:opacity-60"
-                    >
-                      <PauseCircle size={16} />
-                      {isCancelling ? "Cancelling..." : "Cancel Job"}
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-
-              <div className="mt-4 rounded-2xl border border-white/70 bg-white/70 p-4">
-                <div className="flex items-center justify-between gap-3 flex-wrap">
-                  <div className="text-sm font-extrabold">Progress</div>
-                  <div className="text-sm font-bold">
-                    {progress?.processedItems ?? 0} / {progress?.totalItems ?? 0} SKU folders processed
-                  </div>
-                </div>
-
-                <div className="mt-3 h-4 w-full overflow-hidden rounded-full bg-slate-200">
-                  <div
-                    className="h-full rounded-full bg-slate-900 transition-all"
-                    style={{ width: `${progress?.progressPercent ?? 0}%` }}
-                  />
-                </div>
-
-                <div className="mt-2 text-xs font-semibold text-slate-700">
-                  {progress?.progressPercent ?? 0}% complete
-                </div>
-
-                <div className="mt-4 grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                    <div className="text-xs text-slate-500 font-bold uppercase">Total SKU Folders</div>
-                    <div className="text-xl font-extrabold mt-1">{summary?.totalSkuFolders ?? 0}</div>
-                  </div>
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                    <div className="text-xs text-slate-500 font-bold uppercase">Valid SKU Folders</div>
-                    <div className="text-xl font-extrabold mt-1">{summary?.validSkuFolders ?? 0}</div>
-                  </div>
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                    <div className="text-xs text-slate-500 font-bold uppercase">Updated</div>
-                    <div className="text-xl font-extrabold mt-1">{summary?.updatedSkuFolders ?? 0}</div>
-                  </div>
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                    <div className="text-xs text-slate-500 font-bold uppercase">Skipped</div>
-                    <div className="text-xl font-extrabold mt-1">{summary?.skippedSkuFolders ?? 0}</div>
-                  </div>
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                    <div className="text-xs text-slate-500 font-bold uppercase">Failed</div>
-                    <div className="text-xl font-extrabold mt-1">{summary?.failedSkuFolders ?? 0}</div>
-                  </div>
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                    <div className="text-xs text-slate-500 font-bold uppercase">Batch Size</div>
-                    <div className="text-xl font-extrabold mt-1">{progress?.batchSize ?? 0}</div>
-                  </div>
-                </div>
-
-                <div className="mt-4 grid grid-cols-1 xl:grid-cols-3 gap-4">
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
-                    <div className="text-sm font-extrabold">Batch Status</div>
-                    <div className="text-sm text-slate-600 mt-2 leading-6">
-                      Current Batch: <b>{progress?.currentBatchNumber ?? 0}</b> /{" "}
-                      <b>{progress?.batchCount ?? 0}</b>
-                      <br />
-                      Last Processed Index: <b>{progress?.lastProcessedIndex ?? -1}</b>
-                      <br />
-                      Mode: <b>{safeText(summary?.mode || activeJob?.meta?.mode || "-")}</b>
-                    </div>
-                    {activeJob?.lastBatch?.note ? (
-                      <div className="mt-2 text-xs text-slate-700">{activeJob.lastBatch.note}</div>
-                    ) : null}
-                  </div>
-
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
-                    <div className="text-sm font-extrabold">Source</div>
-                    <div className="text-sm text-slate-600 mt-2 leading-6">
-                      Parent Path: <b>{safeText(summary?.parentPath || activeJob?.meta?.parentPath || "-")}</b>
-                      <br />
-                      ZIP File: <b>{safeText(summary?.originalFileName || activeJob?.meta?.originalFileName || "-")}</b>
-                    </div>
-                  </div>
-
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
-                    <div className="text-sm font-extrabold">Result Message</div>
-                    <div className="text-sm text-slate-600 mt-2 leading-6">
-                      {safeText(activeJob?.resultMessage) || "Job running..."}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          ) : null}
-
-          {isJobActive ? (
+          {isUploading ? (
             <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900">
               <div className="flex items-center gap-2">
                 <LoaderCircle size={18} className="animate-spin" />
-                Batch image job running. Inactivity auto-logout temporarily paused hai jab tak job finish nahi hoti.
+                Direct folder upload chal raha hai.
               </div>
             </div>
           ) : null}
@@ -1036,12 +919,12 @@ export default function BulkProductImagesPage() {
           <div className="mt-6 grid grid-cols-1 lg:grid-cols-[320px_minmax(0,1fr)] gap-6 items-start">
             <div className="space-y-4 min-w-0">
               <div className="rounded-2xl border border-gray-200 bg-white p-4">
-                <div className="text-sm font-extrabold">Upload Images ZIP</div>
+                <div className="text-sm font-extrabold">Direct Image Folders Upload</div>
 
                 <label
-                  htmlFor="bulk-images-zip-input"
+                  htmlFor="bulk-folder-images-input"
                   className={`mt-3 flex min-h-[120px] w-full items-center justify-center rounded-2xl border-2 border-dashed px-4 py-6 text-center transition ${
-                    isJobActive
+                    isUploading
                       ? "cursor-not-allowed border-slate-300 bg-slate-100"
                       : "cursor-pointer border-emerald-300 bg-emerald-50 hover:bg-emerald-100"
                   }`}
@@ -1051,103 +934,117 @@ export default function BulkProductImagesPage() {
                       <Upload size={20} />
                     </div>
                     <div className="mt-3 text-sm font-extrabold text-emerald-800">
-                      Click here to select ZIP
+                      Click here to select parent folder
                     </div>
-                    <div className="mt-1 text-xs text-emerald-700">ZIP format only</div>
+                    <div className="mt-1 text-xs text-emerald-700">
+                      Parent folder ke andar SKU image folders hone chahiye
+                    </div>
                   </div>
                 </label>
 
                 <input
-                  id="bulk-images-zip-input"
+                  id="bulk-folder-images-input"
                   type="file"
-                  accept=".zip,application/zip"
-                  onChange={(e) => setZipFile(e.target.files?.[0] || null)}
+                  multiple
                   className="hidden"
-                  disabled={isJobActive}
+                  disabled={isUploading}
+                  onChange={(e) => {
+                    const files = normalizeSelectedFolderFiles(e.target.files);
+                    setSelectedFolderFiles(files);
+                    resetMessages();
+                    setUploadTotalFolders(0);
+                    setUploadDoneFolders(0);
+                    setUploadFailedFolders(0);
+                    setCurrentUploadingFolderName("");
+                  }}
+                  {...({ webkitdirectory: "true", directory: "true" } as any)}
                 />
 
                 <select
                   value={uploadMode}
                   onChange={(e) => setUploadMode(e.target.value as "append" | "replace")}
                   className="w-full mt-3 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none"
-                  disabled={isJobActive}
+                  disabled={isUploading}
                 >
                   <option value="append">Mode: Append Images</option>
                   <option value="replace">Mode: Replace Existing Images</option>
                 </select>
 
-                <select
-                  value={String(batchSize)}
-                  onChange={(e) => setBatchSize(Number(e.target.value))}
-                  className="w-full mt-3 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none"
-                  disabled={isJobActive}
-                >
-                  <option value="50">Batch Size: 50 SKU folders</option>
-                  <option value="100">Batch Size: 100 SKU folders</option>
-                  <option value="250">Batch Size: 250 SKU folders</option>
-                  <option value="500">Batch Size: 500 SKU folders</option>
-                </select>
-
-                <div className="mt-3 text-xs text-slate-500 leading-5 break-words">
+                <div className="mt-3 text-xs text-slate-500 leading-6 break-words">
                   Current folder: <b>{currentPath}</b>
                   <br />
-                  Selected ZIP: <b>{zipFile?.name || "No file selected"}</b>
+                  Selected image files: <b>{selectedFolderFiles.length}</b>
+                  <br />
+                  Detected SKU folders: <b>{selectedUploadGroups.length}</b>
+                  <br />
+                  Total size: <b>{formatBytes(selectedUploadTotalBytes)}</b>
+                  <br />
+                  Concurrency: <b>{DIRECT_FOLDER_CONCURRENCY}</b>
                 </div>
 
                 {currentPath === "img-root" ? (
                   <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs leading-5 text-rose-700">
-                    ZIP upload direct <b>img-root</b> me allowed nahi hai. Pehle left side se koi
-                    website-created folder open karo, phir uske andar ZIP upload karo.
+                    Direct upload <b>img-root</b> me allowed nahi hai. Pehle left side se koi
+                    website-created folder open karo, phir uske andar product image folders upload karo.
                   </div>
                 ) : null}
 
                 <button
                   type="button"
-                  onClick={createImageJob}
-                  disabled={creatingJob || isJobActive || currentPath === "img-root" || !zipFile}
+                  onClick={startDirectFolderUpload}
+                  disabled={isUploading || currentPath === "img-root" || !selectedUploadGroups.length}
                   className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-slate-900 hover:bg-slate-950 text-white transition font-extrabold disabled:opacity-60 shadow-sm"
                 >
                   <Upload size={18} />
-                  {creatingJob ? "Starting Job..." : "Start Upload Job"}
+                  {isUploading ? "Uploading..." : "Start Direct Upload"}
                 </button>
 
+                {isUploading ? (
+                  <button
+                    type="button"
+                    onClick={cancelCurrentUpload}
+                    className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-rose-600 hover:bg-rose-700 text-white transition font-extrabold shadow-sm"
+                  >
+                    <PauseCircle size={18} />
+                    Cancel Upload
+                  </button>
+                ) : null}
+
                 <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-800">
-                  ZIP structure aise rakho:
+                  Folder structure aise rakho:
                   <br />
-                  <b>SKU1/image1.jpg</b>
+                  <b>Parent Folder / SKU1 / image1.jpg</b>
                   <br />
-                  <b>SKU1/image2.png</b>
+                  <b>Parent Folder / SKU1 / image2.png</b>
                   <br />
-                  <b>SKU2/image1.webp</b>
+                  <b>Parent Folder / SKU2 / image1.webp</b>
                 </div>
               </div>
 
-              <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
-                <div className="flex items-start gap-3">
-                  <div className="h-11 w-11 rounded-2xl bg-blue-600 text-white flex items-center justify-center shrink-0">
-                    <BarChart3 size={20} />
+              {(isUploading || uploadTotalFolders > 0) ? (
+                <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
+                  <div className="text-sm font-extrabold text-blue-900">
+                    Upload Progress
                   </div>
 
-                  <div className="min-w-0">
-                    <div className="text-sm font-extrabold text-blue-900">
-                      Category-wise Missing Images Report
-                    </div>
-                    <div className="text-xs text-blue-800 mt-2 leading-5">
-                      Category ke hisab se total products, image-attached products aur missing image
-                      products dekhne ke liye report page use karo. Missing image SKUs ko Excel me
-                      download bhi kar sakte ho.
-                    </div>
+                  <div className="mt-3 h-4 w-full overflow-hidden rounded-full bg-blue-100">
+                    <div
+                      className="h-full rounded-full bg-blue-700 transition-all"
+                      style={{ width: `${uploadProgressPercent}%` }}
+                    />
+                  </div>
 
-                    <Link
-                      href="/admin/products/bulk/bulk-images/report"
-                      className="mt-3 inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-extrabold shadow-sm"
-                    >
-                      <BarChart3 size={16} />
-                      Open Image Report
-                    </Link>
+                  <div className="mt-3 text-sm text-blue-900 leading-7">
+                    Total folders: <b>{uploadTotalFolders}</b>
+                    <br />
+                    Uploaded folders: <b>{uploadDoneFolders}</b>
+                    <br />
+                    Failed folders: <b>{uploadFailedFolders}</b>
+                    <br />
+                    Current folder: <b>{currentUploadingFolderName || "—"}</b>
                   </div>
                 </div>
-              </div>
+              ) : null}
 
               <div className="rounded-2xl border border-gray-200 bg-white overflow-hidden shadow-sm">
                 <div className="px-4 py-3 border-b border-gray-200 bg-gray-50">
@@ -1229,7 +1126,7 @@ export default function BulkProductImagesPage() {
                                   <button
                                     type="button"
                                     onClick={() => renameFolder(folder)}
-                                    disabled={isBusy || isJobActive}
+                                    disabled={isBusy || isUploading}
                                     className="px-4 py-2 rounded-xl bg-slate-900 text-white text-sm font-bold disabled:opacity-60 shadow-sm"
                                   >
                                     Save
@@ -1272,7 +1169,7 @@ export default function BulkProductImagesPage() {
                                       setRenameValue(folder.name);
                                     }}
                                     title="Rename Folder"
-                                    disabled={isJobActive}
+                                    disabled={isUploading}
                                     className="p-2.5 rounded-xl bg-white hover:bg-blue-50 hover:text-blue-600 border border-slate-200 text-slate-500 transition-colors shadow-sm disabled:opacity-50"
                                   >
                                     <Pencil size={16} />
@@ -1281,7 +1178,7 @@ export default function BulkProductImagesPage() {
                                   <button
                                     type="button"
                                     onClick={() => deleteFolder(folder)}
-                                    disabled={isBusy || isJobActive}
+                                    disabled={isBusy || isUploading}
                                     title="Delete Folder"
                                     className="p-2.5 rounded-xl bg-white hover:bg-rose-50 hover:text-rose-600 border border-slate-200 text-slate-500 transition-colors shadow-sm disabled:opacity-50"
                                   >
@@ -1306,31 +1203,7 @@ export default function BulkProductImagesPage() {
                 )}
               </div>
 
-              {activeJob ? (
-                <div className="rounded-2xl border border-indigo-200 bg-indigo-50 p-4">
-                  <div className="text-sm font-extrabold text-indigo-900">
-                    Current / Last Upload Job Summary
-                  </div>
-                  <div className="text-xs text-indigo-800 mt-2 leading-6">
-                    Total SKU Folders: <b>{Number(summary?.totalSkuFolders || 0)}</b> | Updated:{" "}
-                    <b>{Number(summary?.updatedSkuFolders || 0)}</b> | Skipped:{" "}
-                    <b>{Number(summary?.skippedSkuFolders || 0)}</b> | Failed:{" "}
-                    <b>{Number(summary?.failedSkuFolders || 0)}</b>
-                  </div>
-
-                  <div className="mt-2 text-xs text-indigo-800 leading-6">
-                    Mode: <b>{safeText(summary?.mode || activeJob?.meta?.mode || "-")}</b>
-                    <br />
-                    Parent Path: <b>{safeText(summary?.parentPath || activeJob?.meta?.parentPath || "-")}</b>
-                    <br />
-                    ZIP File: <b>{safeText(summary?.originalFileName || activeJob?.meta?.originalFileName || "-")}</b>
-                  </div>
-                </div>
-              ) : null}
-            </div>
-
-            <div className="min-w-0 space-y-6">
-              <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4">
+              <div className="rounded-2xl border border-gray-200 bg-white p-4">
                 <div className="text-sm font-extrabold">Create Folder</div>
 
                 <div className="mt-3 flex items-center gap-3 flex-wrap">
@@ -1339,13 +1212,13 @@ export default function BulkProductImagesPage() {
                     onChange={(e) => setNewFolderName(e.target.value)}
                     className="flex-1 min-w-[220px] px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none focus:border-blue-500 transition font-medium"
                     placeholder="Folder name"
-                    disabled={isJobActive}
+                    disabled={isUploading}
                   />
 
                   <button
                     type="button"
                     onClick={createFolder}
-                    disabled={creatingFolder || isJobActive}
+                    disabled={creatingFolder || isUploading}
                     className="inline-flex items-center justify-center gap-2 px-5 py-3 rounded-2xl bg-slate-900 hover:bg-slate-950 text-white transition font-extrabold disabled:opacity-60 shadow-sm"
                   >
                     <FolderPlus size={18} />
@@ -1353,12 +1226,14 @@ export default function BulkProductImagesPage() {
                   </button>
                 </div>
               </div>
+            </div>
 
+            <div className="min-w-0 space-y-6">
               <div className="rounded-2xl border border-gray-200 bg-white overflow-hidden shadow-sm min-w-0">
                 <div className="px-4 py-3 border-b border-gray-200 bg-gray-50 flex items-center justify-between gap-4 flex-wrap">
                   <div>
                     <div className="text-sm font-extrabold text-slate-900">
-                      ZIP Uploaded Product Folders
+                      Uploaded Product Folders
                     </div>
                     <div className="text-xs text-slate-500 mt-1">
                       Selected website folder ke andar uploaded product image folders
@@ -1468,7 +1343,7 @@ export default function BulkProductImagesPage() {
                               <button
                                 type="button"
                                 onClick={() => deleteFolder(folder)}
-                                disabled={isBusy || isJobActive}
+                                disabled={isBusy || isUploading}
                                 className="p-2.5 rounded-xl bg-white hover:bg-rose-50 hover:text-rose-600 border border-slate-200 text-slate-500 transition-colors shadow-sm disabled:opacity-50"
                               >
                                 <Trash2 size={16} />
@@ -1547,75 +1422,15 @@ export default function BulkProductImagesPage() {
                 <div className="font-extrabold text-slate-900">Important Notes</div>
                 <ul className="mt-2 space-y-1 list-disc pl-5">
                   <li>Website created folders left side me rahenge.</li>
-                  <li>ZIP se bane product folders right side me show honge.</li>
+                  <li>Uploaded product folders right side me show honge.</li>
                   <li>Product images public hi rahengi, private nahi hongi.</li>
                   <li>Har SKU/product ke liye max 8 images rahengi.</li>
-                  <li>Same product ka second active ZIP-folder kisi aur jagah allowed nahi hai.</li>
-                  <li>Failed SKU folders ki CSV download ki ja sakti hai.</li>
+                  <li>Uploaded folders count me wahi folders aayenge jo actual me complete ho chuke hain.</li>
+                  <li>Process stop/cancel hone par completed folders dobara upload karne ki need nahi hogi.</li>
                 </ul>
               </div>
             </div>
           </div>
-
-          {activeJob ? (
-            <div className="mt-8 rounded-2xl border border-gray-200 bg-white p-5">
-              <div className="flex items-center gap-2 text-lg font-extrabold">
-                <BarChart3 size={20} />
-                Recent Failed / Skipped SKU Folders
-              </div>
-
-              <div className="mt-1 text-sm text-slate-500">
-                Table me recent 100 failed/skipped SKU folders dikh rahe hain. Full list ke liye CSV download karo.
-              </div>
-
-              <div className="mt-5 overflow-auto">
-                <table className="min-w-full text-sm border border-gray-200 rounded-xl overflow-hidden">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th className="text-left px-3 py-2 border-b">Batch</th>
-                      <th className="text-left px-3 py-2 border-b">Row</th>
-                      <th className="text-left px-3 py-2 border-b">SKU</th>
-                      <th className="text-left px-3 py-2 border-b">Identifier</th>
-                      <th className="text-left px-3 py-2 border-b">Status</th>
-                      <th className="text-left px-3 py-2 border-b">Reason</th>
-                      <th className="text-left px-3 py-2 border-b">Logged At</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {recentFailures.map((item, idx) => (
-                      <tr key={`${item.rowNumber}-${idx}`} className="border-b last:border-b-0 align-top">
-                        <td className="px-3 py-2">{item.batchNumber || "—"}</td>
-                        <td className="px-3 py-2">{item.rowNumber || "—"}</td>
-                        <td className="px-3 py-2 font-semibold">{item.sku || "—"}</td>
-                        <td className="px-3 py-2">{item.identifier || "—"}</td>
-                        <td className="px-3 py-2">
-                          <span
-                            className={`inline-flex rounded-full px-2 py-1 text-xs font-bold ${
-                              safeText(item.status) === "skipped"
-                                ? "bg-amber-100 text-amber-800"
-                                : "bg-rose-100 text-rose-800"
-                            }`}
-                          >
-                            {safeText(item.status) || "failed"}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2 min-w-[320px] text-slate-700">{item.reason || "—"}</td>
-                        <td className="px-3 py-2 whitespace-nowrap">{formatDateTime(item.createdAt)}</td>
-                      </tr>
-                    ))}
-
-                    {recentFailures.length === 0 ? (
-                      <tr>
-                        <td colSpan={7} className="px-4 py-8 text-center text-slate-500">
-                          No failed/skipped SKU folders recorded yet.
-                        </td>
-                      </tr>
-                    ) : null}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          ) : null}
         </div>
       </div>
 
@@ -1673,7 +1488,7 @@ export default function BulkProductImagesPage() {
                   <label
                     htmlFor="single-image-upload-input"
                     className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl border text-sm font-bold shadow-sm ${
-                      isJobActive
+                      isUploading
                         ? "cursor-not-allowed border-gray-200 bg-gray-100 text-gray-400"
                         : "cursor-pointer bg-white hover:bg-gray-50 border-gray-200"
                     }`}
@@ -1688,13 +1503,13 @@ export default function BulkProductImagesPage() {
                     accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp"
                     className="hidden"
                     onChange={(e) => setSingleImageFile(e.target.files?.[0] || null)}
-                    disabled={isJobActive}
+                    disabled={isUploading}
                   />
 
                   <button
                     type="button"
                     onClick={handleSingleImageUpload}
-                    disabled={singleUploading || !singleImageFile || isJobActive}
+                    disabled={singleUploading || !singleImageFile || isUploading}
                     className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-950 text-white text-sm font-bold shadow-sm disabled:opacity-60"
                   >
                     <Upload size={16} />
@@ -1742,7 +1557,7 @@ export default function BulkProductImagesPage() {
                           <button
                             type="button"
                             onClick={() => deleteImage(file)}
-                            disabled={isBusy || isJobActive}
+                            disabled={isBusy || isUploading}
                             className="absolute top-2 right-2 h-8 w-8 rounded-full bg-white/95 border border-rose-200 text-rose-700 flex items-center justify-center shadow-sm disabled:opacity-60"
                             title="Delete image"
                           >

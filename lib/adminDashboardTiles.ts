@@ -1,5 +1,6 @@
 export type AdminDashboardTileKey =
   | "products"
+  | "bulk-product-details"
   | "bulk-product-images"
   | "combos"
   | "want-to-buy"
@@ -79,6 +80,12 @@ export const ADMIN_DASHBOARD_TILES: AdminDashboardTileConfig[] = [
     defaultTitle: "Products",
     description: "Add / edit products",
     href: "/admin/products",
+  },
+  {
+    key: "bulk-product-details",
+    defaultTitle: "Bulk Product Details",
+    description: "Static template + CSV/Excel row-wise merge upload",
+    href: "/admin/products/bulk/details",
   },
   {
     key: "bulk-product-images",

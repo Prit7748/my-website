@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
+import * as XLSX from "xlsx";
 import {
   ArrowLeft,
   CheckCircle2,
@@ -15,69 +16,81 @@ import {
   Play,
   PauseCircle,
   LoaderCircle,
-  BarChart3,
+  Settings2,
 } from "lucide-react";
 import { CATEGORY_CONFIG, PHYSICAL_CATEGORY } from "@/lib/productCatalog";
 
-type RecentFailureItem = {
+type PreparedBulkDetailsRow = {
+  rowNumber: number;
+  A: string; // unique_id / sku
+  B: string; // subject_code
+  C: string; // session
+  D: string; // language
+  E: string; // course_code
+};
+
+type DirectFailureRow = {
   itemIndex?: number;
   rowNumber?: number;
   batchNumber?: number;
   identifier?: string;
   sku?: string;
-  fileName?: string;
   status?: string;
   reason?: string;
-  createdAt?: string | null;
+  raw?: any;
 };
 
-type BulkJobProgress = {
-  totalItems: number;
-  processedItems: number;
-  successItems: number;
-  failedItems: number;
-  skippedItems: number;
-  validItems: number;
-  batchSize: number;
-  batchCount: number;
-  currentBatchNumber: number;
-  lastProcessedIndex: number;
-  progressPercent: number;
-};
-
-type BulkJobState = {
-  _id: string;
-  jobType: string;
-  jobLabel: string;
-  status: string;
-  createdBy: string;
-  meta?: any;
-  config?: any;
-  summary?: any;
-  progress?: BulkJobProgress;
-  lastBatch?: {
-    batchNumber?: number;
-    fromIndex?: number;
-    toIndex?: number;
-    attempted?: number;
-    success?: number;
-    failed?: number;
-    skipped?: number;
-    startedAt?: string | null;
-    endedAt?: string | null;
-    note?: string;
-  } | null;
+type DirectUploadResponse = {
+  ok?: boolean;
+  error?: string;
+  message?: string;
+  summary?: {
+    totalRows?: number;
+    validRows?: number;
+    createdRows?: number;
+    updatedRows?: number;
+    skippedRows?: number;
+    failedRows?: number;
+    processedRows?: number;
+    doneRows?: number;
+    duplicateStrategy?: string;
+    dryRun?: boolean;
+    category?: string;
+    comboSync?: any;
+    hardcopySync?: any;
+  };
   failuresCount?: number;
-  recentFailures?: RecentFailureItem[];
-  resultMessage?: string;
-  downloadFileName?: string;
-  startedAt?: string | null;
-  completedAt?: string | null;
-  failedAt?: string | null;
-  cancelledAt?: string | null;
-  lastHeartbeatAt?: string | null;
-  createdAt?: string | null;
-  updatedAt?: string | null;
+  failures?: DirectFailureRow[];
+  failureCsv?: string;
+};
+
+type DefaultTemplateItem = {
+  category: string;
+  titleTemplate: string;
+  importantNoteTemplate: string;
+  shortDescTemplate: string;
+  longDescTemplate: string;
+  slugTemplate: string;
+  metaTitleTemplate: string;
+  metaDescriptionTemplate: string;
+  publishNow: boolean;
+};
+
+type DefaultTemplatesApiResponse = {
+  ok?: boolean;
+  error?: string;
+  message?: string;
+  categories?: string[];
+  item?: DefaultTemplateItem;
+  items?: DefaultTemplateItem[];
+  itemMap?: Record<string, DefaultTemplateItem>;
+  defaults?: Record<string, DefaultTemplateItem>;
+  meta?: {
+    key?: string;
+    updatedBy?: string;
+    updatedAt?: string | null;
+    createdAt?: string | null;
+  };
 };
 
 const DEFAULT_NOTE =
@@ -109,6 +122,9 @@ BHIC132HIN202526,BHIC 132,2025-2026,Hindi,BAHIH
 BEGC101ENG202526,BEGC 101,2025-2026,English,BAEGH
 BPSC101ENG202526,BPSC 101,2025-2026,English,"BAPSH, BAG"`;
 
+const DIRECT_UPLOAD_CONCURRENCY = 1;
+const REQUEST_TIMEOUT_MS = 120000;
+
 function notifyLongTaskStart() {
   if (typeof window !== "undefined") {
     window.dispatchEvent(new CustomEvent("admin-long-task-start"));
@@ -125,39 +141,319 @@ function safeStr(x: any) {
   return String(x ?? "").trim();
 }
 
-function formatDateTime(input?: string | null) {
-  if (!input) return "—";
-  const d = new Date(input);
-  if (Number.isNaN(d.getTime())) return "—";
-  return d.toLocaleString("en-IN");
+function safeNum(x: any, def = 0) {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : def;
 }
 
-function isFinalStatus(status: string) {
-  const s = safeStr(status);
+function safeBool(x: any, def = false) {
+  if (typeof x === "boolean") return x;
+  if (typeof x === "string") {
+    const v = x.trim().toLowerCase();
+    if (["true", "1", "yes", "on"].includes(v)) return true;
+    if (["false", "0", "no", "off"].includes(v)) return false;
+  }
+  if (typeof x === "number") {
+    if (x === 1) return true;
+    if (x === 0) return false;
+  }
+  return def;
+}
+
+function csvCell(input: any) {
+  const raw = safeStr(input).replace(/\r?\n/g, " ");
+  const escaped = raw.replace(/"/g, '""');
+  return `"${escaped}"`;
+}
+
+function buildFailureCsv(rows: DirectFailureRow[]) {
+  const header = [
+    "Row Number",
+    "Unique Id",
+    "Subject Code",
+    "Session",
+    "Language",
+    "Course Code",
+    "Status",
+    "Reason",
+  ];
+
+  const body = rows.map((row) => {
+    const raw = row?.raw || {};
+    return [
+      csvCell(row?.rowNumber),
+      csvCell(raw?.unique_id || raw?.A || ""),
+      csvCell(raw?.subject_code || raw?.B || ""),
+      csvCell(raw?.session || raw?.C || ""),
+      csvCell(raw?.language || raw?.D || ""),
+      csvCell(raw?.course_code || raw?.E || ""),
+      csvCell(row?.status || ""),
+      csvCell(row?.reason || ""),
+    ].join(",");
+  });
+
+  return [header.map(csvCell).join(","), ...body].join("\n");
+}
+
+function rowLooksLikeHeader(row: string[]) {
+  const joined = row.map((x) => safeStr(x).toLowerCase()).join(",");
   return (
-    s === "completed" ||
-    s === "completed_with_errors" ||
-    s === "failed" ||
-    s === "cancelled"
+    joined.includes("unique_id") ||
+    joined.includes("subject_code") ||
+    joined.includes("session") ||
+    joined.includes("language") ||
+    joined.includes("course_code")
   );
 }
 
-function statusTone(status: string) {
-  const s = safeStr(status);
+function parseCsv(text: string) {
+  const cleaned = String(text ?? "").replace(/^\uFEFF/, "");
+  const rows: string[][] = [];
+  let row: string[] = [];
+  let cell = "";
+  let inQuotes = false;
 
-  if (s === "completed") {
-    return "border-emerald-200 bg-emerald-50 text-emerald-800";
+  for (let i = 0; i < cleaned.length; i++) {
+    const ch = cleaned[i];
+    const next = cleaned[i + 1];
+
+    if (ch === '"') {
+      if (inQuotes && next === '"') {
+        cell += '"';
+        i++;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (ch === "," && !inQuotes) {
+      row.push(cell);
+      cell = "";
+      continue;
+    }
+
+    if ((ch === "\n" || ch === "\r") && !inQuotes) {
+      if (ch === "\r" && next === "\n") i++;
+      row.push(cell);
+      rows.push(row);
+      row = [];
+      cell = "";
+      continue;
+    }
+
+    cell += ch;
   }
 
-  if (s === "completed_with_errors") {
-    return "border-amber-200 bg-amber-50 text-amber-800";
+  if (cell.length > 0 || row.length > 0) {
+    row.push(cell);
+    rows.push(row);
   }
 
-  if (s === "failed" || s === "cancelled") {
-    return "border-rose-200 bg-rose-50 text-rose-800";
+  return rows
+    .map((r) => r.map((c) => safeStr(c)))
+    .filter((r) => r.some((c) => c !== ""));
+}
+
+function prepareBulkDetailsRows(csvText: string) {
+  let parsedRows = parseCsv(csvText);
+
+  if (!parsedRows.length) {
+    throw new Error("CSV empty hai");
   }
 
-  return "border-blue-200 bg-blue-50 text-blue-800";
+  const hasHeader = parsedRows.length > 0 && rowLooksLikeHeader(parsedRows[0]);
+  if (hasHeader) {
+    parsedRows = parsedRows.slice(1);
+  }
+
+  return parsedRows.map((raw, i) => {
+    const cols = [...raw];
+    while (cols.length < 5) cols.push("");
+
+    return {
+      rowNumber: hasHeader ? i + 2 : i + 1,
+      A: safeStr(cols[0]),
+      B: safeStr(cols[1]),
+      C: safeStr(cols[2]),
+      D: safeStr(cols[3]),
+      E: safeStr(cols[4]),
+    } as PreparedBulkDetailsRow;
+  });
+}
+
+function buildFailureFromRow(
+  row: PreparedBulkDetailsRow,
+  status: string,
+  reason: string
+): DirectFailureRow {
+  return {
+    rowNumber: row.rowNumber,
+    identifier: safeStr(row.A),
+    sku: safeStr(row.A),
+    status,
+    reason,
+    raw: {
+      unique_id: safeStr(row.A),
+      subject_code: safeStr(row.B),
+      session: safeStr(row.C),
+      language: safeStr(row.D),
+      course_code: safeStr(row.E),
+      A: safeStr(row.A),
+      B: safeStr(row.B),
+      C: safeStr(row.C),
+      D: safeStr(row.D),
+      E: safeStr(row.E),
+    },
+  };
+}
+
+async function readRowsFromFile(file: File) {
+  const lowerName = safeStr(file.name).toLowerCase();
+
+  if (lowerName.endsWith(".csv")) {
+    const text = await file.text();
+    return prepareBulkDetailsRows(text);
+  }
+
+  if (lowerName.endsWith(".xlsx") || lowerName.endsWith(".xls")) {
+    const buffer = await file.arrayBuffer();
+    const workbook = XLSX.read(buffer, { type: "array" });
+    const firstSheetName = workbook.SheetNames?.[0];
+
+    if (!firstSheetName) {
+      throw new Error("Excel sheet not found");
+    }
+
+    const sheet = workbook.Sheets[firstSheetName];
+    const csvText = XLSX.utils.sheet_to_csv(sheet);
+    return prepareBulkDetailsRows(csvText);
+  }
+
+  throw new Error("Only CSV or Excel allowed");
+}
+
+async function safeReadJson(res: Response) {
+  const text = await res.text();
+  if (!text) return { ok: false, error: "Server returned empty response" };
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    return {
+      ok: false,
+      error: text.slice(0, 400) || "Invalid server response",
+    };
+  }
+}
+
+function normalizeTemplateItem(input: any, category: string): DefaultTemplateItem {
+  return {
+    category,
+    titleTemplate: safeStr(input?.titleTemplate),
+    importantNoteTemplate: safeStr(input?.importantNoteTemplate),
+    shortDescTemplate: safeStr(input?.shortDescTemplate),
+    longDescTemplate: safeStr(input?.longDescTemplate),
+    slugTemplate: safeStr(input?.slugTemplate),
+    metaTitleTemplate: safeStr(input?.metaTitleTemplate),
+    metaDescriptionTemplate: safeStr(input?.metaDescriptionTemplate),
+    publishNow: safeBool(input?.publishNow, false),
+  };
+}
+
+function buildFallbackTemplateMap(): Record<string, DefaultTemplateItem> {
+  return {
+    "Solved Assignments": {
+      category: "Solved Assignments",
+      titleTemplate: DEFAULT_TITLE_TEMPLATE,
+      importantNoteTemplate: DEFAULT_NOTE,
+      shortDescTemplate: DEFAULT_SHORT_DESC_TEMPLATE,
+      longDescTemplate: DEFAULT_LONG_DESC_TEMPLATE,
+      slugTemplate: "",
+      metaTitleTemplate: DEFAULT_META_TITLE_TEMPLATE,
+      metaDescriptionTemplate: DEFAULT_META_DESCRIPTION_TEMPLATE,
+      publishNow: false,
+    },
+
+    "Question Papers (PYQ)": {
+      category: "Question Papers (PYQ)",
+      titleTemplate: "IGNOU %B Question Paper %C (%D Medium)",
+      importantNoteTemplate: DEFAULT_NOTE,
+      shortDescTemplate:
+        "Download IGNOU %B (%F) question paper for session %C in %D medium.",
+      longDescTemplate:
+        "This IGNOU %B (%F) question paper is mapped for session %C in %D medium. Course title is auto-matched from master data: %G.",
+      slugTemplate: "",
+      metaTitleTemplate: "IGNOU %B Question Paper %C (%D Medium) PDF Download",
+      metaDescriptionTemplate:
+        "Download IGNOU %B (%F) question paper for session %C in %D medium. Course title: %G. Instant access and verified subject mapping.",
+      publishNow: true,
+    },
+
+    "Handwritten PDFs": {
+      category: "Handwritten PDFs",
+      titleTemplate: "IGNOU %B Handwritten PDF %C (%D Medium)",
+      importantNoteTemplate:
+        "Please verify subject code, medium, session, and course details before purchasing this handwritten PDF.",
+      shortDescTemplate:
+        "Download IGNOU %B (%F) handwritten PDF for session %C in %D medium.",
+      longDescTemplate:
+        "This IGNOU %B (%F) handwritten PDF is prepared for session %C in %D medium. Course title is auto-matched from master data: %G.",
+      slugTemplate: "",
+      metaTitleTemplate: "IGNOU %B Handwritten PDF %C (%D Medium) Download",
+      metaDescriptionTemplate:
+        "Download IGNOU %B (%F) handwritten PDF for session %C in %D medium. Course title: %G. Instant access and verified subject mapping.",
+      publishNow: false,
+    },
+
+    Ebooks: {
+      category: "Ebooks",
+      titleTemplate: "IGNOU %B Ebook %C (%D Medium)",
+      importantNoteTemplate:
+        "Please verify subject code, medium, session, and course details before purchasing this ebook.",
+      shortDescTemplate:
+        "Download IGNOU %B (%F) ebook for session %C in %D medium.",
+      longDescTemplate:
+        "This IGNOU %B (%F) ebook is prepared for session %C in %D medium. Course title is auto-matched from master data: %G.",
+      slugTemplate: "",
+      metaTitleTemplate: "IGNOU %B Ebook %C (%D Medium) Download",
+      metaDescriptionTemplate:
+        "Download IGNOU %B (%F) ebook for session %C in %D medium. Course title: %G. Instant access and verified subject mapping.",
+      publishNow: false,
+    },
+
+    projects: {
+      category: "projects",
+      titleTemplate: "IGNOU %B Project %C (%D Medium)",
+      importantNoteTemplate:
+        "Please verify subject code, medium, session, and course details before purchasing this project file.",
+      shortDescTemplate:
+        "Download IGNOU %B (%F) project material for session %C in %D medium.",
+      longDescTemplate:
+        "This IGNOU %B (%F) project material is prepared for session %C in %D medium. Course title is auto-matched from master data: %G.",
+      slugTemplate: "",
+      metaTitleTemplate: "IGNOU %B Project %C (%D Medium) Download",
+      metaDescriptionTemplate:
+        "Download IGNOU %B (%F) project material for session %C in %D medium. Course title: %G. Instant access and verified subject mapping.",
+      publishNow: false,
+    },
+
+    "Guess Papers": {
+      category: "Guess Papers",
+      titleTemplate: "IGNOU %B Guess Paper %C (%D Medium)",
+      importantNoteTemplate:
+        "Please verify subject code, medium, session, and course details before purchasing this guess paper.",
+      shortDescTemplate:
+        "Download IGNOU %B (%F) guess paper for session %C in %D medium.",
+      longDescTemplate:
+        "This IGNOU %B (%F) guess paper is prepared for session %C in %D medium. Course title is auto-matched from master data: %G.",
+      slugTemplate: "",
+      metaTitleTemplate: "IGNOU %B Guess Paper %C (%D Medium) Download",
+      metaDescriptionTemplate:
+        "Download IGNOU %B (%F) guess paper for session %C in %D medium. Course title: %G. Instant access and verified subject mapping.",
+      publishNow: false,
+    },
+  };
 }
 
 export default function BulkDetailsPage() {
@@ -169,7 +465,9 @@ export default function BulkDetailsPage() {
     []
   );
 
-  const [loading, setLoading] = useState(false);
+  const fallbackTemplateMap = useMemo(() => buildFallbackTemplateMap(), []);
+  const initialDefaultsAppliedRef = useRef(false);
+
   const [uploadFile, setUploadFile] = useState<File | null>(null);
 
   const [serverMessage, setServerMessage] = useState("");
@@ -177,11 +475,22 @@ export default function BulkDetailsPage() {
     "success" | "error" | "info"
   >("info");
 
-  const [activeJob, setActiveJob] = useState<BulkJobState | null>(null);
-  const [activeJobId, setActiveJobId] = useState("");
-  const [isCancelling, setIsCancelling] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [isStopping, setIsStopping] = useState(false);
+  const [defaultsHydrated, setDefaultsHydrated] = useState(false);
 
-  const processInFlightRef = useRef(false);
+  const [totalEntries, setTotalEntries] = useState(0);
+  const [uploadedEntries, setUploadedEntries] = useState(0);
+  const [processedEntries, setProcessedEntries] = useState(0);
+  const [skippedEntries, setSkippedEntries] = useState(0);
+  const [failedEntries, setFailedEntries] = useState(0);
+
+  const [failureRows, setFailureRows] = useState<DirectFailureRow[]>([]);
+  const [defaultTemplateMap, setDefaultTemplateMap] =
+    useState<Record<string, DefaultTemplateItem>>(fallbackTemplateMap);
+
+  const stopRequestedRef = useRef(false);
+  const activeControllersRef = useRef<Set<AbortController>>(new Set());
   const longTaskActiveRef = useRef(false);
 
   const [form, setForm] = useState({
@@ -196,8 +505,95 @@ export default function BulkDetailsPage() {
     publishNow: false,
     csvText: "",
     duplicateStrategy: "ignore" as "replace" | "ignore",
-    batchSize: 500,
   });
+
+  function getTemplateForCategory(category: string) {
+    const normalizedCategory = safeStr(category) || "Solved Assignments";
+    return (
+      defaultTemplateMap[normalizedCategory] ||
+      fallbackTemplateMap[normalizedCategory] ||
+      fallbackTemplateMap["Solved Assignments"]
+    );
+  }
+
+  function applyCategoryDefaults(nextCategory: string) {
+    const template = getTemplateForCategory(nextCategory);
+
+    setForm((prev) => ({
+      ...prev,
+      category: nextCategory,
+      titleTemplate: safeStr(template?.titleTemplate),
+      importantNoteTemplate: safeStr(template?.importantNoteTemplate),
+      shortDescTemplate: safeStr(template?.shortDescTemplate),
+      longDescTemplate: safeStr(template?.longDescTemplate),
+      slugTemplate: safeStr(template?.slugTemplate),
+      metaTitleTemplate: safeStr(template?.metaTitleTemplate),
+      metaDescriptionTemplate: safeStr(template?.metaDescriptionTemplate),
+      publishNow: safeBool(template?.publishNow, false),
+    }));
+  }
+
+  async function loadDefaultTemplates() {
+    try {
+      const res = await fetch("/api/admin/products/bulk/details/default-templates", {
+        credentials: "include",
+        cache: "no-store",
+      });
+
+      const data = (await safeReadJson(res)) as DefaultTemplatesApiResponse;
+
+      if (!res.ok || !data?.ok) {
+        setDefaultsHydrated(true);
+        return;
+      }
+
+      const categories =
+        Array.isArray(data?.categories) && data.categories.length
+          ? data.categories
+          : allowedCategories;
+
+      const nextMap: Record<string, DefaultTemplateItem> = {};
+
+      for (const category of categories) {
+        nextMap[category] = normalizeTemplateItem(
+          data?.itemMap?.[category] ||
+            data?.defaults?.[category] ||
+            fallbackTemplateMap[category],
+          category
+        );
+      }
+
+      setDefaultTemplateMap((prev) => ({ ...prev, ...nextMap }));
+      setDefaultsHydrated(true);
+
+      if (!initialDefaultsAppliedRef.current) {
+        initialDefaultsAppliedRef.current = true;
+
+        setForm((prev) => {
+          const currentCategory = safeStr(prev.category) || "Solved Assignments";
+          const template =
+            nextMap[currentCategory] ||
+            fallbackTemplateMap[currentCategory] ||
+            fallbackTemplateMap["Solved Assignments"];
+
+          return {
+            ...prev,
+            category: currentCategory,
+            titleTemplate: safeStr(template?.titleTemplate),
+            importantNoteTemplate: safeStr(template?.importantNoteTemplate),
+            shortDescTemplate: safeStr(template?.shortDescTemplate),
+            longDescTemplate: safeStr(template?.longDescTemplate),
+            slugTemplate: safeStr(template?.slugTemplate),
+            metaTitleTemplate: safeStr(template?.metaTitleTemplate),
+            metaDescriptionTemplate: safeStr(template?.metaDescriptionTemplate),
+            publishNow: safeBool(template?.publishNow, false),
+          };
+        });
+      }
+    } catch {
+      setDefaultsHydrated(true);
+    }
+  }
 
   const canSubmit = useMemo(() => {
     return (
@@ -206,6 +602,11 @@ export default function BulkDetailsPage() {
       (form.csvText.trim() || uploadFile)
     );
   }, [form, uploadFile]);
+
+  const uploadedPercent = useMemo(() => {
+    if (!totalEntries) return 0;
+    return Math.min(100, Math.round((uploadedEntries / totalEntries) * 100));
+  }, [uploadedEntries, totalEntries]);
 
   function fillSample() {
     setForm((p) => ({ ...p, csvText: SAMPLE_CSV }));
@@ -218,69 +619,85 @@ export default function BulkDetailsPage() {
     setServerMessageType("info");
   }
 
-  function resetJobState() {
-    setActiveJob(null);
-    setActiveJobId("");
+  function resetProgress() {
+    setTotalEntries(0);
+    setUploadedEntries(0);
+    setProcessedEntries(0);
+    setSkippedEntries(0);
+    setFailedEntries(0);
+    setFailureRows([]);
   }
 
-  async function safeReadJson(res: Response) {
-    const text = await res.text();
-    if (!text) return { ok: false, error: "Server returned empty response" };
-
-    try {
-      return JSON.parse(text);
-    } catch {
-      return {
-        ok: false,
-        error: text.slice(0, 400) || "Invalid server response",
-      };
-    }
+  function resetFileInput() {
+    setUploadFile(null);
+    const input = document.getElementById(
+      "bulk-details-file-input"
+    ) as HTMLInputElement | null;
+    if (input) input.value = "";
   }
 
-  async function fetchJobStatus(jobId: string) {
-    const res = await fetch(`/api/admin/bulk-jobs/${encodeURIComponent(jobId)}`, {
-      method: "GET",
-      credentials: "include",
-      cache: "no-store",
-    });
-
-    const data = await safeReadJson(res);
-    if (!res.ok || !data?.ok) {
-      throw new Error(data?.error || "Failed to fetch job status");
+  function downloadFailedCsv() {
+    if (!failureRows.length) {
+      alert("No failed/skipped rows available.");
+      return;
     }
 
-    const job = data?.job as BulkJobState;
-    setActiveJob(job);
-    return job;
+    const csv = buildFailureCsv(failureRows);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "bulk-product-details-failed-rows.csv";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
   }
 
-  async function processNextBatch(jobId: string) {
-    if (!jobId || processInFlightRef.current) return;
+  async function uploadSingleRow(row: PreparedBulkDetailsRow) {
+    const controller = new AbortController();
+    activeControllersRef.current.add(controller);
 
-    processInFlightRef.current = true;
+    const timeout = setTimeout(() => {
+      controller.abort();
+    }, REQUEST_TIMEOUT_MS);
+
     try {
-      const res = await fetch("/api/admin/products/bulk/details/jobs/process", {
+      const res = await fetch("/api/admin/products/bulk/details/upload", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         credentials: "include",
-        body: JSON.stringify({ jobId }),
+        signal: controller.signal,
+        body: JSON.stringify({
+          dryRun: false,
+          category: form.category,
+          titleTemplate: form.titleTemplate,
+          importantNoteTemplate: form.importantNoteTemplate,
+          shortDescTemplate: form.shortDescTemplate,
+          longDescTemplate: form.longDescTemplate,
+          slugTemplate: form.slugTemplate,
+          metaTitleTemplate: form.metaTitleTemplate,
+          metaDescriptionTemplate: form.metaDescriptionTemplate,
+          publishNow: form.publishNow,
+          duplicateStrategy: form.duplicateStrategy,
+          rows: [row],
+        }),
       });
 
-      const data = await safeReadJson(res);
+      const data = (await safeReadJson(res)) as DirectUploadResponse;
 
       if (!res.ok || !data?.ok) {
-        throw new Error(data?.error || "Batch processing failed");
+        throw new Error(data?.error || data?.message || "Row upload failed");
       }
 
-      if (data?.job) {
-        setActiveJob(data.job as BulkJobState);
-      }
+      return data;
     } finally {
-      processInFlightRef.current = false;
+      clearTimeout(timeout);
+      activeControllersRef.current.delete(controller);
     }
   }
 
-  async function createJob(dryRun: boolean) {
+  async function startDirectUpload() {
     if (!canSubmit) {
       alert("Category, Title Template aur CSV/Excel data required hai.");
       return;
@@ -288,173 +705,238 @@ export default function BulkDetailsPage() {
 
     if (form.category === PHYSICAL_CATEGORY) {
       alert(
-        "Handwritten Hardcopy (Delivery) category ka manual bulk upload disabled hai. Ye products ab Solved Assignments se automatically generate honge."
+        "Handwritten Hardcopy (Delivery) category ka manual bulk upload disabled hai. Ye products auto-generate honge."
       );
       return;
     }
 
-    setLoading(true);
+    setIsUploading(true);
+    setIsStopping(false);
+    stopRequestedRef.current = false;
     resetMessages();
-    resetJobState();
+    resetProgress();
 
     try {
-      let res: Response;
+      let parsedRows: PreparedBulkDetailsRow[] = [];
 
       if (uploadFile) {
-        const fd = new FormData();
-        fd.append("file", uploadFile);
-        fd.append("dryRun", String(dryRun));
-        fd.append("category", form.category);
-        fd.append("titleTemplate", form.titleTemplate);
-        fd.append("importantNoteTemplate", form.importantNoteTemplate);
-        fd.append("shortDescTemplate", form.shortDescTemplate);
-        fd.append("longDescTemplate", form.longDescTemplate);
-        fd.append("slugTemplate", form.slugTemplate);
-        fd.append("metaTitleTemplate", form.metaTitleTemplate);
-        fd.append("metaDescriptionTemplate", form.metaDescriptionTemplate);
-        fd.append("publishNow", String(form.publishNow));
-        fd.append("duplicateStrategy", form.duplicateStrategy);
-        fd.append("batchSize", String(form.batchSize));
-
-        res = await fetch("/api/admin/products/bulk/details/jobs", {
-          method: "POST",
-          credentials: "include",
-          body: fd,
-        });
+        parsedRows = await readRowsFromFile(uploadFile);
       } else {
-        res = await fetch("/api/admin/products/bulk/details/jobs", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          credentials: "include",
-          body: JSON.stringify({
-            dryRun,
-            category: form.category,
-            titleTemplate: form.titleTemplate,
-            importantNoteTemplate: form.importantNoteTemplate,
-            shortDescTemplate: form.shortDescTemplate,
-            longDescTemplate: form.longDescTemplate,
-            slugTemplate: form.slugTemplate,
-            metaTitleTemplate: form.metaTitleTemplate,
-            metaDescriptionTemplate: form.metaDescriptionTemplate,
-            publishNow: form.publishNow,
-            csvText: form.csvText,
-            duplicateStrategy: form.duplicateStrategy,
-            batchSize: form.batchSize,
-          }),
-        });
+        parsedRows = prepareBulkDetailsRows(form.csvText);
       }
 
-      const data = await safeReadJson(res);
+      if (!parsedRows.length) {
+        throw new Error("No valid rows found");
+      }
 
-      if (!res.ok || !data?.ok) {
-        const errMsg = data?.error || "Job creation failed";
-        setServerMessage(errMsg);
-        setServerMessageType("error");
-        alert(errMsg);
+      const seenSku = new Set<string>();
+      const uploadQueue: PreparedBulkDetailsRow[] = [];
+      const initialFailures: DirectFailureRow[] = [];
+
+      for (const row of parsedRows) {
+        const sku = safeStr(row.A).toUpperCase();
+        if (!sku) {
+          initialFailures.push(
+            buildFailureFromRow(row, "failed", "Unique Id / SKU missing")
+          );
+          continue;
+        }
+
+        if (seenSku.has(sku)) {
+          initialFailures.push(
+            buildFailureFromRow(
+              row,
+              "skipped",
+              "Duplicate SKU repeated inside same upload. Only first occurrence processed."
+            )
+          );
+          continue;
+        }
+
+        seenSku.add(sku);
+        uploadQueue.push(row);
+      }
+
+      setTotalEntries(parsedRows.length);
+      setSkippedEntries(
+        initialFailures.filter((x) => safeStr(x.status) === "skipped").length
+      );
+      setFailedEntries(
+        initialFailures.filter((x) => safeStr(x.status) === "failed").length
+      );
+      setProcessedEntries(initialFailures.length);
+      setFailureRows(initialFailures);
+
+      let nextIndex = 0;
+      let createdOrUpdated = 0;
+      let failedCount = initialFailures.filter(
+        (x) => safeStr(x.status) === "failed"
+      ).length;
+      let skippedCount = initialFailures.filter(
+        (x) => safeStr(x.status) === "skipped"
+      ).length;
+      let processedCount = initialFailures.length;
+      const collectedFailures = [...initialFailures];
+
+      async function worker() {
+        while (true) {
+          if (stopRequestedRef.current) return;
+
+          const currentIndex = nextIndex;
+          nextIndex += 1;
+
+          if (currentIndex >= uploadQueue.length) {
+            return;
+          }
+
+          const row = uploadQueue[currentIndex];
+
+          try {
+            const data = await uploadSingleRow(row);
+
+            const doneRows =
+              safeNum(data?.summary?.createdRows, 0) +
+              safeNum(data?.summary?.updatedRows, 0);
+            const skippedRows = safeNum(data?.summary?.skippedRows, 0);
+            const failedRowsCount = safeNum(data?.summary?.failedRows, 0);
+            const serverFailures = Array.isArray(data?.failures) ? data.failures : [];
+
+            createdOrUpdated += doneRows;
+            skippedCount += skippedRows;
+            failedCount += failedRowsCount;
+            processedCount += 1;
+
+            if (serverFailures.length) {
+              collectedFailures.push(...serverFailures);
+              setFailureRows([...collectedFailures]);
+            }
+
+            setUploadedEntries(createdOrUpdated);
+            setSkippedEntries(skippedCount);
+            setFailedEntries(failedCount);
+            setProcessedEntries(processedCount);
+          } catch (error: any) {
+            const reason = safeStr(error?.message || "Row upload failed");
+            const fallbackFailure = buildFailureFromRow(row, "failed", reason);
+
+            collectedFailures.push(fallbackFailure);
+            failedCount += 1;
+            processedCount += 1;
+
+            setFailureRows([...collectedFailures]);
+            setFailedEntries(failedCount);
+            setProcessedEntries(processedCount);
+          }
+        }
+      }
+
+      const workers = Array.from(
+        { length: Math.max(1, DIRECT_UPLOAD_CONCURRENCY) },
+        () => worker()
+      );
+
+      await Promise.all(workers);
+
+      if (stopRequestedRef.current) {
+        setServerMessage(
+          `Upload stopped. Uploaded ${createdOrUpdated}/${parsedRows.length} entries. Skipped ${skippedCount}, Failed ${failedCount}.`
+        );
+        setServerMessageType("info");
         return;
       }
 
-      const job = data?.job as BulkJobState;
-      setActiveJob(job);
-      setActiveJobId(job?._id || "");
-      setServerMessage(
-        dryRun
-          ? "Validation job started successfully."
-          : "Bulk upload job started successfully."
-      );
-      setServerMessageType("success");
-    } catch (e: any) {
-      const errMsg = e?.message || "Server error";
+      if (createdOrUpdated > 0 && failedCount === 0 && skippedCount === 0) {
+        setServerMessage(
+          `${createdOrUpdated} entries successfully upload ho gayi.`
+        );
+        setServerMessageType("success");
+      } else if (createdOrUpdated > 0) {
+        setServerMessage(
+          `Upload complete. Uploaded ${createdOrUpdated}/${parsedRows.length}. Skipped ${skippedCount}, Failed ${failedCount}.`
+        );
+        setServerMessageType("info");
+      } else {
+        setServerMessage(
+          `Koi bhi entry successfully upload nahi ho paayi. Skipped ${skippedCount}, Failed ${failedCount}.`
+        );
+        setServerMessageType("error");
+      }
+    } catch (error: any) {
+      const errMsg = safeStr(error?.message || "Direct upload failed");
       setServerMessage(errMsg);
       setServerMessageType("error");
-      alert(errMsg);
     } finally {
-      setLoading(false);
+      setIsUploading(false);
+      setIsStopping(false);
     }
   }
 
-  async function cancelCurrentJob() {
-    if (!activeJobId) return;
+  function stopCurrentUpload() {
+    if (!isUploading) return;
 
-    const ok = window.confirm("Current bulk job ko cancel karna hai?");
-    if (!ok) return;
+    stopRequestedRef.current = true;
+    setIsStopping(true);
 
-    setIsCancelling(true);
-    try {
-      const res = await fetch(`/api/admin/bulk-jobs/${encodeURIComponent(activeJobId)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ action: "cancel" }),
-      });
-
-      const data = await safeReadJson(res);
-      if (!res.ok || !data?.ok) {
-        throw new Error(data?.error || "Cancel failed");
+    for (const controller of activeControllersRef.current) {
+      try {
+        controller.abort();
+      } catch {
+        // ignore
       }
-
-      if (data?.job) {
-        setActiveJob(data.job as BulkJobState);
-      }
-
-      setServerMessage("Bulk job cancelled.");
-      setServerMessageType("info");
-    } catch (e: any) {
-      const errMsg = e?.message || "Cancel failed";
-      setServerMessage(errMsg);
-      setServerMessageType("error");
-      alert(errMsg);
-    } finally {
-      setIsCancelling(false);
     }
+
+    activeControllersRef.current.clear();
   }
 
-  const currentStatus = safeStr(activeJob?.status);
-  const isJobActive = Boolean(activeJobId) && !isFinalStatus(currentStatus);
-  const progress = activeJob?.progress;
-  const summary = activeJob?.summary || {};
-  const recentFailures = Array.isArray(activeJob?.recentFailures)
-    ? activeJob!.recentFailures!
-    : [];
+  function resetFormToCurrentCategoryDefaults() {
+    const currentCategory = safeStr(form.category) || "Solved Assignments";
+    const template = getTemplateForCategory(currentCategory);
+
+    setForm({
+      category: currentCategory,
+      titleTemplate: safeStr(template?.titleTemplate),
+      importantNoteTemplate: safeStr(template?.importantNoteTemplate),
+      shortDescTemplate: safeStr(template?.shortDescTemplate),
+      longDescTemplate: safeStr(template?.longDescTemplate),
+      slugTemplate: safeStr(template?.slugTemplate),
+      metaTitleTemplate: safeStr(template?.metaTitleTemplate),
+      metaDescriptionTemplate: safeStr(template?.metaDescriptionTemplate),
+      publishNow: safeBool(template?.publishNow, false),
+      csvText: "",
+      duplicateStrategy: "ignore",
+    });
+  }
 
   useEffect(() => {
-    if (isJobActive && !longTaskActiveRef.current) {
+    loadDefaultTemplates();
+  }, []);
+
+  useEffect(() => {
+    if (isUploading && !longTaskActiveRef.current) {
       notifyLongTaskStart();
       longTaskActiveRef.current = true;
     }
 
-    if ((!isJobActive || isFinalStatus(currentStatus)) && longTaskActiveRef.current) {
+    if (!isUploading && longTaskActiveRef.current) {
       notifyLongTaskEnd();
       longTaskActiveRef.current = false;
     }
-  }, [isJobActive, currentStatus]);
-
-  useEffect(() => {
-    if (!activeJobId) return;
-    if (isFinalStatus(currentStatus)) return;
-
-    const timer = setTimeout(() => {
-      void processNextBatch(activeJobId);
-    }, 400);
-
-    return () => clearTimeout(timer);
-  }, [activeJobId, currentStatus, activeJob?.progress?.processedItems]);
-
-  useEffect(() => {
-    if (!activeJobId) return;
-    if (isFinalStatus(currentStatus)) return;
-
-    const interval = setInterval(() => {
-      void fetchJobStatus(activeJobId).catch(() => {
-        // ignore polling error
-      });
-    }, 1200);
-
-    return () => clearInterval(interval);
-  }, [activeJobId, currentStatus]);
+  }, [isUploading]);
 
   useEffect(() => {
     return () => {
+      stopRequestedRef.current = true;
+
+      for (const controller of activeControllersRef.current) {
+        try {
+          controller.abort();
+        } catch {
+          // ignore
+        }
+      }
+
+      activeControllersRef.current.clear();
+
       if (longTaskActiveRef.current) {
         notifyLongTaskEnd();
         longTaskActiveRef.current = false;
@@ -470,18 +952,29 @@ export default function BulkDetailsPage() {
             <div>
               <h1 className="text-2xl font-extrabold">Bulk Product Details Upload</h1>
               <p className="text-sm text-slate-600 mt-1">
-                Ab ye flow job-based batch system par chal raha hai. Large upload ab
-                batch-wise process hoga.
+                Ab ye page simple direct upload flow par kaam karega. Har row direct final
+                create/update hogi. Uploaded count me sirf wahi entries aayengi jo actual me
+                save ho chuki hongi.
               </p>
             </div>
 
-            <Link
-              href="/admin/products/bulk"
-              className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-semibold shadow-sm"
-            >
-              <ArrowLeft size={18} />
-              Back
-            </Link>
+            <div className="flex items-center gap-3 flex-wrap">
+              <Link
+                href="/admin/products/bulk/details/default-patterns"
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white transition font-semibold shadow-sm"
+              >
+                <Settings2 size={18} />
+                Default Details Pattern
+              </Link>
+
+              <Link
+                href="/admin"
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-semibold shadow-sm"
+              >
+                <ArrowLeft size={18} />
+                Back
+              </Link>
+            </div>
           </div>
 
           <div className="mt-6 rounded-2xl border border-blue-200 bg-blue-50 p-4">
@@ -492,11 +985,11 @@ export default function BulkDetailsPage() {
                   Pricing aur availability dono auto-managed hain
                 </div>
                 <div className="text-sm text-blue-800 mt-2 leading-6">
-                  Ab bulk upload me <b>manual price</b> aur <b>manual availability</b> ki need nahi hai.
+                  Manual price aur manual availability ki need nahi hai.
                   <br />
                   Final price <b>Product Pricing rules</b> se aayega.
                   <br />
-                  Final availability <b>solved PDF / official paper existence</b> se auto derive hogi.
+                  Final availability current product file state se auto derive hoti rahegi.
                 </div>
               </div>
             </div>
@@ -562,160 +1055,30 @@ export default function BulkDetailsPage() {
             </div>
           ) : null}
 
-          {activeJob ? (
-            <div className={`mt-4 rounded-2xl border p-4 ${statusTone(currentStatus)}`}>
-              <div className="flex items-start justify-between gap-4 flex-wrap">
-                <div>
-                  <div className="text-sm font-extrabold">
-                    Current Job: {safeStr(activeJob.jobLabel) || "Bulk Product Details"}
-                  </div>
-                  <div className="mt-1 text-xs font-semibold uppercase tracking-wide">
-                    Status: {safeStr(activeJob.status) || "—"}
-                  </div>
-                  <div className="mt-2 text-xs leading-5">
-                    Job ID: <b>{activeJob._id}</b>
-                    <br />
-                    Started: <b>{formatDateTime(activeJob.startedAt || activeJob.createdAt)}</b>
-                    <br />
-                    Last heartbeat: <b>{formatDateTime(activeJob.lastHeartbeatAt)}</b>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2 flex-wrap">
-                  {activeJobId ? (
-                    <a
-                      href={`/api/admin/bulk-jobs/${encodeURIComponent(activeJobId)}/failures`}
-                      className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl font-bold shadow-sm border ${
-                        Number(activeJob.failuresCount || 0) > 0
-                          ? "bg-white hover:bg-gray-50 border-gray-200 text-slate-900"
-                          : "bg-gray-100 border-gray-200 text-slate-400 pointer-events-none"
-                      }`}
-                    >
-                      <Download size={16} />
-                      Download Failed CSV
-                    </a>
-                  ) : null}
-
-                  {!isFinalStatus(currentStatus) ? (
-                    <button
-                      type="button"
-                      onClick={cancelCurrentJob}
-                      disabled={isCancelling}
-                      className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold shadow-sm disabled:opacity-60"
-                    >
-                      <PauseCircle size={16} />
-                      {isCancelling ? "Cancelling..." : "Cancel Job"}
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-
-              <div className="mt-4 rounded-2xl border border-white/70 bg-white/70 p-4">
-                <div className="flex items-center justify-between gap-3 flex-wrap">
-                  <div className="text-sm font-extrabold">
-                    Progress
-                  </div>
-                  <div className="text-sm font-bold">
-                    {progress?.processedItems ?? 0} / {progress?.totalItems ?? 0} processed
-                  </div>
-                </div>
-
-                <div className="mt-3 h-4 w-full overflow-hidden rounded-full bg-slate-200">
-                  <div
-                    className="h-full rounded-full bg-slate-900 transition-all"
-                    style={{ width: `${progress?.progressPercent ?? 0}%` }}
-                  />
-                </div>
-
-                <div className="mt-2 text-xs font-semibold text-slate-700">
-                  {progress?.progressPercent ?? 0}% complete
-                </div>
-
-                <div className="mt-4 grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                    <div className="text-xs text-slate-500 font-bold uppercase">Total Rows</div>
-                    <div className="text-xl font-extrabold mt-1">{progress?.totalItems ?? 0}</div>
-                  </div>
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                    <div className="text-xs text-slate-500 font-bold uppercase">Valid Rows</div>
-                    <div className="text-xl font-extrabold mt-1">{summary?.validRows ?? 0}</div>
-                  </div>
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                    <div className="text-xs text-slate-500 font-bold uppercase">Created Rows</div>
-                    <div className="text-xl font-extrabold mt-1">{summary?.createdRows ?? 0}</div>
-                  </div>
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                    <div className="text-xs text-slate-500 font-bold uppercase">Updated Rows</div>
-                    <div className="text-xl font-extrabold mt-1">{summary?.updatedRows ?? 0}</div>
-                  </div>
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                    <div className="text-xs text-slate-500 font-bold uppercase">Skipped Rows</div>
-                    <div className="text-xl font-extrabold mt-1">{summary?.skippedRows ?? 0}</div>
-                  </div>
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                    <div className="text-xs text-slate-500 font-bold uppercase">Failed Rows</div>
-                    <div className="text-xl font-extrabold mt-1">{summary?.failedRows ?? 0}</div>
-                  </div>
-                </div>
-
-                <div className="mt-4 grid grid-cols-1 xl:grid-cols-3 gap-4">
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
-                    <div className="text-sm font-extrabold">Batch Status</div>
-                    <div className="text-sm text-slate-600 mt-2 leading-6">
-                      Current Batch: <b>{progress?.currentBatchNumber ?? 0}</b> / <b>{progress?.batchCount ?? 0}</b>
-                      <br />
-                      Batch Size: <b>{progress?.batchSize ?? 0}</b>
-                      <br />
-                      Last Processed Index: <b>{progress?.lastProcessedIndex ?? -1}</b>
-                    </div>
-                    {activeJob?.lastBatch?.note ? (
-                      <div className="mt-2 text-xs text-slate-700">
-                        {activeJob.lastBatch.note}
-                      </div>
-                    ) : null}
-                  </div>
-
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
-                    <div className="text-sm font-extrabold">Combo Sync</div>
-                    <div className="text-sm text-slate-600 mt-2 leading-6">
-                      Attempted: <b>{summary?.comboSync?.attempted ?? 0}</b>
-                      <br />
-                      Succeeded: <b>{summary?.comboSync?.succeeded ?? 0}</b>
-                      <br />
-                      Failed: <b>{summary?.comboSync?.failed ?? 0}</b>
-                    </div>
-                    {Array.isArray(summary?.comboSync?.errors) && summary.comboSync.errors.length ? (
-                      <div className="mt-2 text-xs text-rose-700">
-                        {summary.comboSync.errors.join(" | ")}
-                      </div>
-                    ) : null}
-                  </div>
-
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
-                    <div className="text-sm font-extrabold">Hardcopy Sync</div>
-                    <div className="text-sm text-slate-600 mt-2 leading-6">
-                      Attempted: <b>{summary?.hardcopySync?.attempted ?? 0}</b>
-                      <br />
-                      Succeeded: <b>{summary?.hardcopySync?.succeeded ?? 0}</b>
-                      <br />
-                      Failed: <b>{summary?.hardcopySync?.failed ?? 0}</b>
-                    </div>
-                    {Array.isArray(summary?.hardcopySync?.errors) && summary.hardcopySync.errors.length ? (
-                      <div className="mt-2 text-xs text-rose-700">
-                        {summary.hardcopySync.errors.join(" | ")}
-                      </div>
-                    ) : null}
-                  </div>
-                </div>
-              </div>
-            </div>
-          ) : null}
-
-          {isJobActive ? (
-            <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900">
-              <div className="flex items-center gap-2">
+          {isUploading ? (
+            <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4">
+              <div className="flex items-center gap-2 text-sm font-semibold text-amber-900">
                 <LoaderCircle size={18} className="animate-spin" />
-                Batch job running. Inactivity auto-logout temporarily paused hai jab tak job finish nahi hoti.
+                Direct bulk details upload chal raha hai.
+              </div>
+
+              <div className="mt-4 h-4 w-full overflow-hidden rounded-full bg-amber-100">
+                <div
+                  className="h-full rounded-full bg-amber-600 transition-all"
+                  style={{ width: `${uploadedPercent}%` }}
+                />
+              </div>
+
+              <div className="mt-3 text-sm text-amber-900 leading-7">
+                Total Entries: <b>{totalEntries}</b>
+                <br />
+                Uploaded Entries: <b>{uploadedEntries}</b>
+              </div>
+
+              <div className="mt-2 text-xs text-amber-800 leading-6">
+                Processed: <b>{processedEntries}</b> / <b>{totalEntries}</b>
+                <br />
+                Skipped: <b>{skippedEntries}</b> | Failed: <b>{failedEntries}</b>
               </div>
             </div>
           ) : null}
@@ -723,14 +1086,24 @@ export default function BulkDetailsPage() {
           <div className="mt-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="lg:col-span-2 space-y-4">
               <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5">
-                <div className="text-sm font-extrabold mb-3">Static Template Details</div>
+                <div className="flex items-center justify-between gap-3 flex-wrap mb-3">
+                  <div className="text-sm font-extrabold">Static Template Details</div>
+
+                  <Link
+                    href="/admin/products/bulk/details/default-patterns"
+                    className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 text-sm font-bold"
+                  >
+                    <Settings2 size={16} />
+                    Manage Default Patterns
+                  </Link>
+                </div>
 
                 <label className="text-xs font-bold text-slate-500 uppercase ml-1">Category</label>
                 <select
                   className="w-full mt-1 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none"
                   value={form.category}
-                  onChange={(e) => setForm((p) => ({ ...p, category: e.target.value }))}
-                  disabled={isJobActive}
+                  onChange={(e) => applyCategoryDefaults(e.target.value)}
+                  disabled={isUploading}
                 >
                   {allowedCategories.map((c) => (
                     <option key={c} value={c}>
@@ -739,36 +1112,48 @@ export default function BulkDetailsPage() {
                   ))}
                 </select>
 
+                <div className="mt-2 text-xs text-slate-500 leading-5">
+                  Selected category ke saved default templates yahan auto-fill hote hain.
+                  Manual changes upload se pehle ab bhi allowed hain.
+                  {!defaultsHydrated ? " Default settings load ho rahi hain..." : ""}
+                </div>
+
                 <label className="text-xs font-bold text-slate-500 uppercase ml-1 mt-4 block">Title Template</label>
                 <input
                   className="w-full mt-1 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none"
                   value={form.titleTemplate}
                   onChange={(e) => setForm((p) => ({ ...p, titleTemplate: e.target.value }))}
-                  disabled={isJobActive}
+                  disabled={isUploading}
                 />
 
                 <label className="text-xs font-bold text-slate-500 uppercase ml-1 mt-4 block">Important Note Template</label>
                 <textarea
                   className="w-full mt-1 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none min-h-[90px]"
                   value={form.importantNoteTemplate}
-                  onChange={(e) => setForm((p) => ({ ...p, importantNoteTemplate: e.target.value }))}
-                  disabled={isJobActive}
+                  onChange={(e) =>
+                    setForm((p) => ({ ...p, importantNoteTemplate: e.target.value }))
+                  }
+                  disabled={isUploading}
                 />
 
                 <label className="text-xs font-bold text-slate-500 uppercase ml-1 mt-4 block">Short Description Template</label>
                 <textarea
                   className="w-full mt-1 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none min-h-[90px]"
                   value={form.shortDescTemplate}
-                  onChange={(e) => setForm((p) => ({ ...p, shortDescTemplate: e.target.value }))}
-                  disabled={isJobActive}
+                  onChange={(e) =>
+                    setForm((p) => ({ ...p, shortDescTemplate: e.target.value }))
+                  }
+                  disabled={isUploading}
                 />
 
                 <label className="text-xs font-bold text-slate-500 uppercase ml-1 mt-4 block">Long Description Template</label>
                 <textarea
                   className="w-full mt-1 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none min-h-[140px]"
                   value={form.longDescTemplate}
-                  onChange={(e) => setForm((p) => ({ ...p, longDescTemplate: e.target.value }))}
-                  disabled={isJobActive}
+                  onChange={(e) =>
+                    setForm((p) => ({ ...p, longDescTemplate: e.target.value }))
+                  }
+                  disabled={isUploading}
                 />
 
                 <label className="text-xs font-bold text-slate-500 uppercase ml-1 mt-4 block">Slug Template (optional)</label>
@@ -777,68 +1162,53 @@ export default function BulkDetailsPage() {
                   placeholder="Leave blank for auto slug"
                   value={form.slugTemplate}
                   onChange={(e) => setForm((p) => ({ ...p, slugTemplate: e.target.value }))}
-                  disabled={isJobActive}
+                  disabled={isUploading}
                 />
 
                 <label className="text-xs font-bold text-slate-500 uppercase ml-1 mt-4 block">Meta Title Template</label>
                 <input
                   className="w-full mt-1 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none"
                   value={form.metaTitleTemplate}
-                  onChange={(e) => setForm((p) => ({ ...p, metaTitleTemplate: e.target.value }))}
-                  disabled={isJobActive}
+                  onChange={(e) =>
+                    setForm((p) => ({ ...p, metaTitleTemplate: e.target.value }))
+                  }
+                  disabled={isUploading}
                 />
 
                 <label className="text-xs font-bold text-slate-500 uppercase ml-1 mt-4 block">Meta Description Template</label>
                 <textarea
                   className="w-full mt-1 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none min-h-[110px]"
                   value={form.metaDescriptionTemplate}
-                  onChange={(e) => setForm((p) => ({ ...p, metaDescriptionTemplate: e.target.value }))}
-                  disabled={isJobActive}
+                  onChange={(e) =>
+                    setForm((p) => ({ ...p, metaDescriptionTemplate: e.target.value }))
+                  }
+                  disabled={isUploading}
                 />
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mt-4">
-                  <div>
-                    <label className="text-xs font-bold text-slate-500 uppercase ml-1 block">Batch Size</label>
-                    <select
-                      className="w-full mt-1 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none"
-                      value={String(form.batchSize)}
-                      onChange={(e) =>
-                        setForm((p) => ({ ...p, batchSize: Number(e.target.value) }))
-                      }
-                      disabled={isJobActive}
-                    >
-                      <option value="100">100 rows / batch</option>
-                      <option value="250">250 rows / batch</option>
-                      <option value="500">500 rows / batch</option>
-                      <option value="750">750 rows / batch</option>
-                      <option value="1000">1000 rows / batch</option>
-                    </select>
-                  </div>
-
-                  <div className="flex items-end">
-                    <div className="flex items-center gap-3">
-                      <input
-                        type="checkbox"
-                        checked={form.publishNow}
-                        onChange={(e) => setForm((p) => ({ ...p, publishNow: e.target.checked }))}
-                        className="h-4 w-4"
-                        disabled={isJobActive}
-                      />
-                      <div className="font-bold">Publish now (otherwise draft)</div>
-                    </div>
-                  </div>
+                <div className="mt-4 flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    checked={form.publishNow}
+                    onChange={(e) => setForm((p) => ({ ...p, publishNow: e.target.checked }))}
+                    className="h-4 w-4"
+                    disabled={isUploading}
+                  />
+                  <div className="font-bold text-sm">Publish now (otherwise draft)</div>
                 </div>
               </div>
 
               <div className="rounded-2xl border border-gray-200 bg-white p-5">
                 <div className="text-sm font-extrabold mb-3">CSV / Excel Input</div>
 
-                <label className="text-xs font-bold text-slate-500 uppercase ml-1">Upload CSV / Excel file</label>
+                <label className="text-xs font-bold text-slate-500 uppercase ml-1">
+                  Upload CSV / Excel file
+                </label>
                 <input
+                  id="bulk-details-file-input"
                   type="file"
                   accept=".csv,.xlsx,.xls,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                   className="w-full mt-1 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none"
-                  disabled={isJobActive}
+                  disabled={isUploading}
                   onChange={(e) => {
                     const file = e.target.files?.[0] || null;
                     setUploadFile(file);
@@ -852,12 +1222,14 @@ export default function BulkDetailsPage() {
                   Selected file: {uploadFile ? uploadFile.name : "No file selected"}
                 </div>
 
-                <label className="text-xs font-bold text-slate-500 uppercase ml-1 mt-4 block">Or paste CSV text</label>
+                <label className="text-xs font-bold text-slate-500 uppercase ml-1 mt-4 block">
+                  Or paste CSV text
+                </label>
                 <textarea
                   className="w-full mt-1 px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 outline-none min-h-[260px] font-mono text-sm"
                   placeholder={SAMPLE_CSV}
                   value={form.csvText}
-                  disabled={isJobActive}
+                  disabled={isUploading}
                   onChange={(e) => {
                     setUploadFile(null);
                     setForm((p) => ({ ...p, csvText: e.target.value }));
@@ -879,7 +1251,7 @@ export default function BulkDetailsPage() {
                       checked={form.duplicateStrategy === "ignore"}
                       onChange={() => setForm((p) => ({ ...p, duplicateStrategy: "ignore" }))}
                       className="mt-1 h-4 w-4"
-                      disabled={isJobActive}
+                      disabled={isUploading}
                     />
                     <div>
                       <div className="font-bold text-sm">Ignore duplicate row</div>
@@ -897,7 +1269,7 @@ export default function BulkDetailsPage() {
                       checked={form.duplicateStrategy === "replace"}
                       onChange={() => setForm((p) => ({ ...p, duplicateStrategy: "replace" }))}
                       className="mt-1 h-4 w-4"
-                      disabled={isJobActive}
+                      disabled={isUploading}
                     />
                     <div>
                       <div className="font-bold text-sm">Replace existing product</div>
@@ -914,45 +1286,43 @@ export default function BulkDetailsPage() {
 
                 <button
                   type="button"
-                  disabled={loading || !canSubmit || isJobActive}
-                  onClick={() => createJob(true)}
-                  className="w-full inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-amber-500 hover:bg-amber-600 text-white transition font-extrabold disabled:opacity-60"
+                  disabled={isUploading || !canSubmit}
+                  onClick={startDirectUpload}
+                  className="w-full inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-slate-900 hover:bg-slate-950 text-white transition font-extrabold disabled:opacity-60"
                 >
                   <Play size={18} />
-                  {loading ? "Starting..." : "Validate Only"}
+                  {isUploading ? "Uploading..." : "Start Direct Upload"}
                 </button>
+
+                {isUploading ? (
+                  <button
+                    type="button"
+                    onClick={stopCurrentUpload}
+                    className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-rose-600 hover:bg-rose-700 text-white transition font-extrabold"
+                  >
+                    <PauseCircle size={18} />
+                    {isStopping ? "Stopping..." : "Stop Upload"}
+                  </button>
+                ) : null}
 
                 <button
                   type="button"
-                  disabled={loading || !canSubmit || isJobActive}
-                  onClick={() => createJob(false)}
-                  className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-slate-900 hover:bg-slate-950 text-white transition font-extrabold disabled:opacity-60"
+                  disabled={isUploading || !failureRows.length}
+                  onClick={downloadFailedCsv}
+                  className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-white hover:bg-gray-50 border border-gray-200 transition font-extrabold disabled:opacity-60"
                 >
-                  <Database size={18} />
-                  {loading ? "Starting..." : "Create Products"}
+                  <Download size={18} />
+                  Download Failed / Skipped CSV
                 </button>
 
                 <button
                   type="button"
-                  disabled={loading || isJobActive}
+                  disabled={isUploading}
                   onClick={() => {
-                    setUploadFile(null);
+                    resetFileInput();
                     resetMessages();
-                    resetJobState();
-                    setForm({
-                      category: "Solved Assignments",
-                      titleTemplate: DEFAULT_TITLE_TEMPLATE,
-                      importantNoteTemplate: DEFAULT_NOTE,
-                      shortDescTemplate: DEFAULT_SHORT_DESC_TEMPLATE,
-                      longDescTemplate: DEFAULT_LONG_DESC_TEMPLATE,
-                      slugTemplate: "",
-                      metaTitleTemplate: DEFAULT_META_TITLE_TEMPLATE,
-                      metaDescriptionTemplate: DEFAULT_META_DESCRIPTION_TEMPLATE,
-                      publishNow: false,
-                      csvText: "",
-                      duplicateStrategy: "ignore",
-                      batchSize: 500,
-                    });
+                    resetProgress();
+                    resetFormToCurrentCategoryDefaults();
                   }}
                   className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-white hover:bg-gray-50 border border-gray-200 transition font-extrabold disabled:opacity-60"
                 >
@@ -961,7 +1331,7 @@ export default function BulkDetailsPage() {
                 </button>
 
                 <div className="mt-4 text-[11px] text-slate-500 leading-5">
-                  Recommended: pehle Validate Only run karo, phir final Create Products job chalao.
+                  Is direct flow me uploaded count me sirf actual saved rows hi count hongi.
                 </div>
               </div>
 
@@ -979,75 +1349,27 @@ export default function BulkDetailsPage() {
                   <br />
                   Session selected category ke master sessions me valid hona chahiye.
                   <br />
-                  Final saved price Product Pricing rules se aayega.
+                  Failed ya skipped rows ki list CSV me download ho sakti hai.
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
+                <div className="inline-flex items-center gap-2 text-sm font-extrabold text-blue-900">
+                  <Database size={16} />
+                  Current progress summary
+                </div>
+                <div className="text-sm text-blue-800 mt-2 leading-6">
+                  Total Entries: <b>{totalEntries}</b>
                   <br />
-                  Final availability file existence se derive hogi.
+                  Uploaded Entries: <b>{uploadedEntries}</b>
                   <br />
-                  Failed ya skipped rows CSV me export ki ja sakti hain.
+                  Skipped Entries: <b>{skippedEntries}</b>
+                  <br />
+                  Failed Entries: <b>{failedEntries}</b>
                 </div>
               </div>
             </div>
           </div>
-
-          {activeJob ? (
-            <div className="mt-8 rounded-2xl border border-gray-200 bg-white p-5">
-              <div className="flex items-center gap-2 text-lg font-extrabold">
-                <BarChart3 size={20} />
-                Recent Failed / Skipped Rows
-              </div>
-
-              <div className="mt-1 text-sm text-slate-500">
-                Table me recent 100 failed/skipped rows dikh rahi hain. Full list ke liye CSV download karo.
-              </div>
-
-              <div className="mt-5 overflow-auto">
-                <table className="min-w-full text-sm border border-gray-200 rounded-xl overflow-hidden">
-                  <thead className="bg-gray-50">
-                    <tr>
-                      <th className="text-left px-3 py-2 border-b">Batch</th>
-                      <th className="text-left px-3 py-2 border-b">Row</th>
-                      <th className="text-left px-3 py-2 border-b">SKU</th>
-                      <th className="text-left px-3 py-2 border-b">Identifier</th>
-                      <th className="text-left px-3 py-2 border-b">Status</th>
-                      <th className="text-left px-3 py-2 border-b">Reason</th>
-                      <th className="text-left px-3 py-2 border-b">Logged At</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {recentFailures.map((item, idx) => (
-                      <tr key={`${item.rowNumber}-${idx}`} className="border-b last:border-b-0 align-top">
-                        <td className="px-3 py-2">{item.batchNumber || "—"}</td>
-                        <td className="px-3 py-2">{item.rowNumber || "—"}</td>
-                        <td className="px-3 py-2 font-semibold">{item.sku || "—"}</td>
-                        <td className="px-3 py-2">{item.identifier || "—"}</td>
-                        <td className="px-3 py-2">
-                          <span
-                            className={`inline-flex rounded-full px-2 py-1 text-xs font-bold ${
-                              safeStr(item.status) === "skipped"
-                                ? "bg-amber-100 text-amber-800"
-                                : "bg-rose-100 text-rose-800"
-                            }`}
-                          >
-                            {safeStr(item.status) || "failed"}
-                          </span>
-                        </td>
-                        <td className="px-3 py-2 min-w-[320px] text-slate-700">{item.reason || "—"}</td>
-                        <td className="px-3 py-2 whitespace-nowrap">{formatDateTime(item.createdAt)}</td>
-                      </tr>
-                    ))}
-
-                    {recentFailures.length === 0 ? (
-                      <tr>
-                        <td colSpan={7} className="px-4 py-8 text-center text-slate-500">
-                          No failed/skipped rows recorded yet.
-                        </td>
-                      </tr>
-                    ) : null}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          ) : null}
         </div>
       </div>
     </main>

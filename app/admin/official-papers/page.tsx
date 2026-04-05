@@ -23,12 +23,9 @@ import {
   AlertTriangle,
   CheckCircle2,
   Info,
-  PauseCircle,
   LoaderCircle,
-  BarChart3,
   Database,
   Files,
-  Layers3,
   HardDriveUpload,
   ShieldCheck,
 } from "lucide-react";
@@ -80,100 +77,48 @@ type StatsResponse = {
   };
 };
 
-type RecentFailureItem = {
-  itemIndex?: number;
-  rowNumber?: number;
-  batchNumber?: number;
-  identifier?: string;
-  sku?: string;
-  fileName?: string;
-  status?: string;
-  reason?: string;
-  createdAt?: string | null;
-};
-
-type BulkJobProgress = {
-  totalItems: number;
-  processedItems: number;
-  successItems: number;
-  failedItems: number;
-  skippedItems: number;
-  validItems: number;
-  batchSize: number;
-  batchCount: number;
-  currentBatchNumber: number;
-  lastProcessedIndex: number;
-  progressPercent: number;
-};
-
-type BulkJobState = {
-  _id: string;
-  jobType: string;
-  jobLabel: string;
-  status: string;
-  createdBy: string;
-  meta?: Record<string, any>;
-  config?: Record<string, any>;
-  summary?: Record<string, any>;
-  progress?: BulkJobProgress;
-  lastBatch?: {
-    batchNumber?: number;
-    fromIndex?: number;
-    toIndex?: number;
-    attempted?: number;
-    success?: number;
-    failed?: number;
-    skipped?: number;
-    startedAt?: string | null;
-    endedAt?: string | null;
-    note?: string;
-  } | null;
-  failuresCount?: number;
-  recentFailures?: RecentFailureItem[];
-  resultMessage?: string;
-  downloadFileName?: string;
-  startedAt?: string | null;
-  completedAt?: string | null;
-  failedAt?: string | null;
-  cancelledAt?: string | null;
-  lastHeartbeatAt?: string | null;
-  createdAt?: string | null;
-  updatedAt?: string | null;
-};
-
-type DirectStagedItem = {
-  clientFileId: string;
-  originalName: string;
+type DirectUploadSingleResult = {
   fileName: string;
-  sizeBytes: number;
-  stagedPdfKey: string;
-  stagedBucket?: string;
-  blockId?: string;
-};
-
-type StageFailureItem = {
-  clientFileId?: string;
-  fileName?: string;
+  skuNormalized?: string;
+  fileId?: string;
+  status: "uploaded" | "replaced" | "skipped" | "failed";
   reason?: string;
 };
 
-type StageMultipartResponse = {
+type DirectUploadResponse = {
   ok?: boolean;
-  message?: string;
-  action?: string;
-  blockId?: string;
-  blockNumber?: number;
-  totalBlocks?: number;
-  items?: DirectStagedItem[];
-  failures?: StageFailureItem[];
-  warning?: string;
   error?: string;
+  message?: string;
+  summary?: {
+    totalFiles?: number;
+    uploadedFiles?: number;
+    replacedFiles?: number;
+    doneFiles?: number;
+    skippedFiles?: number;
+    failedFiles?: number;
+    conflictMode?: string;
+    mode?: string;
+  };
+  results?: DirectUploadSingleResult[];
 };
 
-const LOGICAL_BLOCK_OPTIONS = [100, 200, 500];
-const TRANSPORT_CONCURRENCY = 3;
-const TRANSPORT_MAX_RETRIES = 3;
+const DIRECT_UPLOAD_CONCURRENCY = 4;
+const DIRECT_UPLOAD_MAX_RETRIES = 3;
+const DIRECT_UPLOAD_TIMEOUT_MS = 120000;
 const RETRY_BASE_DELAY_MS = 1200;
+
+const CATEGORY_OPTIONS = [
+  "",
+  "Solved Assignments",
+  "Question Papers (PYQ)",
+  "Handwritten PDFs",
+  "Ebooks",
+  "Guess Papers",
+  "projects",
+  "Handwritten Hardcopy (Delivery)",
+];
+
+const LANGUAGE_OPTIONS = ["", "Hindi", "English", "Sanskrit", "Urdu"];
 
 function formatBytes(bytes: number) {
   const n = Number(bytes || 0);
@@ -217,47 +162,6 @@ function notifyLongTaskEnd() {
   }
 }
 
-function isFinalStatus(status: string) {
-  const s = safeText(status);
-  return (
-    s === "completed" ||
-    s === "completed_with_errors" ||
-    s === "failed" ||
-    s === "cancelled"
-  );
-}
-
-function statusTone(status: string) {
-  const s = safeText(status);
-
-  if (s === "completed") {
-    return "border-emerald-200 bg-emerald-50 text-emerald-800";
-  }
-
-  if (s === "completed_with_errors") {
-    return "border-amber-200 bg-amber-50 text-amber-800";
-  }
-
-  if (s === "failed" || s === "cancelled") {
-    return "border-rose-200 bg-rose-50 text-rose-800";
-  }
-
-  return "border-blue-200 bg-blue-50 text-blue-800";
-}
-
-const CATEGORY_OPTIONS = [
-  "",
-  "Solved Assignments",
-  "Question Papers (PYQ)",
-  "Handwritten PDFs",
-  "Ebooks",
-  "Guess Papers",
-  "projects",
-  "Handwritten Hardcopy (Delivery)",
-];
-
-const LANGUAGE_OPTIONS = ["", "Hindi", "English", "Sanskrit", "Urdu"];
-
 export default function OfficialPapersPage() {
   const [files, setFiles] = useState<OfficialPaperItem[]>([]);
   const [filesLoading, setFilesLoading] = useState(true);
@@ -294,129 +198,44 @@ export default function OfficialPapersPage() {
   const [serverTotalPages, setServerTotalPages] = useState(1);
 
   const [conflictMode, setConflictMode] = useState<"ignore" | "replace">("ignore");
-  const [batchSize, setBatchSize] = useState(100);
-  const [uploadBlockSize, setUploadBlockSize] = useState(100);
-
   const [selectedPdfFiles, setSelectedPdfFiles] = useState<File[]>([]);
-  const [isStaging, setIsStaging] = useState(false);
-  const [creatingJob, setCreatingJob] = useState(false);
-  const [currentBlockNumber, setCurrentBlockNumber] = useState(0);
-  const [currentBlockTotal, setCurrentBlockTotal] = useState(0);
-  const [currentBlockPercent, setCurrentBlockPercent] = useState(0);
-  const [currentBlockLoadedBytes, setCurrentBlockLoadedBytes] = useState(0);
-  const [completedBlockBytes, setCompletedBlockBytes] = useState(0);
-  const [currentBlockLabel, setCurrentBlockLabel] = useState("");
-  const [currentBlockFileCount, setCurrentBlockFileCount] = useState(0);
-  const [stagingAbortEnabled, setStagingAbortEnabled] = useState(false);
 
-  const [activeJob, setActiveJob] = useState<BulkJobState | null>(null);
-  const [activeJobId, setActiveJobId] = useState("");
-  const [isCancelling, setIsCancelling] = useState(false);
+  const [isUploading, setIsUploading] = useState(false);
+  const [uploadSessionActive, setUploadSessionActive] = useState(false);
+  const [uploadSessionTotal, setUploadSessionTotal] = useState(0);
+  const [uploadSessionDone, setUploadSessionDone] = useState(0);
 
   const [actionLoadingId, setActionLoadingId] = useState("");
 
-  const processInFlightRef = useRef(false);
   const longTaskActiveRef = useRef(false);
-  const finalRefreshDoneRef = useRef(false);
-
-  const currentUploadXhrsRef = useRef<Map<string, XMLHttpRequest>>(new Map());
-  const activeTransportLoadedRef = useRef<Record<string, number>>({});
-  const currentLogicalBlockFinishedBytesRef = useRef(0);
-  const currentLogicalBlockTotalBytesRef = useRef(0);
-  const stagingCancelledRef = useRef(false);
-
-  const currentStatus = safeText(activeJob?.status);
-  const isJobActive = Boolean(activeJobId) && !isFinalStatus(currentStatus);
-  const isLongTaskBusy = isJobActive || isStaging;
-  const progress = activeJob?.progress;
-  const summary = activeJob?.summary || {};
-  const recentFailures = Array.isArray(activeJob?.recentFailures)
-    ? activeJob.recentFailures
-    : [];
 
   const selectedPdfTotalBytes = useMemo(
     () => selectedPdfFiles.reduce((sum, file) => sum + Number(file.size || 0), 0),
     [selectedPdfFiles]
   );
 
-  const selectedPdfBlockCount = useMemo(() => {
-    if (!selectedPdfFiles.length) return 0;
-    return Math.ceil(selectedPdfFiles.length / Math.max(1, uploadBlockSize));
-  }, [selectedPdfFiles, uploadBlockSize]);
-
-  const totalStagePercent = useMemo(() => {
-    if (!selectedPdfTotalBytes) return 0;
-    const totalDone = Math.min(
-      selectedPdfTotalBytes,
-      Number(completedBlockBytes || 0) + Number(currentBlockLoadedBytes || 0)
-    );
-    return Math.min(100, Math.round((totalDone / selectedPdfTotalBytes) * 100));
-  }, [selectedPdfTotalBytes, completedBlockBytes, currentBlockLoadedBytes]);
+  const uploadProgressPercent = useMemo(() => {
+    if (!uploadSessionTotal) return 0;
+    return Math.min(100, Math.round((uploadSessionDone / uploadSessionTotal) * 100));
+  }, [uploadSessionDone, uploadSessionTotal]);
 
   function resetMessages() {
     setServerMessage("");
     setServerMessageType("info");
   }
 
-  function resetJobState() {
-    setActiveJob(null);
-    setActiveJobId("");
-    finalRefreshDoneRef.current = false;
+  function resetUploadProgress() {
+    setUploadSessionActive(false);
+    setUploadSessionTotal(0);
+    setUploadSessionDone(0);
   }
 
-  function abortAllCurrentUploads() {
-    currentUploadXhrsRef.current.forEach((xhr) => {
-      try {
-        xhr.abort();
-      } catch {
-        // ignore
-      }
-    });
-    currentUploadXhrsRef.current.clear();
-    activeTransportLoadedRef.current = {};
-  }
-
-  function refreshCurrentBlockProgress() {
-    const activeLoaded = Object.values(activeTransportLoadedRef.current).reduce(
-      (sum, val) => sum + Number(val || 0),
-      0
-    );
-
-    setCurrentBlockLoadedBytes(activeLoaded);
-
-    const totalBytes = Number(currentLogicalBlockTotalBytesRef.current || 0);
-    const finishedBytes = Number(currentLogicalBlockFinishedBytesRef.current || 0);
-    const currentDone = Math.min(totalBytes, finishedBytes + activeLoaded);
-
-    const percent =
-      totalBytes > 0 ? Math.min(100, Math.round((currentDone / totalBytes) * 100)) : 0;
-
-    setCurrentBlockPercent(percent);
-  }
-
-  function resetStageState(keepSelection = true) {
-    setIsStaging(false);
-    setCurrentBlockNumber(0);
-    setCurrentBlockTotal(0);
-    setCurrentBlockPercent(0);
-    setCurrentBlockLoadedBytes(0);
-    setCompletedBlockBytes(0);
-    setCurrentBlockLabel("");
-    setCurrentBlockFileCount(0);
-    setStagingAbortEnabled(false);
-
-    abortAllCurrentUploads();
-    currentLogicalBlockFinishedBytesRef.current = 0;
-    currentLogicalBlockTotalBytesRef.current = 0;
-    stagingCancelledRef.current = false;
-
-    if (!keepSelection) {
-      setSelectedPdfFiles([]);
-      const input = document.getElementById(
-        "official-paper-direct-input"
-      ) as HTMLInputElement | null;
-      if (input) input.value = "";
-    }
+  function resetSelectedFiles() {
+    setSelectedPdfFiles([]);
+    const input = document.getElementById(
+      "official-paper-direct-input"
+    ) as HTMLInputElement | null;
+    if (input) input.value = "";
   }
 
   async function safeReadJson(res: Response) {
@@ -430,65 +249,6 @@ export default function OfficialPapersPage() {
         ok: false,
         error: text.slice(0, 400) || "Invalid server response",
       };
-    }
-  }
-
-  function parseTextJson(text: string) {
-    const raw = String(text || "").trim();
-    if (!raw) {
-      return { ok: false, error: "Server returned empty response" };
-    }
-
-    try {
-      return JSON.parse(raw);
-    } catch {
-      return {
-        ok: false,
-        error: raw.slice(0, 400) || "Invalid server response",
-      };
-    }
-  }
-
-  async function fetchJobStatus(jobId: string) {
-    const res = await fetch(`/api/admin/bulk-jobs/${encodeURIComponent(jobId)}`, {
-      method: "GET",
-      credentials: "include",
-      cache: "no-store",
-    });
-
-    const data = await safeReadJson(res);
-    if (!res.ok || !data?.ok) {
-      throw new Error(data?.error || "Failed to fetch job status");
-    }
-
-    const job = data?.job as BulkJobState;
-    setActiveJob(job);
-    return job;
-  }
-
-  async function processNextBatch(jobId: string) {
-    if (!jobId || processInFlightRef.current) return;
-
-    processInFlightRef.current = true;
-    try {
-      const res = await fetch("/api/admin/official-papers/jobs/process", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ jobId }),
-      });
-
-      const data = await safeReadJson(res);
-
-      if (!res.ok || !data?.ok) {
-        throw new Error(data?.error || "Batch processing failed");
-      }
-
-      if (data?.job) {
-        setActiveJob(data.job as BulkJobState);
-      }
-    } finally {
-      processInFlightRef.current = false;
     }
   }
 
@@ -561,10 +321,6 @@ export default function OfficialPapersPage() {
     await Promise.all([loadFiles(), loadStats()]);
   }
 
-  function buildClientFileId(file: File, index: number) {
-    return `${file.name}__${file.size}__${file.lastModified}__${index}`;
-  }
-
   function normalizeSelectedPdfFiles(fileList: FileList | File[] | null | undefined) {
     const arr = Array.from(fileList || []);
     const onlyPdf = arr.filter((file) => {
@@ -583,228 +339,64 @@ export default function OfficialPapersPage() {
     return Array.from(uniqueMap.values());
   }
 
-  function uploadSinglePdfViaServer(args: {
-    blockNumber: number;
-    totalBlocks: number;
-    file: File;
-    globalIndex: number;
-    requestId: string;
-  }) {
-    return new Promise<StageMultipartResponse>((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      currentUploadXhrsRef.current.set(args.requestId, xhr);
+  async function uploadSinglePdfRequest(file: File) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), DIRECT_UPLOAD_TIMEOUT_MS);
 
+    try {
       const formData = new FormData();
-      formData.append("files", args.file);
-      formData.append("blockNumber", String(args.blockNumber));
-      formData.append("totalBlocks", String(args.totalBlocks));
-      formData.append(
-        "meta",
-        JSON.stringify([
-          {
-            clientFileId: buildClientFileId(args.file, args.globalIndex),
-            originalName: args.file.name,
-            fileName: args.file.name,
-          },
-        ])
-      );
+      formData.append("file", file);
+      formData.append("conflictMode", conflictMode);
 
-      xhr.open("POST", "/api/admin/official-papers/blocks", true);
-      xhr.withCredentials = true;
+      const res = await fetch("/api/admin/official-papers/upload", {
+        method: "POST",
+        credentials: "include",
+        body: formData,
+        signal: controller.signal,
+      });
 
-      xhr.upload.onprogress = (event) => {
-        const loaded = event.lengthComputable ? Number(event.loaded || 0) : 0;
-        const safeLoaded = Math.min(Number(args.file.size || 0), loaded);
-        activeTransportLoadedRef.current[args.requestId] = safeLoaded;
-        refreshCurrentBlockProgress();
-      };
+      const data = (await safeReadJson(res)) as DirectUploadResponse;
 
-      xhr.onerror = () => {
-        delete activeTransportLoadedRef.current[args.requestId];
-        currentUploadXhrsRef.current.delete(args.requestId);
-        refreshCurrentBlockProgress();
-        reject(new Error("Single PDF upload request failed"));
-      };
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.error || data?.message || "Upload failed");
+      }
 
-      xhr.onabort = () => {
-        delete activeTransportLoadedRef.current[args.requestId];
-        currentUploadXhrsRef.current.delete(args.requestId);
-        refreshCurrentBlockProgress();
-        reject(new Error("Upload cancelled"));
-      };
-
-      xhr.onload = () => {
-        delete activeTransportLoadedRef.current[args.requestId];
-        currentUploadXhrsRef.current.delete(args.requestId);
-        refreshCurrentBlockProgress();
-
-        const data = parseTextJson(xhr.responseText || "");
-        if (xhr.status >= 200 && xhr.status < 300 && data?.ok) {
-          resolve(data as StageMultipartResponse);
-          return;
-        }
-
-        reject(
-          new Error(
-            safeText(data?.error || data?.message || `HTTP ${xhr.status || 0}`) ||
-              "Single PDF upload failed"
-          )
-        );
-      };
-
-      xhr.send(formData);
-    });
+      return data;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
-  async function stageSinglePdfWithRetry(args: {
-    blockNumber: number;
-    totalBlocks: number;
-    file: File;
-    globalIndex: number;
-  }) {
+  async function uploadSinglePdfWithRetry(file: File) {
     let lastError = "";
 
-    for (let attempt = 1; attempt <= TRANSPORT_MAX_RETRIES; attempt++) {
-      if (stagingCancelledRef.current) {
-        throw new Error("Block upload cancelled");
-      }
-
-      const requestId = `${args.globalIndex}-${attempt}-${Date.now()}-${Math.random()
-        .toString(36)
-        .slice(2, 8)}`;
-
+    for (let attempt = 1; attempt <= DIRECT_UPLOAD_MAX_RETRIES; attempt++) {
       try {
-        const data = await uploadSinglePdfViaServer({
-          blockNumber: args.blockNumber,
-          totalBlocks: args.totalBlocks,
-          file: args.file,
-          globalIndex: args.globalIndex,
-          requestId,
-        });
-
-        const items = Array.isArray(data?.items) ? data.items : [];
-        const failures = Array.isArray(data?.failures) ? data.failures : [];
-
-        if (items.length > 0) {
-          return {
-            ok: true as const,
-            items,
-            failures: [] as StageFailureItem[],
-          };
-        }
-
-        if (failures.length > 0) {
-          return {
-            ok: false as const,
-            items: [] as DirectStagedItem[],
-            failures,
-            error:
-              safeText(failures[0]?.reason) || "Single PDF stage failed on server",
-          };
-        }
-
-        lastError =
-          safeText(data?.warning || data?.error || data?.message) ||
-          "Single PDF stage verification failed";
+        return await uploadSinglePdfRequest(file);
       } catch (error: any) {
-        lastError = safeText(error?.message || "Single PDF upload failed");
+        lastError = safeText(error?.message || "Upload failed");
 
-        if (
-          stagingCancelledRef.current ||
-          lastError.toLowerCase().includes("cancelled")
-        ) {
-          throw new Error("Block upload cancelled");
+        const lower = lastError.toLowerCase();
+        const noRetry =
+          lower.includes("not authenticated") ||
+          lower.includes("forbidden") ||
+          lower.includes("only pdf") ||
+          lower.includes("file exceeds") ||
+          lower.includes("empty pdf") ||
+          lower.includes("sku could not be parsed");
+
+        if (noRetry || attempt === DIRECT_UPLOAD_MAX_RETRIES) {
+          throw new Error(lastError);
         }
-      }
 
-      if (attempt < TRANSPORT_MAX_RETRIES) {
         await sleep(RETRY_BASE_DELAY_MS * attempt);
       }
     }
 
-    return {
-      ok: false as const,
-      items: [] as DirectStagedItem[],
-      failures: [
-        {
-          clientFileId: buildClientFileId(args.file, args.globalIndex),
-          fileName: args.file.name,
-          reason: lastError || "Single PDF upload failed after retries",
-        },
-      ],
-      error: lastError || "Single PDF upload failed after retries",
-    };
+    throw new Error(lastError || "Upload failed after retries");
   }
 
-  async function stageLogicalBlockWithParallelSingleUploads(args: {
-    blockFiles: File[];
-    blockNumber: number;
-    totalBlocks: number;
-    globalStartIndex: number;
-  }) {
-    const stagedItems: DirectStagedItem[] = [];
-    let failedCount = 0;
-    let nextLocalIndex = 0;
-
-    currentLogicalBlockFinishedBytesRef.current = 0;
-    currentLogicalBlockTotalBytesRef.current = args.blockFiles.reduce(
-      (sum, file) => sum + Number(file.size || 0),
-      0
-    );
-    activeTransportLoadedRef.current = {};
-    setCurrentBlockLoadedBytes(0);
-    setCurrentBlockPercent(0);
-
-    const workerCount = Math.min(TRANSPORT_CONCURRENCY, args.blockFiles.length);
-
-    async function worker() {
-      while (true) {
-        if (stagingCancelledRef.current) {
-          throw new Error("Block upload cancelled");
-        }
-
-        const localIndex = nextLocalIndex;
-        nextLocalIndex += 1;
-
-        if (localIndex >= args.blockFiles.length) {
-          return;
-        }
-
-        const file = args.blockFiles[localIndex];
-        const globalIndex = args.globalStartIndex + localIndex;
-
-        const result = await stageSinglePdfWithRetry({
-          blockNumber: args.blockNumber,
-          totalBlocks: args.totalBlocks,
-          file,
-          globalIndex,
-        });
-
-        if (result.ok) {
-          stagedItems.push(...result.items);
-        } else {
-          failedCount += 1;
-        }
-
-        currentLogicalBlockFinishedBytesRef.current += Number(file.size || 0);
-        setCompletedBlockBytes((prev) => prev + Number(file.size || 0));
-        refreshCurrentBlockProgress();
-      }
-    }
-
-    await Promise.all(Array.from({ length: workerCount }, () => worker()));
-
-    setCurrentBlockPercent(100);
-    setCurrentBlockLoadedBytes(0);
-    activeTransportLoadedRef.current = {};
-
-    return {
-      stagedItems,
-      failedCount,
-    };
-  }
-
-  async function stageDirectPdfBlocksAndCreateJob() {
+  async function startDirectUpload() {
     if (!selectedPdfFiles.length) {
       alert("Pehle PDF files select karo.");
       return;
@@ -821,156 +413,82 @@ export default function OfficialPapersPage() {
       return;
     }
 
-    setCreatingJob(true);
-    setIsStaging(true);
     resetMessages();
-    resetJobState();
-    setCompletedBlockBytes(0);
-    setCurrentBlockLoadedBytes(0);
-    setCurrentBlockPercent(0);
-    setCurrentBlockLabel("");
-    setCurrentBlockFileCount(0);
-    stagingCancelledRef.current = false;
+    setIsUploading(true);
+    setUploadSessionActive(true);
+    setUploadSessionTotal(usableFiles.length);
+    setUploadSessionDone(0);
 
-    try {
-      const totalBlocks = Math.max(
-        1,
-        Math.ceil(usableFiles.length / Math.max(1, uploadBlockSize))
-      );
-      setCurrentBlockTotal(totalBlocks);
+    let uploadedFiles = 0;
+    let replacedFiles = 0;
+    let skippedFiles = 0;
+    let failedFiles = 0;
+    let nextIndex = 0;
 
-      const allStagedItems: DirectStagedItem[] = [];
-      let stageFailedCount = 0;
+    async function worker() {
+      while (true) {
+        const currentIndex = nextIndex;
+        nextIndex += 1;
 
-      for (let blockIndex = 0; blockIndex < totalBlocks; blockIndex++) {
-        if (stagingCancelledRef.current) {
-          throw new Error("Block upload cancelled");
+        if (currentIndex >= usableFiles.length) {
+          return;
         }
 
-        const start = blockIndex * Math.max(1, uploadBlockSize);
-        const end = Math.min(
-          usableFiles.length,
-          start + Math.max(1, uploadBlockSize)
-        );
+        const file = usableFiles[currentIndex];
 
-        const blockFiles = usableFiles.slice(start, end);
-        const blockNumber = blockIndex + 1;
+        try {
+          const data = await uploadSinglePdfWithRetry(file);
+          const result = Array.isArray(data?.results) ? data.results[0] : null;
+          const status = safeText(result?.status).toLowerCase();
 
-        setCurrentBlockNumber(blockNumber);
-        setCurrentBlockFileCount(blockFiles.length);
-        setCurrentBlockLabel(
-          `Block ${blockNumber} / ${totalBlocks} • ${TRANSPORT_CONCURRENCY} parallel uploads • auto retry ${TRANSPORT_MAX_RETRIES}x`
-        );
-        setStagingAbortEnabled(true);
-
-        const result = await stageLogicalBlockWithParallelSingleUploads({
-          blockFiles,
-          blockNumber,
-          totalBlocks,
-          globalStartIndex: start,
-        });
-
-        allStagedItems.push(...result.stagedItems);
-        stageFailedCount += result.failedCount;
+          if (status === "uploaded") {
+            uploadedFiles += 1;
+            setUploadSessionDone((prev) => prev + 1);
+          } else if (status === "replaced") {
+            replacedFiles += 1;
+            setUploadSessionDone((prev) => prev + 1);
+          } else if (status === "skipped") {
+            skippedFiles += 1;
+          } else {
+            failedFiles += 1;
+          }
+        } catch {
+          failedFiles += 1;
+        }
       }
-
-      if (!allStagedItems.length) {
-        throw new Error(
-          "Koi bhi PDF successfully stage nahi ho paayi. Ab system one-file-per-request + auto-retry mode me hai, isliye agar ye error fir aaye to next step backend request limit tune karna hoga."
-        );
-      }
-
-      const createJobRes = await fetch("/api/admin/official-papers/jobs", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({
-          action: "create_direct_job",
-          sourceType: "direct_pdf_blocks",
-          conflictMode,
-          batchSize,
-          uploadLabel: `Official Papers Direct Upload (${allStagedItems.length} PDFs)`,
-          items: allStagedItems,
-        }),
-      });
-
-      const createJobData = await safeReadJson(createJobRes);
-
-      if (!createJobRes.ok || !createJobData?.ok) {
-        throw new Error(createJobData?.error || "Direct PDF job creation failed");
-      }
-
-      const job = createJobData?.job as BulkJobState;
-      setActiveJob(job);
-      setActiveJobId(job?._id || "");
-      finalRefreshDoneRef.current = false;
-
-      setServerMessage(
-        stageFailedCount > 0
-          ? `Official papers upload job started. ${allStagedItems.length} PDFs successfully queue ho gayi, ${stageFailedCount} PDFs retries ke baad bhi stage nahi ho paayi.`
-          : `Official papers upload job started successfully. ${allStagedItems.length} PDFs strong upload mode me queue ho gayi.`
-      );
-      setServerMessageType("success");
-
-      setSelectedPdfFiles([]);
-      const input = document.getElementById(
-        "official-paper-direct-input"
-      ) as HTMLInputElement | null;
-      if (input) input.value = "";
-    } catch (e: any) {
-      const errMsg = e?.message || "Official papers upload failed";
-      setServerMessage(errMsg);
-      setServerMessageType("error");
-      alert(errMsg);
-    } finally {
-      setCreatingJob(false);
-      setIsStaging(false);
-      setStagingAbortEnabled(false);
-      abortAllCurrentUploads();
     }
-  }
 
-  function cancelCurrentStaging() {
-    const ok = window.confirm("Current official papers block upload cancel karna hai?");
-    if (!ok) return;
-
-    stagingCancelledRef.current = true;
-    abortAllCurrentUploads();
-  }
-
-  async function cancelCurrentJob() {
-    if (!activeJobId) return;
-
-    const ok = window.confirm("Current official papers bulk job ko cancel karna hai?");
-    if (!ok) return;
-
-    setIsCancelling(true);
     try {
-      const res = await fetch(`/api/admin/bulk-jobs/${encodeURIComponent(activeJobId)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ action: "cancel" }),
-      });
+      const workerCount = Math.min(DIRECT_UPLOAD_CONCURRENCY, usableFiles.length);
+      await Promise.all(Array.from({ length: workerCount }, () => worker()));
 
-      const data = await safeReadJson(res);
-      if (!res.ok || !data?.ok) {
-        throw new Error(data?.error || "Cancel failed");
+      const doneFiles = uploadedFiles + replacedFiles;
+
+      if (doneFiles > 0 && failedFiles === 0 && skippedFiles === 0) {
+        setServerMessage(
+          `${doneFiles} PDFs successfully upload ho gayi.`
+        );
+        setServerMessageType("success");
+      } else if (doneFiles > 0) {
+        setServerMessage(
+          `Upload complete. Done ${doneFiles}, Skipped ${skippedFiles}, Failed ${failedFiles}.`
+        );
+        setServerMessageType("info");
+      } else {
+        setServerMessage(
+          `Koi bhi PDF successfully upload nahi ho paayi. Skipped ${skippedFiles}, Failed ${failedFiles}.`
+        );
+        setServerMessageType("error");
       }
 
-      if (data?.job) {
-        setActiveJob(data.job as BulkJobState);
-      }
-
-      setServerMessage("Bulk job cancelled.");
-      setServerMessageType("info");
-    } catch (e: any) {
-      const errMsg = e?.message || "Cancel failed";
+      await refreshAll();
+      resetSelectedFiles();
+    } catch (error: any) {
+      const errMsg = safeText(error?.message || "Upload failed");
       setServerMessage(errMsg);
       setServerMessageType("error");
-      alert(errMsg);
     } finally {
-      setIsCancelling(false);
+      setIsUploading(false);
     }
   }
 
@@ -1148,52 +666,16 @@ export default function OfficialPapersPage() {
   }
 
   useEffect(() => {
-    if (isLongTaskBusy && !longTaskActiveRef.current) {
+    if (isUploading && !longTaskActiveRef.current) {
       notifyLongTaskStart();
       longTaskActiveRef.current = true;
     }
 
-    if ((!isLongTaskBusy || isFinalStatus(currentStatus)) && longTaskActiveRef.current) {
+    if (!isUploading && longTaskActiveRef.current) {
       notifyLongTaskEnd();
       longTaskActiveRef.current = false;
     }
-  }, [isLongTaskBusy, currentStatus]);
-
-  useEffect(() => {
-    if (!activeJobId) return;
-    if (isFinalStatus(currentStatus)) return;
-
-    const timer = setTimeout(() => {
-      void processNextBatch(activeJobId);
-    }, 400);
-
-    return () => clearTimeout(timer);
-  }, [activeJobId, currentStatus, activeJob?.progress?.processedItems]);
-
-  useEffect(() => {
-    if (!activeJobId) return;
-    if (isFinalStatus(currentStatus)) return;
-
-    const interval = setInterval(() => {
-      void fetchJobStatus(activeJobId).catch(() => {
-        // ignore polling error
-      });
-    }, 1200);
-
-    return () => clearInterval(interval);
-  }, [activeJobId, currentStatus]);
-
-  useEffect(() => {
-    if (!activeJobId) return;
-    if (!isFinalStatus(currentStatus)) {
-      finalRefreshDoneRef.current = false;
-      return;
-    }
-    if (finalRefreshDoneRef.current) return;
-
-    finalRefreshDoneRef.current = true;
-    void refreshAll();
-  }, [activeJobId, currentStatus]);
+  }, [isUploading]);
 
   useEffect(() => {
     return () => {
@@ -1201,7 +683,6 @@ export default function OfficialPapersPage() {
         notifyLongTaskEnd();
         longTaskActiveRef.current = false;
       }
-      abortAllCurrentUploads();
     };
   }, []);
 
@@ -1244,9 +725,8 @@ export default function OfficialPapersPage() {
 
               <h1 className="text-2xl font-extrabold mt-3">IGNOU Official Papers</h1>
               <p className="text-sm text-slate-600 mt-1">
-                Ye page unsolved question papers ke liye hai. Is flow ko intentionally
-                product PDF vault se alag rakha gaya hai, taki strong one-file-per-request
-                upload + logical block processing ho sake.
+                Ye page unsolved question papers ke liye hai. Ab upload flow direct aur simple
+                rakha gaya hai: har PDF final upload hoti hai, bina block, batch aur job system ke.
               </p>
             </div>
 
@@ -1365,159 +845,11 @@ export default function OfficialPapersPage() {
             </div>
           ) : null}
 
-          {activeJob ? (
-            <div className={`mt-4 rounded-2xl border p-4 ${statusTone(currentStatus)}`}>
-              <div className="flex items-start justify-between gap-4 flex-wrap">
-                <div>
-                  <div className="text-sm font-extrabold">
-                    Current Job: {safeText(activeJob.jobLabel) || "Bulk Official Papers Upload"}
-                  </div>
-                  <div className="mt-1 text-xs font-semibold uppercase tracking-wide">
-                    Status: {safeText(activeJob.status) || "—"}
-                  </div>
-                  <div className="mt-2 text-xs leading-5">
-                    Job ID: <b>{activeJob._id}</b>
-                    <br />
-                    Started: <b>{formatDateTime(activeJob.startedAt || activeJob.createdAt)}</b>
-                    <br />
-                    Last heartbeat: <b>{formatDateTime(activeJob.lastHeartbeatAt)}</b>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2 flex-wrap">
-                  {activeJobId ? (
-                    <a
-                      href={`/api/admin/bulk-jobs/${encodeURIComponent(activeJobId)}/failures`}
-                      className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl font-bold shadow-sm border ${
-                        Number(activeJob.failuresCount || 0) > 0
-                          ? "bg-white hover:bg-gray-50 border-gray-200 text-slate-900"
-                          : "bg-gray-100 border-gray-200 text-slate-400 pointer-events-none"
-                      }`}
-                    >
-                      <Download size={16} />
-                      Download Failed CSV
-                    </a>
-                  ) : null}
-
-                  {!isFinalStatus(currentStatus) ? (
-                    <button
-                      type="button"
-                      onClick={cancelCurrentJob}
-                      disabled={isCancelling}
-                      className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white font-bold shadow-sm disabled:opacity-60"
-                    >
-                      <PauseCircle size={16} />
-                      {isCancelling ? "Cancelling..." : "Cancel Job"}
-                    </button>
-                  ) : null}
-                </div>
-              </div>
-
-              <div className="mt-4 rounded-2xl border border-white/70 bg-white/70 p-4">
-                <div className="flex items-center justify-between gap-3 flex-wrap">
-                  <div className="text-sm font-extrabold">Processing Progress</div>
-                  <div className="text-sm font-bold">
-                    {progress?.processedItems ?? 0} / {progress?.totalItems ?? 0} processed
-                  </div>
-                </div>
-
-                <div className="mt-3 h-4 w-full overflow-hidden rounded-full bg-slate-200">
-                  <div
-                    className="h-full rounded-full bg-slate-900 transition-all"
-                    style={{ width: `${progress?.progressPercent ?? 0}%` }}
-                  />
-                </div>
-
-                <div className="mt-2 text-xs font-semibold text-slate-700">
-                  {progress?.progressPercent ?? 0}% complete
-                </div>
-
-                <div className="mt-4 grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-3">
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                    <div className="text-xs text-slate-500 font-bold uppercase">Total Files</div>
-                    <div className="text-xl font-extrabold mt-1">
-                      {summary?.totalFiles ?? progress?.totalItems ?? 0}
-                    </div>
-                  </div>
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                    <div className="text-xs text-slate-500 font-bold uppercase">Valid Files</div>
-                    <div className="text-xl font-extrabold mt-1">{summary?.validFiles ?? 0}</div>
-                  </div>
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                    <div className="text-xs text-slate-500 font-bold uppercase">Uploaded</div>
-                    <div className="text-xl font-extrabold mt-1">{summary?.uploadedFiles ?? 0}</div>
-                  </div>
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                    <div className="text-xs text-slate-500 font-bold uppercase">Replaced</div>
-                    <div className="text-xl font-extrabold mt-1">{summary?.replacedFiles ?? 0}</div>
-                  </div>
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                    <div className="text-xs text-slate-500 font-bold uppercase">Ignored / Skipped</div>
-                    <div className="text-xl font-extrabold mt-1">
-                      {(summary?.ignoredFiles ?? 0) + (summary?.skippedFiles ?? 0)}
-                    </div>
-                  </div>
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
-                    <div className="text-xs text-slate-500 font-bold uppercase">Failed</div>
-                    <div className="text-xl font-extrabold mt-1">{summary?.failedFiles ?? 0}</div>
-                  </div>
-                </div>
-
-                <div className="mt-4 grid grid-cols-1 xl:grid-cols-3 gap-4">
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
-                    <div className="text-sm font-extrabold">Batch Status</div>
-                    <div className="text-sm text-slate-600 mt-2 leading-6">
-                      Current Batch: <b>{progress?.currentBatchNumber ?? 0}</b> /{" "}
-                      <b>{progress?.batchCount ?? 0}</b>
-                      <br />
-                      Batch Size: <b>{progress?.batchSize ?? 0}</b>
-                      <br />
-                      Last Processed Index: <b>{progress?.lastProcessedIndex ?? -1}</b>
-                    </div>
-                    {activeJob?.lastBatch?.note ? (
-                      <div className="mt-2 text-xs text-slate-700">{activeJob.lastBatch.note}</div>
-                    ) : null}
-                  </div>
-
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
-                    <div className="text-sm font-extrabold">Upload Summary</div>
-                    <div className="text-sm text-slate-600 mt-2 leading-6">
-                      Matched Products: <b>{summary?.matchedProducts ?? 0}</b>
-                      <br />
-                      Conflict Mode:{" "}
-                      <b>
-                        {safeText(
-                          summary?.conflictMode || activeJob?.config?.conflictMode || "-"
-                        )}
-                      </b>
-                      <br />
-                      Source:{" "}
-                      <b className="break-all">
-                        {safeText(summary?.sourceType || activeJob?.config?.sourceType || "-")}
-                      </b>
-                    </div>
-                  </div>
-
-                  <div className="rounded-xl border border-gray-200 bg-gray-50 p-4">
-                    <div className="text-sm font-extrabold">Result</div>
-                    <div className="text-sm text-slate-600 mt-2 leading-6">
-                      Message: <b>{safeText(activeJob?.resultMessage || "-")}</b>
-                      <br />
-                      Failures Logged: <b>{Number(activeJob?.failuresCount || 0)}</b>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          ) : null}
-
-          {isLongTaskBusy ? (
+          {isUploading ? (
             <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900">
               <div className="flex items-center gap-2">
                 <LoaderCircle size={18} className="animate-spin" />
-                {isStaging
-                  ? "Strong upload mode active hai: one-file-per-request, 3 parallel uploads, auto retry enabled."
-                  : "Batch job running. Inactivity auto-logout temporarily paused hai jab tak job finish nahi hoti."}
+                Direct official papers upload chal raha hai.
               </div>
             </div>
           ) : null}
@@ -1533,7 +865,7 @@ export default function OfficialPapersPage() {
                 <label
                   htmlFor="official-paper-direct-input"
                   className={`mt-3 flex min-h-[140px] w-full cursor-pointer items-center justify-center rounded-2xl border-2 border-dashed border-sky-300 bg-sky-50 px-4 py-6 text-center transition ${
-                    showTrash || isLongTaskBusy ? "pointer-events-none opacity-60" : "hover:bg-sky-100"
+                    showTrash || isUploading ? "pointer-events-none opacity-60" : "hover:bg-sky-100"
                   }`}
                 >
                   <div>
@@ -1544,7 +876,7 @@ export default function OfficialPapersPage() {
                       Click here to select multiple PDFs
                     </div>
                     <div className="mt-1 text-xs text-sky-700">
-                      Strong mode: one-file-per-request + parallel + retry
+                      Simple direct upload system active hai
                     </div>
                   </div>
                 </label>
@@ -1557,47 +889,21 @@ export default function OfficialPapersPage() {
                   onChange={(e) => {
                     const list = normalizeSelectedPdfFiles(e.target.files);
                     setSelectedPdfFiles(list);
-                    resetStageState(true);
+                    resetUploadProgress();
+                    resetMessages();
                   }}
                   className="hidden"
-                  disabled={showTrash || isLongTaskBusy}
+                  disabled={showTrash || isUploading}
                 />
 
                 <select
                   value={conflictMode}
                   onChange={(e) => setConflictMode(e.target.value as "ignore" | "replace")}
                   className="w-full mt-3 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none"
-                  disabled={showTrash || isLongTaskBusy}
+                  disabled={showTrash || isUploading}
                 >
                   <option value="ignore">Duplicate mode: Ignore new</option>
                   <option value="replace">Duplicate mode: Replace old</option>
-                </select>
-
-                <select
-                  value={String(batchSize)}
-                  onChange={(e) => setBatchSize(Number(e.target.value))}
-                  className="w-full mt-3 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none"
-                  disabled={showTrash || isLongTaskBusy}
-                >
-                  <option value="25">25 files / processing batch</option>
-                  <option value="50">50 files / processing batch</option>
-                  <option value="100">100 files / processing batch</option>
-                  <option value="200">200 files / processing batch</option>
-                  <option value="300">300 files / processing batch</option>
-                  <option value="500">500 files / processing batch</option>
-                </select>
-
-                <select
-                  value={String(uploadBlockSize)}
-                  onChange={(e) => setUploadBlockSize(Number(e.target.value))}
-                  className="w-full mt-3 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none"
-                  disabled={showTrash || isLongTaskBusy}
-                >
-                  {LOGICAL_BLOCK_OPTIONS.map((n) => (
-                    <option key={n} value={n}>
-                      {n} PDFs / logical block
-                    </option>
-                  ))}
                 </select>
 
                 <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs leading-6 text-slate-700">
@@ -1605,49 +911,38 @@ export default function OfficialPapersPage() {
                   <br />
                   Total Size: <b>{formatBytes(selectedPdfTotalBytes)}</b>
                   <br />
-                  Logical Blocks: <b>{selectedPdfBlockCount}</b>
+                  Direct upload concurrency: <b>{DIRECT_UPLOAD_CONCURRENCY}</b>
                   <br />
-                  Parallel uploads: <b>{TRANSPORT_CONCURRENCY}</b>
+                  Auto retry: <b>{DIRECT_UPLOAD_MAX_RETRIES} attempts / PDF</b>
                   <br />
-                  Auto retry: <b>{TRANSPORT_MAX_RETRIES} attempts / file</b>
-                  <br />
-                  Recommended stable logical block: <b>100 ya 200</b>
-                  <br />
-                  Solved PDF already hone par official paper upload auto-skip ho jayegi.
+                  Jo PDF successfully upload ho jayegi, woh turant final done mani jayegi.
                 </div>
 
                 <div className="mt-3 flex gap-2">
                   <button
                     type="button"
-                    onClick={stageDirectPdfBlocksAndCreateJob}
-                    disabled={creatingJob || showTrash || isLongTaskBusy || !selectedPdfFiles.length}
+                    onClick={startDirectUpload}
+                    disabled={showTrash || isUploading || !selectedPdfFiles.length}
                     className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-slate-900 hover:bg-slate-950 text-white transition font-extrabold disabled:opacity-60 shadow-sm"
                   >
                     <Upload size={18} />
-                    {creatingJob ? "Starting..." : "Start Official Papers Upload"}
+                    {isUploading ? "Uploading..." : "Start Direct Upload"}
                   </button>
 
                   <button
                     type="button"
-                    onClick={() => resetStageState(false)}
-                    disabled={isLongTaskBusy && !isStaging}
+                    onClick={() => {
+                      resetSelectedFiles();
+                      resetUploadProgress();
+                      resetMessages();
+                    }}
+                    disabled={isUploading}
                     className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-white hover:bg-gray-50 border border-gray-200 transition font-extrabold disabled:opacity-60 shadow-sm"
                   >
                     <X size={18} />
                     Clear
                   </button>
                 </div>
-
-                {isStaging && stagingAbortEnabled ? (
-                  <button
-                    type="button"
-                    onClick={cancelCurrentStaging}
-                    className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-rose-600 hover:bg-rose-700 text-white transition font-extrabold shadow-sm"
-                  >
-                    <PauseCircle size={18} />
-                    Cancel Current Upload
-                  </button>
-                ) : null}
 
                 <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs leading-5 text-emerald-800">
                   Recommended filename pattern:
@@ -1658,76 +953,31 @@ export default function OfficialPapersPage() {
                 </div>
               </div>
 
-              <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
-                <div className="flex items-center gap-2 text-sm font-extrabold text-blue-900">
-                  <Layers3 size={16} />
-                  Strong Upload Progress
-                </div>
-
-                <div className="mt-3 h-4 w-full overflow-hidden rounded-full bg-blue-100">
-                  <div
-                    className="h-full rounded-full bg-blue-700 transition-all"
-                    style={{ width: `${totalStagePercent}%` }}
-                  />
-                </div>
-
-                <div className="mt-2 text-xs font-semibold text-blue-900">
-                  Total upload progress: {totalStagePercent}%
-                </div>
-
-                <div className="mt-4 grid grid-cols-2 gap-3">
-                  <div className="rounded-xl border border-blue-200 bg-white p-3">
-                    <div className="text-[11px] uppercase font-extrabold text-blue-700">
-                      Current Block
-                    </div>
-                    <div className="mt-1 text-sm font-extrabold text-slate-900">
-                      {currentBlockNumber || 0} / {currentBlockTotal || 0}
-                    </div>
-                    <div className="mt-1 text-xs text-slate-600">{currentBlockLabel || "—"}</div>
+              {uploadSessionActive ? (
+                <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
+                  <div className="text-sm font-extrabold text-blue-900">
+                    Upload Progress
                   </div>
 
-                  <div className="rounded-xl border border-blue-200 bg-white p-3">
-                    <div className="text-[11px] uppercase font-extrabold text-blue-700">
-                      Current Block %
-                    </div>
-                    <div className="mt-1 text-sm font-extrabold text-slate-900">
-                      {currentBlockPercent}%
-                    </div>
-                    <div className="mt-1 text-xs text-slate-600">
-                      {formatBytes(completedBlockBytes + currentBlockLoadedBytes)} /{" "}
-                      {formatBytes(selectedPdfTotalBytes)}
-                    </div>
+                  <div className="mt-3 h-4 w-full overflow-hidden rounded-full bg-blue-100">
+                    <div
+                      className="h-full rounded-full bg-blue-700 transition-all"
+                      style={{ width: `${uploadProgressPercent}%` }}
+                    />
                   </div>
 
-                  <div className="rounded-xl border border-blue-200 bg-white p-3">
-                    <div className="text-[11px] uppercase font-extrabold text-blue-700">
-                      Current Block Files
-                    </div>
-                    <div className="mt-1 text-sm font-extrabold text-slate-900">
-                      {currentBlockFileCount || 0}
-                    </div>
-                  </div>
-
-                  <div className="rounded-xl border border-blue-200 bg-white p-3">
-                    <div className="text-[11px] uppercase font-extrabold text-blue-700">
-                      Parallel Uploads
-                    </div>
-                    <div className="mt-1 text-sm font-extrabold text-slate-900">
-                      {TRANSPORT_CONCURRENCY}
-                    </div>
+                  <div className="mt-3 text-sm text-blue-900 leading-7">
+                    Total PDFs: <b>{uploadSessionTotal}</b>
+                    <br />
+                    Uploaded PDFs: <b>{uploadSessionDone}</b>
                   </div>
                 </div>
-
-                <div className="mt-4 rounded-xl border border-blue-200 bg-white p-3 text-xs leading-6 text-slate-700">
-                  Logical block 100/200/500 ka rahega, lekin actual transport one-file-per-request
-                  mode me hota hai. Isi wajah se large multipart request failure ka bottleneck hat gaya.
-                </div>
-              </div>
+              ) : null}
 
               <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900 leading-6">
-                <b>Strong upload flow:</b> PDFs select karo → logical block banta hai → har PDF alag
-                request me parallel upload hoti hai → auto retry hota hai → final job create hoti hai →
-                batches process hote hain.
+                <b>Simple direct flow:</b> PDFs select karo → har PDF direct final upload hogi →
+                jo upload ho gayi woh turant done count me aa jayegi → koi block, batch, staged,
+                job system use nahi ho raha.
               </div>
 
               <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-xs text-emerald-900 leading-6">
@@ -2132,69 +1382,9 @@ export default function OfficialPapersPage() {
                 )}
               </div>
 
-              {activeJob ? (
-                <div className="rounded-2xl border border-gray-200 bg-white p-5">
-                  <div className="flex items-center gap-2 text-lg font-extrabold">
-                    <BarChart3 size={20} />
-                    Recent Failed / Skipped Files
-                  </div>
-
-                  <div className="mt-1 text-sm text-slate-500">
-                    Table me recent 100 failed/skipped files dikh rahe hain. Full list ke liye CSV download karo.
-                  </div>
-
-                  <div className="mt-5 overflow-auto">
-                    <table className="min-w-full text-sm border border-gray-200 rounded-xl overflow-hidden">
-                      <thead className="bg-gray-50">
-                        <tr>
-                          <th className="text-left px-3 py-2 border-b">Batch</th>
-                          <th className="text-left px-3 py-2 border-b">Row</th>
-                          <th className="text-left px-3 py-2 border-b">SKU</th>
-                          <th className="text-left px-3 py-2 border-b">File</th>
-                          <th className="text-left px-3 py-2 border-b">Status</th>
-                          <th className="text-left px-3 py-2 border-b">Reason</th>
-                          <th className="text-left px-3 py-2 border-b">Logged At</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {recentFailures.map((item, idx) => (
-                          <tr key={`${item.rowNumber}-${idx}`} className="border-b last:border-b-0 align-top">
-                            <td className="px-3 py-2">{item.batchNumber || "—"}</td>
-                            <td className="px-3 py-2">{item.rowNumber || "—"}</td>
-                            <td className="px-3 py-2 font-semibold">{item.sku || "—"}</td>
-                            <td className="px-3 py-2">{item.fileName || item.identifier || "—"}</td>
-                            <td className="px-3 py-2">
-                              <span
-                                className={`inline-flex rounded-full px-2 py-1 text-xs font-bold ${
-                                  safeText(item.status) === "skipped"
-                                    ? "bg-amber-100 text-amber-800"
-                                    : "bg-rose-100 text-rose-800"
-                                }`}
-                              >
-                                {safeText(item.status) || "failed"}
-                              </span>
-                            </td>
-                            <td className="px-3 py-2 min-w-[320px] text-slate-700">{item.reason || "—"}</td>
-                            <td className="px-3 py-2 whitespace-nowrap">{formatDateTime(item.createdAt)}</td>
-                          </tr>
-                        ))}
-
-                        {recentFailures.length === 0 ? (
-                          <tr>
-                            <td colSpan={7} className="px-4 py-8 text-center text-slate-500">
-                              No failed/skipped files recorded yet.
-                            </td>
-                          </tr>
-                        ) : null}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              ) : null}
-
               <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900 leading-6">
-                <b>Current status:</b> Ab system ka sabse bada bottleneck remove kar diya gaya hai:
-                large multipart request ke bajay har PDF alag request me upload hoti hai, parallel aur retry ke saath.
+                <b>Current status:</b> Official papers upload flow ab simple direct queue mode me hai.
+                Jo PDF upload ho jaati hai woh turant final done mani jaati hai.
               </div>
             </div>
           </div>

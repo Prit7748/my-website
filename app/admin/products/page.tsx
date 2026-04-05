@@ -10,7 +10,6 @@ import {
   Copy,
   Trash2,
   ExternalLink,
-  Layers3,
   Search,
   Package2,
   CheckCircle2,
@@ -377,14 +376,6 @@ export default function AdminProductsPage() {
                 <Trash2 size={18} />
                 Trash
                 {trashBadge}
-              </Link>
-
-              <Link
-                href="/admin/products/bulk"
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white transition font-bold shadow-sm"
-              >
-                <Layers3 size={18} />
-                Bulk Upload
               </Link>
 
               <Link

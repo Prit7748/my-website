@@ -1,10 +1,106 @@
-import { NextRequest, NextResponse } from "next/server";
+import crypto from "crypto";
+import { NextResponse } from "next/server";
+import { DeleteObjectCommand, S3Client } from "@aws-sdk/client-s3";
+
+import dbConnect from "@/lib/db";
+import OfficialPaper from "@/models/OfficialPaper";
 import { getAuthUser, hasPermission } from "@/lib/auth";
+import {
+  uploadPdfBufferToS3,
+  findProductByExactSku,
+  normalizeSkuLike,
+  detectPdfPagesFromS3Key,
+} from "@/lib/pdfVault";
+import {
+  getDerivedAvailabilitySnapshotBySku,
+  syncProductAvailabilityBySku,
+} from "@/lib/productAvailability";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const maxDuration = 300;
+
+const REGION = process.env.AWS_REGION || "ap-south-1";
+const ACCESS_KEY = process.env.AWS_ACCESS_KEY_ID || "";
+const SECRET_KEY = process.env.AWS_SECRET_ACCESS_KEY || "";
+const BUCKET_PRIVATE = process.env.AWS_S3_BUCKET_PRIVATE || "";
+
+const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024; // 20MB
+const UPLOAD_TIMEOUT_MS = 120000;
+const PAGE_DETECT_TIMEOUT_MS = 120000;
+
+const s3 = new S3Client({
+  region: REGION,
+  credentials: {
+    accessKeyId: ACCESS_KEY,
+    secretAccessKey: SECRET_KEY,
+  },
+});
+
+type ConflictMode = "ignore" | "replace";
+
+type FileLike = {
+  name: string;
+  size?: number;
+  type?: string;
+  arrayBuffer: () => Promise<ArrayBuffer>;
+};
 
 function safeStr(x: any) {
   return String(x ?? "").trim();
+}
+
+function safeNum(x: any, def = 0) {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : def;
+}
+
+function cleanBaseFileName(name: string) {
+  return safeStr(name).split(/[\\/]/).pop() || "";
+}
+
+function fileBaseName(name: string) {
+  const base = cleanBaseFileName(name);
+  return base.replace(/\.[^.]+$/, "");
+}
+
+function isPdfFileName(name: string) {
+  return cleanBaseFileName(name).toLowerCase().endsWith(".pdf");
+}
+
+function isProbablyPdfBuffer(buf: Buffer) {
+  if (!buf || !buf.length) return false;
+  const header = buf.subarray(0, Math.min(buf.length, 16)).toString("latin1");
+  return header.includes("%PDF");
+}
+
+function isFileLike(value: any): value is FileLike {
+  return Boolean(
+    value &&
+      typeof value === "object" &&
+      typeof value.name === "string" &&
+      typeof value.arrayBuffer === "function"
+  );
+}
+
+async function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  label: string
+): Promise<T> {
+  let timeoutId: NodeJS.Timeout | null = null;
+
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${ms}ms`));
+    }, ms);
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
 }
 
 async function assertAdminWriteAccess() {
@@ -13,34 +109,407 @@ async function assertAdminWriteAccess() {
   if (!user) {
     return {
       ok: false as const,
-      res: NextResponse.json({ ok: false, error: "Not authenticated" }, { status: 401 }),
+      res: NextResponse.json(
+        { ok: false, error: "Not authenticated" },
+        { status: 401 }
+      ),
     };
   }
 
   if (!hasPermission(user, "products:write")) {
     return {
       ok: false as const,
-      res: NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 }),
+      res: NextResponse.json(
+        { ok: false, error: "Forbidden" },
+        { status: 403 }
+      ),
     };
   }
 
   return { ok: true as const, user };
 }
 
-export async function POST(_req: NextRequest) {
+function getUserId(user: any) {
+  return safeStr(user?.id || user?._id || user?.email || "");
+}
+
+async function deleteS3ObjectIfExists(s3Key: string) {
+  const key = safeStr(s3Key);
+  if (!key || !BUCKET_PRIVATE) return;
+
+  await s3.send(
+    new DeleteObjectCommand({
+      Bucket: BUCKET_PRIVATE,
+      Key: key,
+    })
+  );
+}
+
+async function findActiveOfficialPaperBySku(skuNormalized: string) {
+  const sku = safeStr(skuNormalized).toUpperCase();
+  if (!sku) return null;
+
+  const row: any = await OfficialPaper.findOne({
+    skuNormalized: sku,
+    deletedAt: null,
+  });
+
+  return row || null;
+}
+
+function sha256OfBuffer(buf: Buffer) {
+  return crypto.createHash("sha256").update(buf).digest("hex");
+}
+
+async function detectUploadedPdfPageCountOrThrow(s3Key: string) {
+  const detected = await withTimeout(
+    detectPdfPagesFromS3Key(safeStr(s3Key)),
+    PAGE_DETECT_TIMEOUT_MS,
+    "PDF page detection"
+  );
+
+  const pageCount = Math.max(0, Math.trunc(Number(detected || 0)));
+
+  if (pageCount <= 0) {
+    throw new Error("PDF page count could not be detected");
+  }
+
+  return pageCount;
+}
+
+async function processSinglePdf(args: {
+  file: FileLike;
+  conflictMode: ConflictMode;
+  user: any;
+}) {
+  const originalName = cleanBaseFileName(args.file.name);
+  const fileName = originalName;
+  const sizeBytes = safeNum(args.file.size, 0);
+
+  if (!originalName || !fileName) {
+    return {
+      status: "failed" as const,
+      fileName,
+      reason: "File name missing",
+    };
+  }
+
+  if (!isPdfFileName(fileName)) {
+    return {
+      status: "failed" as const,
+      fileName,
+      reason: "Only PDF files allowed",
+    };
+  }
+
+  if (sizeBytes <= 0) {
+    return {
+      status: "failed" as const,
+      fileName,
+      reason: "Empty PDF file",
+    };
+  }
+
+  if (sizeBytes > MAX_FILE_SIZE_BYTES) {
+    return {
+      status: "failed" as const,
+      fileName,
+      reason: `File exceeds 20MB limit. Current size: ${Math.round(
+        sizeBytes / (1024 * 1024)
+      )}MB`,
+    };
+  }
+
+  const baseName = fileBaseName(fileName);
+  const skuNormalized = safeStr(normalizeSkuLike(baseName)).toUpperCase();
+
+  if (!skuNormalized) {
+    return {
+      status: "failed" as const,
+      fileName,
+      reason: "SKU could not be parsed from filename",
+    };
+  }
+
+  const availabilitySnapshot = await getDerivedAvailabilitySnapshotBySku(
+    skuNormalized
+  );
+
+  if (availabilitySnapshot?.hasSolvedPdf) {
+    return {
+      status: "skipped" as const,
+      fileName,
+      skuNormalized,
+      reason: "Solved PDF already exists, official paper upload skipped",
+    };
+  }
+
+  const existingLive: any = await findActiveOfficialPaperBySku(skuNormalized);
+
+  if (existingLive && args.conflictMode === "ignore") {
+    return {
+      status: "skipped" as const,
+      fileName,
+      skuNormalized,
+      reason: "Official paper already exists for this SKU",
+    };
+  }
+
+  const pdfBuffer = Buffer.from(await args.file.arrayBuffer());
+
+  if (!pdfBuffer?.length) {
+    return {
+      status: "failed" as const,
+      fileName,
+      skuNormalized,
+      reason: "Empty PDF file buffer",
+    };
+  }
+
+  if (!isProbablyPdfBuffer(pdfBuffer)) {
+    return {
+      status: "failed" as const,
+      fileName,
+      skuNormalized,
+      reason: "Uploaded file is not a valid PDF binary",
+    };
+  }
+
+  const uploaded = await withTimeout(
+    uploadPdfBufferToS3({
+      folderPath: "official-papers",
+      originalName,
+      bytes: pdfBuffer,
+      mimeType: "application/pdf",
+    }),
+    UPLOAD_TIMEOUT_MS,
+    "S3 upload"
+  );
+
+  const newS3Key = safeStr((uploaded as any)?.key);
+  const newS3Bucket = safeStr((uploaded as any)?.bucket);
+
+  if (!newS3Key) {
+    throw new Error("S3 upload completed but file key was empty");
+  }
+
+  try {
+    const pageCount = await detectUploadedPdfPageCountOrThrow(newS3Key);
+    const matchedProduct: any = await findProductByExactSku(skuNormalized);
+    const now = new Date();
+    const userId = getUserId(args.user);
+    const sha256 = sha256OfBuffer(pdfBuffer);
+
+    if (existingLive && args.conflictMode === "replace") {
+      const oldKey = safeStr(existingLive.s3Key);
+
+      existingLive.productId = matchedProduct?._id || null;
+      existingLive.productSku = safeStr(matchedProduct?.sku);
+      existingLive.productSlug = safeStr(matchedProduct?.slug);
+      existingLive.productExists = Boolean(matchedProduct);
+      existingLive.titleColor = matchedProduct ? "green" : "red";
+
+      existingLive.originalName = originalName;
+      existingLive.fileName = fileName;
+      existingLive.fileExt = ".pdf";
+      existingLive.baseName = baseName;
+
+      existingLive.mimeType = "application/pdf";
+      existingLive.sizeBytes = pdfBuffer.length;
+      existingLive.pageCount = pageCount;
+      existingLive.sha256 = sha256;
+
+      existingLive.s3Bucket = newS3Bucket;
+      existingLive.s3Key = newS3Key;
+
+      existingLive.uploadedAt = now;
+      existingLive.uploadedBy = userId;
+      existingLive.updatedBy = userId;
+      existingLive.deletedAt = null;
+
+      await existingLive.save();
+
+      if (oldKey && oldKey !== newS3Key) {
+        try {
+          await deleteS3ObjectIfExists(oldKey);
+        } catch {
+          // ignore old file cleanup failure
+        }
+      }
+
+      await syncProductAvailabilityBySku(skuNormalized);
+
+      return {
+        status: "replaced" as const,
+        fileName,
+        skuNormalized,
+        fileId: String(existingLive._id),
+        reason: "",
+      };
+    }
+
+    const created: any = await OfficialPaper.create({
+      skuNormalized,
+      productId: matchedProduct?._id || null,
+      productSku: safeStr(matchedProduct?.sku),
+      productSlug: safeStr(matchedProduct?.slug),
+      productExists: Boolean(matchedProduct),
+      titleColor: matchedProduct ? "green" : "red",
+
+      originalName,
+      fileName,
+      fileExt: ".pdf",
+      baseName,
+
+      mimeType: "application/pdf",
+      sizeBytes: pdfBuffer.length,
+      pageCount,
+      sha256,
+
+      s3Bucket: newS3Bucket,
+      s3Key: newS3Key,
+
+      uploadedAt: now,
+      uploadedBy: userId,
+      updatedBy: userId,
+      deletedAt: null,
+    });
+
+    await syncProductAvailabilityBySku(skuNormalized);
+
+    return {
+      status: "uploaded" as const,
+      fileName,
+      skuNormalized,
+      fileId: String(created._id),
+      reason: "",
+    };
+  } catch (error) {
+    try {
+      await deleteS3ObjectIfExists(newS3Key);
+    } catch {
+      // ignore cleanup failure
+    }
+    throw error;
+  }
+}
+
+export async function POST(req: Request) {
   const guard = await assertAdminWriteAccess();
   if (!guard.ok) return guard.res;
 
-  return NextResponse.json(
-    {
-      ok: false,
-      error:
-        "Legacy official papers upload route disabled hai. Ab official papers upload sirf job-based ZIP flow se hoga.",
-      message:
-        "Please use /admin/official-papers page and start upload through the new ZIP batch job system.",
-      recommendedRoute: "/api/admin/official-papers/jobs",
-      migrationMode: "job-based-only",
-    },
-    { status: 410 }
-  );
+  await dbConnect();
+
+  const contentType = safeStr(req.headers.get("content-type")).toLowerCase();
+
+  if (!contentType.includes("multipart/form-data")) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: "Only multipart/form-data is supported",
+      },
+      { status: 400 }
+    );
+  }
+
+  try {
+    const formData = await req.formData();
+    const conflictModeRaw = safeStr(formData.get("conflictMode")).toLowerCase();
+    const conflictMode: ConflictMode =
+      conflictModeRaw === "replace" ? "replace" : "ignore";
+
+    const rawEntries = [
+      ...formData.getAll("files"),
+      ...formData.getAll("file"),
+      ...formData.getAll("pdfs"),
+    ];
+
+    const seen = new Set<any>();
+    const files: FileLike[] = [];
+
+    for (const entry of rawEntries) {
+      if (!entry || seen.has(entry)) continue;
+      seen.add(entry);
+      if (isFileLike(entry)) {
+        files.push(entry);
+      }
+    }
+
+    if (!files.length) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: "At least one PDF file is required",
+          receivedFields: Array.from(formData.keys()),
+        },
+        { status: 400 }
+      );
+    }
+
+    const results: Array<{
+      fileName: string;
+      skuNormalized?: string;
+      fileId?: string;
+      status: "uploaded" | "replaced" | "skipped" | "failed";
+      reason?: string;
+    }> = [];
+
+    let uploadedFiles = 0;
+    let replacedFiles = 0;
+    let skippedFiles = 0;
+    let failedFiles = 0;
+
+    for (const file of files) {
+      try {
+        const result = await processSinglePdf({
+          file,
+          conflictMode,
+          user: guard.user,
+        });
+
+        results.push(result);
+
+        if (result.status === "uploaded") uploadedFiles += 1;
+        else if (result.status === "replaced") replacedFiles += 1;
+        else if (result.status === "skipped") skippedFiles += 1;
+        else failedFiles += 1;
+      } catch (error: any) {
+        failedFiles += 1;
+        results.push({
+          fileName: cleanBaseFileName(file.name),
+          status: "failed",
+          reason: safeStr(error?.message || "Upload failed"),
+        });
+      }
+    }
+
+    const doneFiles = uploadedFiles + replacedFiles;
+
+    return NextResponse.json(
+      {
+        ok: true,
+        message: `Processed ${files.length} PDFs. Done ${doneFiles}, Skipped ${skippedFiles}, Failed ${failedFiles}.`,
+        summary: {
+          totalFiles: files.length,
+          uploadedFiles,
+          replacedFiles,
+          doneFiles,
+          skippedFiles,
+          failedFiles,
+          conflictMode,
+          mode: "direct_final_upload",
+        },
+        results,
+      },
+      { status: 200 }
+    );
+  } catch (error: any) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: safeStr(error?.message || "Failed to upload PDFs"),
+      },
+      { status: 500 }
+    );
+  }
 }

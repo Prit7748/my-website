@@ -27,6 +27,7 @@ import {
   BarChart3,
   TrendingUp,
   Clock3,
+  FileSpreadsheet,
 } from "lucide-react";
 import {
   ADMIN_DASHBOARD_TILE_STORAGE_KEY,
@@ -124,6 +125,7 @@ const TONE_CLASSES: Record<NonDefaultTone, ToneClasses> = {
 
 const DEFAULT_TILE_TONES: Record<AdminDashboardTileKey, NonDefaultTone> = {
   products: "gray",
+  "bulk-product-details": "violet",
   "bulk-product-images": "cyan",
   combos: "violet",
   "want-to-buy": "blue",
@@ -428,6 +430,15 @@ export default function AdminPage() {
       return renderBasicTile(tile, "/admin/products", Package, "Add / edit products");
     }
 
+    if (tile.key === "bulk-product-details") {
+      return renderBasicTile(
+        tile,
+        "/admin/products/bulk/details",
+        FileSpreadsheet,
+        "Static template + CSV/Excel row-wise merge upload"
+      );
+    }
+
     if (tile.key === "bulk-product-images") {
       return renderBasicTile(
         tile,
@@ -487,9 +498,7 @@ export default function AdminPage() {
           <div className="flex items-center gap-3">
             <div
               className={`h-12 w-12 rounded-2xl flex items-center justify-center shadow-sm ${
-                customActive
-                  ? "bg-white/80"
-                  : onDemandTileTone.iconWrap
+                customActive ? "bg-white/80" : onDemandTileTone.iconWrap
               }`}
             >
               <Package

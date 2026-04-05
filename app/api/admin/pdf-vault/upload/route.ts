@@ -1,29 +1,30 @@
-import { NextRequest, NextResponse } from "next/server";
 import crypto from "crypto";
+import { NextRequest, NextResponse } from "next/server";
 import { DeleteObjectCommand, S3Client } from "@aws-sdk/client-s3";
 
 import dbConnect from "@/lib/db";
 import PdfVaultFolder from "@/models/PdfVaultFolder";
 import PdfVaultFile from "@/models/PdfVaultFile";
 import OfficialPaper from "@/models/OfficialPaper";
-import Order from "@/models/Order";
-import Product from "@/models/Product";
 import { getAuthUser, hasPermission } from "@/lib/auth";
 import {
   cleanFolderPath,
+  detectPdfPagesFromS3Key,
   ensureRootFolder,
   fileBaseName,
   fileExt,
+  findProductByExactSku,
+  getPdfPageCountFromBuffer,
   hasPdfVaultPageAccess,
-  normalizeSkuLike,
+  PDF_VAULT_DIRECT_UPLOAD_MAX_BYTES,
   safeStr,
   uploadPdfBufferToS3,
-  createPdfVaultFileRecord,
 } from "@/lib/pdfVault";
-import { sendOnDemandReadyEmail } from "@/lib/orderNotifications";
 import { syncProductAvailabilityBySku } from "@/lib/productAvailability";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const maxDuration = 300;
 
 const REGION = process.env.AWS_REGION || "ap-south-1";
 const ACCESS_KEY = process.env.AWS_ACCESS_KEY_ID || "";
@@ -38,20 +39,55 @@ const s3 = new S3Client({
   },
 });
 
-async function assertVaultAccess() {
+type ConflictMode = "ignore" | "replace";
+
+function safeNum(x: any, def = 0) {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : def;
+}
+
+function normalizeSkuLike(input: string) {
+  return safeStr(input).toUpperCase().replace(/[^A-Z0-9]/g, "");
+}
+
+function cleanBaseFileName(name: string) {
+  return safeStr(name).split(/[\\/]/).pop() || "";
+}
+
+function isPdfFileName(name: string) {
+  return cleanBaseFileName(name).toLowerCase().endsWith(".pdf");
+}
+
+function isProbablyPdfBuffer(buf: Buffer) {
+  if (!buf || !buf.length) return false;
+  const header = buf.subarray(0, Math.min(buf.length, 16)).toString("latin1");
+  return header.includes("%PDF");
+}
+
+function getUserId(user: any) {
+  return safeStr(user?.id || user?._id || user?.email || "");
+}
+
+async function assertVaultWriteAccess() {
   const user = await getAuthUser();
 
   if (!user) {
     return {
       ok: false as const,
-      res: NextResponse.json({ error: "Not authenticated" }, { status: 401 }),
+      res: NextResponse.json(
+        { ok: false, error: "Not authenticated" },
+        { status: 401 }
+      ),
     };
   }
 
   if (!hasPermission(user, "products:write")) {
     return {
       ok: false as const,
-      res: NextResponse.json({ error: "Forbidden" }, { status: 403 }),
+      res: NextResponse.json(
+        { ok: false, error: "Forbidden" },
+        { status: 403 }
+      ),
     };
   }
 
@@ -60,7 +96,7 @@ async function assertVaultAccess() {
     return {
       ok: false as const,
       res: NextResponse.json(
-        { error: "Vault access expired", needsPuzzle: true },
+        { ok: false, error: "Vault access expired", needsPuzzle: true },
         { status: 403 }
       ),
     };
@@ -69,17 +105,9 @@ async function assertVaultAccess() {
   return { ok: true as const, user };
 }
 
-function getUserId(user: any) {
-  return safeStr(user?.id || user?._id || user?.email || "");
-}
-
 async function deleteS3ObjectIfExists(s3Key: string) {
   const key = safeStr(s3Key);
-  if (!key) return;
-
-  if (!BUCKET_PRIVATE) {
-    throw new Error("AWS_S3_BUCKET_PRIVATE missing");
-  }
+  if (!key || !BUCKET_PRIVATE) return;
 
   await s3.send(
     new DeleteObjectCommand({
@@ -89,36 +117,8 @@ async function deleteS3ObjectIfExists(s3Key: string) {
   );
 }
 
-function uniqueNonEmptyStrings(values: any[]) {
-  return Array.from(new Set(values.map((x) => safeStr(x)).filter(Boolean)));
-}
-
-async function findActiveDuplicatesBySku(skuNormalized: string) {
-  const sku = safeStr(skuNormalized);
-  if (!sku) return [];
-
-  const rows: any[] = await PdfVaultFile.find({
-    skuNormalized: sku,
-    deletedAt: null,
-  })
-    .select({
-      _id: 1,
-      folderId: 1,
-      s3Key: 1,
-      skuNormalized: 1,
-      fileName: 1,
-      originalName: 1,
-      uploadedAt: 1,
-      updatedAt: 1,
-    })
-    .sort({ uploadedAt: -1, _id: -1 })
-    .lean();
-
-  return rows;
-}
-
 async function removeActiveOfficialPaperForSku(skuNormalized: string) {
-  const sku = safeStr(skuNormalized).toUpperCase();
+  const sku = normalizeSkuLike(skuNormalized);
   if (!sku) {
     return { deleted: false, fileId: "", s3Key: "" };
   }
@@ -142,7 +142,7 @@ async function removeActiveOfficialPaperForSku(skuNormalized: string) {
       await deleteS3ObjectIfExists(s3Key);
     }
   } catch {
-    // ignore official paper s3 cleanup failure
+    // ignore official cleanup failure
   }
 
   return {
@@ -152,253 +152,334 @@ async function removeActiveOfficialPaperForSku(skuNormalized: string) {
   };
 }
 
-async function notifyReadyForPaidOnDemandOrders(productId: string) {
-  const pid = safeStr(productId);
-  if (!pid) return;
+async function detectPageCountStrong(pdfBuffer: Buffer, s3Key: string) {
+  let pageCount = 0;
 
-  await dbConnect();
+  try {
+    pageCount = Math.max(
+      0,
+      Math.trunc(Number((await getPdfPageCountFromBuffer(pdfBuffer)) || 0))
+    );
+  } catch {
+    pageCount = 0;
+  }
 
-  const product: any = await Product.findById(pid)
-    .select("availability title")
-    .lean();
+  if (pageCount > 0) {
+    return pageCount;
+  }
 
-  if (!product) return;
+  try {
+    pageCount = Math.max(
+      0,
+      Math.trunc(Number((await detectPdfPagesFromS3Key(safeStr(s3Key))) || 0))
+    );
+  } catch {
+    pageCount = 0;
+  }
 
-  const now = new Date();
-
-  const paidOrders: any[] = await Order.find({
-    status: "paid",
-    expiresAt: { $gt: now },
-    "items.productId": pid,
-  })
-    .select("_id userId userEmail items paidAt expiresAt")
-    .lean();
-
-  if (!paidOrders.length) return;
-
-  await Promise.allSettled(
-    paidOrders.map(async (order: any) => {
-      await sendOnDemandReadyEmail({
-        orderId: String(order._id),
-        userId: String(order.userId || ""),
-        productId: pid,
-      });
-    })
-  );
+  return pageCount;
 }
 
-export async function POST(req: NextRequest) {
-  const guard = await assertVaultAccess();
-  if (!guard.ok) return guard.res;
+async function findExistingLiveSolvedPdfBySku(skuNormalized: string) {
+  const sku = normalizeSkuLike(skuNormalized);
+  if (!sku) return null;
 
-  await dbConnect();
-  await ensureRootFolder();
-
-  const form = await req.formData();
-
-  const parentPathInput = safeStr(form.get("parentPath") || "root");
-  const conflictMode = safeStr(form.get("conflictMode") || "ignore").toLowerCase();
-  const parentPath = cleanFolderPath(parentPathInput) || "root";
-
-  const folder: any = await PdfVaultFolder.findOne({
-    path: parentPath,
+  const row: any = await PdfVaultFile.findOne({
+    skuNormalized: sku,
     deletedAt: null,
   });
 
-  if (!folder) {
-    return NextResponse.json({ error: "Folder not found" }, { status: 404 });
-  }
+  return row || null;
+}
 
-  const allEntries = form.getAll("files");
-  const files = allEntries.filter((x) => x instanceof File) as File[];
+export async function POST(req: NextRequest) {
+  const guard = await assertVaultWriteAccess();
+  if (!guard.ok) return guard.res;
 
-  if (!files.length) {
+  const contentType = safeStr(req.headers.get("content-type")).toLowerCase();
+  if (!contentType.includes("multipart/form-data")) {
     return NextResponse.json(
-      { error: "At least one PDF file is required" },
+      { ok: false, error: "Only multipart/form-data is supported" },
       { status: 400 }
     );
   }
 
-  const results: any[] = [];
+  try {
+    await dbConnect();
+    await ensureRootFolder();
 
-  for (const file of files) {
-    const originalName = safeStr(file.name);
+    const formData = await req.formData();
+
+    const fileEntry =
+      formData.get("file") ||
+      formData.get("pdf") ||
+      formData.getAll("files")[0] ||
+      null;
+
+    if (!(fileEntry instanceof File)) {
+      return NextResponse.json(
+        { ok: false, error: "PDF file required" },
+        { status: 400 }
+      );
+    }
+
+    const conflictModeRaw = safeStr(formData.get("conflictMode")).toLowerCase();
+    const conflictMode: ConflictMode =
+      conflictModeRaw === "replace" ? "replace" : "ignore";
+
+    const parentPathInput = safeStr(formData.get("parentPath") || "root");
+    const parentPath = cleanFolderPath(parentPathInput) || "root";
+
+    const targetFolder: any = await PdfVaultFolder.findOne({
+      path: parentPath,
+      deletedAt: null,
+    })
+      .select("_id path name")
+      .lean();
+
+    if (!targetFolder) {
+      return NextResponse.json(
+        { ok: false, error: "Target folder not found" },
+        { status: 404 }
+      );
+    }
+
+    const originalName = cleanBaseFileName(fileEntry.name);
+    if (!originalName) {
+      return NextResponse.json(
+        { ok: false, error: "File name missing" },
+        { status: 400 }
+      );
+    }
+
+    if (!isPdfFileName(originalName)) {
+      return NextResponse.json(
+        { ok: false, error: "Only PDF files allowed" },
+        { status: 400 }
+      );
+    }
+
+    const sizeBytes = Math.max(0, Math.trunc(Number(fileEntry.size || 0)));
+    if (!sizeBytes) {
+      return NextResponse.json(
+        { ok: false, error: "Empty PDF file" },
+        { status: 400 }
+      );
+    }
+
+    if (sizeBytes > PDF_VAULT_DIRECT_UPLOAD_MAX_BYTES) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error: `File exceeds max allowed size of ${PDF_VAULT_DIRECT_UPLOAD_MAX_BYTES} bytes`,
+          maxFileBytes: PDF_VAULT_DIRECT_UPLOAD_MAX_BYTES,
+        },
+        { status: 400 }
+      );
+    }
+
+    const baseName = safeStr(fileBaseName(originalName));
+    const skuNormalized = normalizeSkuLike(baseName);
+
+    if (!skuNormalized) {
+      return NextResponse.json(
+        { ok: false, error: "SKU could not be parsed from filename" },
+        { status: 400 }
+      );
+    }
+
+    const existingLive: any = await findExistingLiveSolvedPdfBySku(skuNormalized);
+
+    if (existingLive && conflictMode === "ignore") {
+      return NextResponse.json(
+        {
+          ok: true,
+          status: "skipped",
+          message: "Solved PDF already exists for this SKU",
+          fileName: originalName,
+          skuNormalized,
+          fileId: String(existingLive._id),
+          counts: {
+            total: 1,
+            uploaded: 0,
+            replaced: 0,
+            skipped: 1,
+            failed: 0,
+            done: 1,
+          },
+        },
+        { status: 200 }
+      );
+    }
+
+    const pdfBuffer = Buffer.from(await fileEntry.arrayBuffer());
+
+    if (!pdfBuffer?.length) {
+      return NextResponse.json(
+        { ok: false, error: "Empty PDF buffer" },
+        { status: 400 }
+      );
+    }
+
+    if (!isProbablyPdfBuffer(pdfBuffer)) {
+      return NextResponse.json(
+        { ok: false, error: "Uploaded file is not a valid PDF binary" },
+        { status: 400 }
+      );
+    }
+
+    const sha256 = crypto.createHash("sha256").update(pdfBuffer).digest("hex");
+
+    const uploaded = await uploadPdfBufferToS3({
+      folderPath: parentPath,
+      originalName,
+      bytes: pdfBuffer,
+      mimeType: "application/pdf",
+    });
+
+    const newBucket = safeStr(uploaded.bucket);
+    const newKey = safeStr(uploaded.key);
+
+    if (!newKey) {
+      return NextResponse.json(
+        { ok: false, error: "S3 upload failed: key missing" },
+        { status: 500 }
+      );
+    }
 
     try {
-      if (!originalName) {
-        results.push({
-          ok: false,
-          fileName: "",
-          action: "skipped",
-          reason: "Empty file name",
-        });
-        continue;
-      }
+      const matchedProduct: any = await findProductByExactSku(skuNormalized);
+      const detectedPages = await detectPageCountStrong(pdfBuffer, newKey);
+      const now = new Date();
+      const userId = getUserId(guard.user);
 
-      const ext = fileExt(originalName);
-      if (ext !== ".pdf") {
-        results.push({
-          ok: false,
+      let savedFile: any = null;
+      let actionStatus: "uploaded" | "replaced" = "uploaded";
+      let oldS3Key = "";
+
+      if (existingLive && conflictMode === "replace") {
+        oldS3Key = safeStr(existingLive.s3Key);
+
+        existingLive.folderId = targetFolder._id;
+        existingLive.originalName = originalName;
+        existingLive.fileName = originalName;
+        existingLive.fileExt = fileExt(originalName) || ".pdf";
+        existingLive.baseName = baseName;
+        existingLive.skuNormalized = skuNormalized;
+
+        existingLive.titleColor = matchedProduct ? "green" : "red";
+        existingLive.productExists = Boolean(matchedProduct);
+        existingLive.productId = matchedProduct?._id || null;
+        existingLive.productSku = safeStr(matchedProduct?.sku);
+        existingLive.productSlug = safeStr(matchedProduct?.slug);
+
+        existingLive.s3Bucket = newBucket;
+        existingLive.s3Key = newKey;
+        existingLive.mimeType = "application/pdf";
+        existingLive.sizeBytes = sizeBytes;
+        existingLive.pageCount = Math.max(0, Math.trunc(Number(detectedPages || 0)));
+        existingLive.sha256 = sha256;
+
+        existingLive.uploadedAt = now;
+        existingLive.uploadedBy = userId;
+        existingLive.updatedAt = now;
+        existingLive.updatedBy = userId;
+        existingLive.deletedAt = null;
+
+        await existingLive.save();
+        savedFile = existingLive;
+        actionStatus = "replaced";
+      } else {
+        savedFile = await PdfVaultFile.create({
+          folderId: targetFolder._id,
+          originalName,
           fileName: originalName,
-          action: "skipped",
-          reason: "Only PDF files allowed",
-        });
-        continue;
-      }
-
-      const bytes = Buffer.from(await file.arrayBuffer());
-      const sha256 = crypto.createHash("sha256").update(bytes).digest("hex");
-
-      const baseName = fileBaseName(originalName);
-      const skuNormalized = normalizeSkuLike(baseName);
-
-      const activeDuplicates: any[] = skuNormalized
-        ? await findActiveDuplicatesBySku(skuNormalized)
-        : [];
-
-      const primaryDuplicate = activeDuplicates.length ? activeDuplicates[0] : null;
-
-      if (activeDuplicates.length && conflictMode === "ignore") {
-        results.push({
-          ok: true,
-          fileName: originalName,
-          action: "ignored",
-          reason: "Duplicate SKU already exists",
+          fileExt: fileExt(originalName) || ".pdf",
+          baseName,
           skuNormalized,
-          existingFileId: String(primaryDuplicate?._id || ""),
-          existingFolderId: String(primaryDuplicate?.folderId || ""),
-          existingDuplicatesCount: activeDuplicates.length,
-          detectedPages: 0,
+
+          titleColor: matchedProduct ? "green" : "red",
+          productExists: Boolean(matchedProduct),
+          productId: matchedProduct?._id || null,
+          productSku: safeStr(matchedProduct?.sku),
+          productSlug: safeStr(matchedProduct?.slug),
+
+          s3Bucket: newBucket,
+          s3Key: newKey,
+          mimeType: "application/pdf",
+          sizeBytes,
+          pageCount: Math.max(0, Math.trunc(Number(detectedPages || 0))),
+          sha256,
+
+          uploadedAt: now,
+          uploadedBy: userId,
+          updatedBy: userId,
+          deletedAt: null,
         });
-        continue;
+
+        actionStatus = "uploaded";
       }
 
-      const uploaded = await uploadPdfBufferToS3({
-        folderPath: parentPath,
-        originalName,
-        bytes,
-        mimeType: "application/pdf",
-      });
-
-      if (activeDuplicates.length && conflictMode === "replace") {
-        const duplicateIds = activeDuplicates.map((x: any) => x._id);
-
-        await PdfVaultFile.deleteMany({
-          _id: { $in: duplicateIds },
-        });
-      }
-
-      const created = await createPdfVaultFileRecord({
-        folderId: String(folder._id),
-        originalName,
-        s3Bucket: uploaded.bucket,
-        s3Key: uploaded.key,
-        mimeType: "application/pdf",
-        sizeBytes: bytes.length,
-        sha256,
-        uploadedBy: getUserId(guard.user),
-      });
-
-      if (
-        activeDuplicates.length &&
-        conflictMode === "replace" &&
-        created?.file?._id &&
-        primaryDuplicate?._id
-      ) {
-        await PdfVaultFile.updateOne(
-          { _id: created.file._id },
-          {
-            $set: {
-              replaceSourceFileId: primaryDuplicate._id,
-            },
-          }
-        );
-      }
-
-      if (activeDuplicates.length && conflictMode === "replace") {
-        const staleKeys = uniqueNonEmptyStrings(
-          activeDuplicates.map((x: any) => x?.s3Key)
-        ).filter((key) => key !== safeStr(uploaded.key));
-
-        for (const staleKey of staleKeys) {
-          try {
-            await deleteS3ObjectIfExists(staleKey);
-          } catch {
-            // ignore cleanup failure
-          }
-        }
-      }
-
-      const officialPaperCleanup = skuNormalized
-        ? await removeActiveOfficialPaperForSku(skuNormalized)
-        : { deleted: false, fileId: "", s3Key: "" };
-
-      const availabilitySync: any = skuNormalized
-        ? await syncProductAvailabilityBySku(skuNormalized)
-        : null;
-
-      if (created?.attachResult?.matched && created?.attachResult?.productId) {
+      if (oldS3Key && oldS3Key !== newKey) {
         try {
-          await notifyReadyForPaidOnDemandOrders(String(created.attachResult.productId));
-        } catch (err) {
-          console.error("READY_EMAIL_NOTIFY_FAILED:", err);
+          await deleteS3ObjectIfExists(oldS3Key);
+        } catch {
+          // ignore old solved pdf cleanup failure
         }
       }
 
-      results.push({
-        ok: true,
-        fileName: originalName,
-        action:
-          activeDuplicates.length && conflictMode === "replace"
-            ? "replaced"
-            : "uploaded",
-        skuNormalized,
-        fileId: String(created.file?._id || ""),
-        productMatched: Boolean(created.productMatched),
-        productId: safeStr(created.attachResult?.productId || ""),
-        productSku: safeStr(created.attachResult?.productSku || ""),
-        productSlug: safeStr(created.attachResult?.productSlug || ""),
-        replacedDuplicatesCount:
-          activeDuplicates.length && conflictMode === "replace"
-            ? activeDuplicates.length
-            : 0,
-        detectedPages: Number(
-          created.detectedPages || created.attachResult?.detectedPages || 0
-        ),
-        officialPaperDeleted: Boolean(officialPaperCleanup.deleted),
-        officialPaperDeletedFileId: safeStr(officialPaperCleanup.fileId),
-        availabilityAfter: safeStr(availabilitySync?.after?.availability || ""),
-      });
-    } catch (err: any) {
-      results.push({
-        ok: false,
-        fileName: originalName,
-        action: "failed",
-        reason: safeStr(err?.message || "Upload failed"),
-        detectedPages: 0,
-      });
+      const officialPaperCleanup = await removeActiveOfficialPaperForSku(skuNormalized);
+      const syncResult: any = await syncProductAvailabilityBySku(
+        safeStr(matchedProduct?.sku || skuNormalized)
+      );
+
+      return NextResponse.json(
+        {
+          ok: true,
+          status: actionStatus,
+          message:
+            actionStatus === "replaced"
+              ? "Solved PDF replaced successfully"
+              : "Solved PDF uploaded successfully",
+          fileName: originalName,
+          skuNormalized,
+          fileId: String(savedFile._id),
+          pageCount: Math.max(0, Math.trunc(Number(savedFile.pageCount || 0))),
+          officialPaperDeleted: Boolean(officialPaperCleanup.deleted),
+          availabilityAfter: safeStr(syncResult?.after?.availability || ""),
+          counts: {
+            total: 1,
+            uploaded: actionStatus === "uploaded" ? 1 : 0,
+            replaced: actionStatus === "replaced" ? 1 : 0,
+            skipped: 0,
+            failed: 0,
+            done: 1,
+          },
+        },
+        { status: 200 }
+      );
+    } catch (error: any) {
+      try {
+        await deleteS3ObjectIfExists(newKey);
+      } catch {
+        // ignore cleanup failure
+      }
+
+      return NextResponse.json(
+        {
+          ok: false,
+          error: safeStr(error?.message || "Failed to finalize solved PDF upload"),
+        },
+        { status: 500 }
+      );
     }
+  } catch (error: any) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error: safeStr(error?.message || "Failed to upload solved PDF"),
+      },
+      { status: 500 }
+    );
   }
-
-  const summary = {
-    total: results.length,
-    uploaded: results.filter((x) => x.action === "uploaded").length,
-    replaced: results.filter((x) => x.action === "replaced").length,
-    ignored: results.filter((x) => x.action === "ignored").length,
-    failed: results.filter((x) => x.action === "failed").length,
-    skipped: results.filter((x) => x.action === "skipped").length,
-    matchedProducts: results.filter((x) => x.productMatched).length,
-    officialPapersDeleted: results.filter((x) => x.officialPaperDeleted).length,
-  };
-
-  return NextResponse.json(
-    {
-      ok: true,
-      parentPath,
-      conflictMode,
-      summary,
-      results,
-    },
-    { status: 200 }
-  );
 }
