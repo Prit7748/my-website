@@ -180,15 +180,45 @@ type ProcessBatchMeta = {
   totalBytes: number;
 };
 
-const ACTIVE_JOB_STORAGE_KEY = "isp_pdf_vault_active_job_id";
+type DirectUploadPreparedItem = {
+  itemIndex: number;
+  rowNumber: number;
+  batchNumber: number;
+  fileName: string;
+  skuNormalized?: string;
+  sizeBytes?: number;
+  status: "ready" | "uploaded" | "skipped" | "failed";
+  reason?: string;
+  upload?: {
+    bucket?: string;
+    key?: string;
+    uploadUrl?: string;
+    contentType?: string;
+    headers?: Record<string, string>;
+  };
+};
 
-/**
- * Vercel request body limit 4.5 MB hoti hai.
- * Hum intentionally lower safety cap use kar rahe hain taaki multipart/form-data overhead ki wajah se 413 na aaye.
- */
-const SAFE_REQUEST_PAYLOAD_BYTES = 3.5 * 1024 * 1024;
-const FORM_DATA_BASE_OVERHEAD_BYTES = 32 * 1024;
-const FORM_DATA_PER_FILE_OVERHEAD_BYTES = 4 * 1024;
+type DirectUploadPrepareResponse = {
+  ok?: boolean;
+  mode?: string;
+  message?: string;
+  error?: string;
+  retryable?: boolean;
+  code?: string;
+  maxFileBytes?: number;
+  lockToken?: string;
+  batch?: {
+    batchNumber: number;
+    fromIndex: number;
+    toIndex: number;
+    expectedCount: number;
+  };
+  items?: DirectUploadPreparedItem[];
+  job?: BulkJobState;
+};
+
+const ACTIVE_JOB_STORAGE_KEY = "isp_pdf_vault_active_job_id";
+const MAX_DIRECT_UPLOAD_BYTES = 20 * 1024 * 1024;
 
 function formatBytes(bytes: number) {
   const n = Number(bytes || 0);
@@ -214,10 +244,6 @@ function formatDateTime(input?: string | null) {
 
 function safeText(x: any) {
   return String(x ?? "").trim();
-}
-
-function clampNum(n: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, n));
 }
 
 function notifyLongTaskStart() {
@@ -282,82 +308,10 @@ function batchFileTone(status: CurrentBatchFileStatus) {
   return "bg-slate-100 text-slate-700 border-slate-200";
 }
 
-function estimateBatchPayloadBytes(files: File[]) {
-  const list = Array.isArray(files) ? files : [];
-  return list.reduce(
-    (sum, file) =>
-      sum +
-      Number(file?.size || 0) +
-      FORM_DATA_PER_FILE_OVERHEAD_BYTES,
-    FORM_DATA_BASE_OVERHEAD_BYTES
-  );
-}
-
-function findOversizedSelectedFile(
-  files: File[],
-  maxBytes = SAFE_REQUEST_PAYLOAD_BYTES
-) {
-  return (
-    (Array.isArray(files) ? files : []).find(
-      (file) => estimateBatchPayloadBytes([file]) > maxBytes
-    ) || null
-  );
-}
-
-function computeSafeFixedBatchSize(
-  files: File[],
-  requestedBatchSize: number,
-  maxBytes = SAFE_REQUEST_PAYLOAD_BYTES
-) {
-  const list = Array.isArray(files) ? files : [];
-  if (!list.length) return 0;
-
-  const desired = clampNum(
-    Math.trunc(Number(requestedBatchSize || 0)) || 1,
-    1,
-    500
-  );
-
-  let best = desired;
-
-  for (let start = 0; start < list.length; start++) {
-    let count = 0;
-    let usedBytes = FORM_DATA_BASE_OVERHEAD_BYTES;
-
-    for (let i = start; i < list.length && count < desired; i++) {
-      const nextFileBytes =
-        Number(list[i]?.size || 0) + FORM_DATA_PER_FILE_OVERHEAD_BYTES;
-
-      if (count === 0 && usedBytes + nextFileBytes > maxBytes) {
-        return 0;
-      }
-
-      if (count > 0 && usedBytes + nextFileBytes > maxBytes) {
-        break;
-      }
-
-      usedBytes += nextFileBytes;
-      count += 1;
-    }
-
-    best = Math.min(best, count);
-
-    if (best <= 1) {
-      return 1;
-    }
-  }
-
-  return Math.max(1, best);
-}
-
-function isPayloadTooLargeMessage(message: string) {
-  const raw = safeText(message).toLowerCase();
-  return (
-    raw.includes("function_payload_too_large") ||
-    raw.includes("payload too large") ||
-    raw.includes("request entity too large") ||
-    raw.includes("413")
-  );
+function buildPreparedItemClientId(item: DirectUploadPreparedItem) {
+  return `${safeText(item.fileName)}__${Number(item.sizeBytes || 0)}__${Number(
+    item.itemIndex || 0
+  )}`;
 }
 
 export default function HiddenPdfVaultPage() {
@@ -396,9 +350,7 @@ export default function HiddenPdfVaultPage() {
 
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [conflictMode, setConflictMode] = useState<"ignore" | "replace">("ignore");
-  const [batchSize, setBatchSize] = useState(100);
-  const [effectiveBatchSize, setEffectiveBatchSize] = useState(100);
-  const [batchSafetyMessage, setBatchSafetyMessage] = useState("");
+  const [batchSize, setBatchSize] = useState(50);
   const [creatingJob, setCreatingJob] = useState(false);
 
   const [activeJob, setActiveJob] = useState<BulkJobState | null>(null);
@@ -451,6 +403,16 @@ export default function HiddenPdfVaultPage() {
   );
 
   const selectedFilesCount = selectedFiles.length;
+
+  const oversizedSelectedFiles = useMemo(
+    () =>
+      selectedFiles.filter(
+        (file) => Math.max(0, Math.trunc(Number(file.size || 0))) > MAX_DIRECT_UPLOAD_BYTES
+      ),
+    [selectedFiles]
+  );
+
+  const oversizedSelectedFilesCount = oversizedSelectedFiles.length;
 
   const processedSelectionSummary = useMemo(() => {
     const values = Object.values(processedItemStatusMap);
@@ -506,8 +468,6 @@ export default function HiddenPdfVaultPage() {
 
     if (clearSelected) {
       setSelectedFiles([]);
-      setEffectiveBatchSize(batchSize);
-      setBatchSafetyMessage("");
       clearAutoProcessingPause();
       const input = document.getElementById("vault-upload-input") as HTMLInputElement | null;
       if (input) input.value = "";
@@ -538,20 +498,6 @@ export default function HiddenPdfVaultPage() {
     }
   }
 
-  function parseTextJson(text: string) {
-    const raw = String(text || "").trim();
-    if (!raw) return { ok: false, error: "Server returned empty response" };
-
-    try {
-      return JSON.parse(raw);
-    } catch {
-      return {
-        ok: false,
-        error: raw.slice(0, 400) || "Invalid server response",
-      };
-    }
-  }
-
   async function fetchJobStatus(jobId: string) {
     const res = await fetch(`/api/admin/bulk-jobs/${encodeURIComponent(jobId)}`, {
       method: "GET",
@@ -567,6 +513,143 @@ export default function HiddenPdfVaultPage() {
     const job = data?.job as BulkJobState;
     setActiveJob(job);
     return job;
+  }
+
+  function updateTracker(itemIndex: number, patch: Partial<CurrentBatchFileTracker>) {
+    setCurrentBatchTrackers((prev) =>
+      prev.map((item) =>
+        item.itemIndex === itemIndex
+          ? {
+              ...item,
+              ...patch,
+            }
+          : item
+      )
+    );
+  }
+
+  function applyPreparedBatchResultToUi(
+    updatedJob: BulkJobState,
+    meta: ProcessBatchMeta,
+    preparedItems: DirectUploadPreparedItem[]
+  ) {
+    const failures = Array.isArray(updatedJob?.recentFailures)
+      ? updatedJob.recentFailures
+      : [];
+
+    const failureMap = new Map<
+      number,
+      { status: "failed" | "skipped"; reason: string }
+    >();
+
+    for (const item of failures) {
+      const itemIndex = Number(item?.itemIndex);
+      const batchNumber = Number(item?.batchNumber || 0);
+
+      if (!Number.isFinite(itemIndex)) continue;
+      if (itemIndex < meta.fromIndex || itemIndex > meta.toIndex) continue;
+      if (batchNumber && batchNumber !== meta.batchNumber) continue;
+
+      const status =
+        safeText(item?.status).toLowerCase() === "skipped" ? "skipped" : "failed";
+
+      failureMap.set(itemIndex, {
+        status,
+        reason: safeText(item?.reason || "Batch failed"),
+      });
+    }
+
+    const nextTrackers: CurrentBatchFileTracker[] = preparedItems.map((item) => {
+      const hit = failureMap.get(Number(item.itemIndex));
+
+      return {
+        clientFileId: buildPreparedItemClientId(item),
+        itemIndex: Number(item.itemIndex),
+        rowNumber: Number(item.rowNumber || item.itemIndex + 1),
+        name: safeText(item.fileName),
+        size: Number(item.sizeBytes || 0),
+        status: hit
+          ? hit.status
+          : item.status === "skipped"
+          ? "skipped"
+          : item.status === "failed"
+          ? "failed"
+          : "processed",
+        reason: hit?.reason || safeText(item.reason || ""),
+      };
+    });
+
+    setCurrentBatchTrackers(nextTrackers);
+
+    setProcessedItemStatusMap((prev) => {
+      const next = { ...prev };
+
+      for (const tracker of nextTrackers) {
+        next[tracker.itemIndex] = {
+          status:
+            tracker.status === "failed"
+              ? "failed"
+              : tracker.status === "skipped"
+              ? "skipped"
+              : "processed",
+          reason: tracker.reason || "",
+        };
+      }
+
+      return next;
+    });
+  }
+
+  async function uploadSingleFileToPresignedUrl(args: {
+    file: File;
+    preparedItem: DirectUploadPreparedItem;
+    onProgress?: (loaded: number, total: number) => void;
+  }) {
+    const uploadUrl = safeText(args.preparedItem?.upload?.uploadUrl);
+    if (!uploadUrl) {
+      throw new Error("Direct upload URL missing");
+    }
+
+    const headers = args.preparedItem?.upload?.headers || {};
+    const file = args.file;
+
+    return await new Promise<void>((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      currentBatchXhrRef.current = xhr;
+
+      xhr.open("PUT", uploadUrl, true);
+
+      for (const [key, value] of Object.entries(headers)) {
+        if (safeText(key) && safeText(value)) {
+          xhr.setRequestHeader(key, value);
+        }
+      }
+
+      xhr.upload.onprogress = (event) => {
+        const loaded = Number(event?.loaded || 0);
+        const total = Number(event?.total || file.size || 0);
+        args.onProgress?.(loaded, total);
+      };
+
+      xhr.onerror = () => {
+        reject(new Error("Direct upload request failed"));
+      };
+
+      xhr.onabort = () => {
+        reject(new Error("Upload cancelled"));
+      };
+
+      xhr.onload = () => {
+        if (xhr.status >= 200 && xhr.status < 300) {
+          resolve();
+          return;
+        }
+
+        reject(new Error(`Direct upload failed (HTTP ${xhr.status || 0})`));
+      };
+
+      xhr.send(file);
+    });
   }
 
   async function loadBootstrap() {
@@ -757,27 +840,6 @@ export default function HiddenPdfVaultPage() {
       return;
     }
 
-    const oversizedFile = findOversizedSelectedFile(selectedFiles);
-    if (oversizedFile) {
-      const errMsg =
-        `"${oversizedFile.name}" itna bada hai ki current server-upload flow me single request safe limit cross kar raha hai. ` +
-        `Is file ko direct client-to-storage flow me shift karna padega, ya file size kam karni padegi.`;
-      setServerMessage(errMsg);
-      setServerMessageType("error");
-      alert(errMsg);
-      return;
-    }
-
-    const safeBatchSize = computeSafeFixedBatchSize(selectedFiles, batchSize);
-    if (!safeBatchSize) {
-      const errMsg =
-        "Current selection ke liye safe batch size compute nahi ho paayi. Same PDFs dobara select karke retry karo.";
-      setServerMessage(errMsg);
-      setServerMessageType("error");
-      alert(errMsg);
-      return;
-    }
-
     setCreatingJob(true);
     resetMessages();
     clearAutoProcessingPause();
@@ -790,7 +852,7 @@ export default function HiddenPdfVaultPage() {
       const payload = {
         parentPath: currentPath,
         conflictMode,
-        batchSize: safeBatchSize,
+        batchSize,
         originalSelectionCount: selectedFiles.length,
         files: selectedFiles.map((file) => ({
           name: file.name,
@@ -821,12 +883,12 @@ export default function HiddenPdfVaultPage() {
       setActiveJobId(job?._id || "");
       safePersistActiveJobId(job?._id || "");
       finalRefreshDoneRef.current = false;
-      setEffectiveBatchSize(safeBatchSize);
 
+      const oversizedCount = Number(data?.oversizedSelectionCount || oversizedSelectedFilesCount || 0);
       const successMessage =
-        safeBatchSize < batchSize
-          ? `Bulk solved PDFs job started. Requested ${batchSize} files/batch tha, lekin safe upload ke liye auto-adjust karke ${safeBatchSize} files/batch use hoga.`
-          : "Bulk solved PDFs job started successfully.";
+        oversizedCount > 0
+          ? `Bulk job start ho gayi. ${oversizedCount} file 20MB limit se upar hain; woh skipped hongi, baaki files continue hongi.`
+          : safeText(data?.message || "Bulk solved PDFs job started successfully.");
 
       setServerMessage(successMessage);
       setServerMessageType("success");
@@ -840,223 +902,238 @@ export default function HiddenPdfVaultPage() {
     }
   }
 
-  function buildBatchTrackers(fromIndex: number, batchFiles: File[]) {
-    return batchFiles.map((file, idx) => ({
-      clientFileId: buildClientFileId(file, fromIndex + idx),
-      itemIndex: fromIndex + idx,
-      rowNumber: fromIndex + idx + 1,
-      name: file.name,
-      size: Number(file.size || 0),
-      status: "uploading" as CurrentBatchFileStatus,
-    }));
-  }
-
-  function applyBatchResultToUi(
-    updatedJob: BulkJobState,
-    meta: ProcessBatchMeta,
-    batchFiles: File[]
-  ) {
-    const failures = Array.isArray(updatedJob?.recentFailures)
-      ? updatedJob.recentFailures
-      : [];
-
-    const failureMap = new Map<
-      number,
-      { status: "failed" | "skipped"; reason: string }
-    >();
-
-    for (const item of failures) {
-      const itemIndex = Number(item?.itemIndex);
-      const batchNumber = Number(item?.batchNumber || 0);
-
-      if (!Number.isFinite(itemIndex)) continue;
-      if (itemIndex < meta.fromIndex || itemIndex > meta.toIndex) continue;
-      if (batchNumber && batchNumber !== meta.batchNumber) continue;
-
-      const status =
-        safeText(item?.status).toLowerCase() === "skipped" ? "skipped" : "failed";
-
-      failureMap.set(itemIndex, {
-        status,
-        reason: safeText(item?.reason || "Batch failed"),
-      });
-    }
-
-    const nextTrackers: CurrentBatchFileTracker[] = batchFiles.map((file, idx) => {
-      const itemIndex = meta.fromIndex + idx;
-      const hit = failureMap.get(itemIndex);
-
-      return {
-        clientFileId: buildClientFileId(file, itemIndex),
-        itemIndex,
-        rowNumber: itemIndex + 1,
-        name: file.name,
-        size: Number(file.size || 0),
-        status: hit ? hit.status : "processed",
-        reason: hit?.reason || "",
-      };
-    });
-
-    setCurrentBatchTrackers(nextTrackers);
-
-    setProcessedItemStatusMap((prev) => {
-      const next = { ...prev };
-
-      for (const tracker of nextTrackers) {
-        next[tracker.itemIndex] = {
-          status:
-            tracker.status === "failed"
-              ? "failed"
-              : tracker.status === "skipped"
-              ? "skipped"
-              : "processed",
-          reason: tracker.reason || "",
-        };
-      }
-
-      return next;
-    });
-  }
-
   async function processNextBatch(job: BulkJobState) {
     const jobId = safeText(job?._id);
     if (!jobId || processInFlightRef.current) return;
     if (autoProcessPaused) return;
 
-    const processedItems = Number(job?.progress?.processedItems || 0);
-    const totalItems = Number(job?.progress?.totalItems || 0);
-    const currentBatchSize = Math.max(
-      1,
-      Number(job?.progress?.batchSize || effectiveBatchSize || batchSize)
-    );
-
-    if (processedItems >= totalItems) return;
-
-    const nextBatchExpected = Math.min(currentBatchSize, totalItems - processedItems);
-    const nextBatchFiles = selectedFiles.slice(processedItems, processedItems + nextBatchExpected);
-
-    if (nextBatchFiles.length !== nextBatchExpected) {
-      const msg =
-        "Current browser me required PDF batch files available nahi hain. Agar page refresh hua tha, same original PDF list dubara select karke continue karo.";
-      pauseAutoProcessing(msg);
-      return;
-    }
-
-    const estimatedPayloadBytes = estimateBatchPayloadBytes(nextBatchFiles);
-    if (estimatedPayloadBytes > SAFE_REQUEST_PAYLOAD_BYTES) {
-      const msg =
-        `Current batch estimated request size ${formatBytes(estimatedPayloadBytes)} hai, ` +
-        `jo safe upload limit ${formatBytes(SAFE_REQUEST_PAYLOAD_BYTES)} se upar hai. ` +
-        `Auto processing pause kar di gayi hai. Same files select rehne do aur smaller effective batch size ke saath resume/start karo.`;
-      pauseAutoProcessing(msg);
-      setCurrentBatchTrackers(
-        nextBatchFiles.map((file, idx) => ({
-          clientFileId: buildClientFileId(file, processedItems + idx),
-          itemIndex: processedItems + idx,
-          rowNumber: processedItems + idx + 1,
-          name: file.name,
-          size: Number(file.size || 0),
-          status: "queued",
-          reason: "Paused before upload because estimated request payload was too large.",
-        }))
-      );
-      return;
-    }
-
-    const batchNumber = Math.floor(processedItems / currentBatchSize) + 1;
-    const fromIndex = processedItems;
-    const toIndex = processedItems + nextBatchExpected - 1;
-    const totalBytes = nextBatchFiles.reduce(
-      (sum, file) => sum + Number(file.size || 0),
-      0
-    );
-
-    const meta: ProcessBatchMeta = {
-      batchNumber,
-      fromIndex,
-      toIndex,
-      expectedCount: nextBatchExpected,
-      totalBytes,
-    };
-
-    setCurrentBatchMeta(meta);
-    setCurrentBatchTrackers(buildBatchTrackers(fromIndex, nextBatchFiles));
-    setCurrentBatchUploadPercent(0);
-    setCurrentBatchLoadedBytes(0);
-    setCurrentBatchTotalBytes(totalBytes);
-
     processInFlightRef.current = true;
 
     try {
-      const updatedJob = await new Promise<BulkJobState>((resolve, reject) => {
-        const xhr = new XMLHttpRequest();
-        currentBatchXhrRef.current = xhr;
-
-        const form = new FormData();
-        form.append("jobId", jobId);
-        for (const file of nextBatchFiles) {
-          form.append("files", file);
-        }
-
-        xhr.open("POST", "/api/admin/pdf-vault/jobs/process", true);
-        xhr.withCredentials = true;
-
-        xhr.upload.onprogress = (event) => {
-          const loaded = event.lengthComputable ? Number(event.loaded || 0) : 0;
-          const safeLoaded = Math.min(totalBytes, loaded);
-          setCurrentBatchLoadedBytes(safeLoaded);
-
-          const percent =
-            totalBytes > 0 ? Math.min(100, Math.round((safeLoaded / totalBytes) * 100)) : 0;
-
-          setCurrentBatchUploadPercent(percent);
-        };
-
-        xhr.onerror = () => {
-          reject(new Error("Batch upload request failed"));
-        };
-
-        xhr.onabort = () => {
-          reject(new Error("Batch upload cancelled"));
-        };
-
-        xhr.onload = () => {
-          const data = parseTextJson(xhr.responseText || "");
-          if (xhr.status >= 200 && xhr.status < 300 && data?.ok && data?.job) {
-            resolve(data.job as BulkJobState);
-            return;
-          }
-
-          reject(
-            new Error(
-              safeText(data?.error || data?.message || `HTTP ${xhr.status || 0}`) ||
-                "Batch processing failed"
-            )
-          );
-        };
-
-        xhr.send(form);
+      const prepareRes = await fetch("/api/admin/pdf-vault/jobs/direct-upload", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ jobId }),
       });
 
-      setCurrentBatchUploadPercent(100);
-      setCurrentBatchLoadedBytes(totalBytes);
-      clearAutoProcessingPause();
-      setActiveJob(updatedJob);
-      applyBatchResultToUi(updatedJob, meta, nextBatchFiles);
-    } catch (error: any) {
-      const rawReason = safeText(error?.message || "Batch processing failed");
-      const reason = isPayloadTooLargeMessage(rawReason)
-        ? `Vercel payload limit hit ho gayi. Auto processing pause kar di gayi hai, isliye same first batch baar-baar repeat nahi hoga. Smaller safe batch size ke saath resume/start karo. Original error: ${rawReason}`
-        : `Batch auto-processing pause kar di gayi hai: ${rawReason}`;
+      const prepareData = (await safeReadJson(prepareRes)) as DirectUploadPrepareResponse;
 
-      setCurrentBatchTrackers((prev) =>
-        prev.map((item) => ({
-          ...item,
-          status: "failed",
-          reason,
+      if (!prepareRes.ok || !prepareData?.ok) {
+        throw new Error(prepareData?.message || prepareData?.error || "Failed to prepare direct upload batch");
+      }
+
+      if (prepareData?.job) {
+        setActiveJob(prepareData.job);
+      }
+
+      const lockToken = safeText(prepareData?.lockToken);
+      const preparedItems = Array.isArray(prepareData?.items) ? prepareData.items : [];
+      const batch = prepareData?.batch;
+
+      if (!batch || !preparedItems.length || !lockToken) {
+        const latestJob = prepareData?.job || activeJob;
+        if (latestJob) {
+          setActiveJob(latestJob);
+        }
+        return;
+      }
+
+      const uploadableItems = preparedItems.filter((item) => item.status === "ready");
+      const totalBytes = uploadableItems.reduce(
+        (sum, item) => sum + Number(item.sizeBytes || 0),
+        0
+      );
+
+      const meta: ProcessBatchMeta = {
+        batchNumber: Number(batch.batchNumber || 0),
+        fromIndex: Number(batch.fromIndex || 0),
+        toIndex: Number(batch.toIndex || 0),
+        expectedCount: Number(batch.expectedCount || preparedItems.length),
+        totalBytes,
+      };
+
+      setCurrentBatchMeta(meta);
+      setCurrentBatchTotalBytes(totalBytes);
+      setCurrentBatchLoadedBytes(0);
+      setCurrentBatchUploadPercent(totalBytes > 0 ? 0 : 100);
+
+      setCurrentBatchTrackers(
+        preparedItems.map((item) => ({
+          clientFileId: buildPreparedItemClientId(item),
+          itemIndex: Number(item.itemIndex),
+          rowNumber: Number(item.rowNumber || item.itemIndex + 1),
+          name: safeText(item.fileName),
+          size: Number(item.sizeBytes || 0),
+          status:
+            item.status === "skipped"
+              ? "skipped"
+              : item.status === "failed"
+              ? "failed"
+              : "queued",
+          reason: safeText(item.reason || ""),
         }))
       );
 
+      const uploadedItemsForFinalize: DirectUploadPreparedItem[] = [];
+      const loadedByItemIndex = new Map<number, number>();
+
+      const recomputeUploadProgress = () => {
+        const loaded = Array.from(loadedByItemIndex.values()).reduce((sum, n) => sum + n, 0);
+        setCurrentBatchLoadedBytes(Math.min(totalBytes, loaded));
+
+        const percent =
+          totalBytes > 0 ? Math.min(100, Math.round((loaded / totalBytes) * 100)) : 100;
+
+        setCurrentBatchUploadPercent(percent);
+      };
+
+      for (const item of preparedItems) {
+        const itemIndex = Number(item.itemIndex || 0);
+        const fileName = safeText(item.fileName);
+
+        if (item.status === "skipped" || item.status === "failed") {
+          uploadedItemsForFinalize.push(item);
+          continue;
+        }
+
+        const file = selectedFiles[itemIndex];
+
+        if (!file) {
+          updateTracker(itemIndex, {
+            status: "failed",
+            reason: "Same original PDF list current browser me available nahi hai.",
+          });
+
+          uploadedItemsForFinalize.push({
+            ...item,
+            status: "failed",
+            reason: "Same original PDF list current browser me available nahi hai.",
+          });
+          continue;
+        }
+
+        if (safeText(file.name) !== fileName) {
+          updateTracker(itemIndex, {
+            status: "failed",
+            reason: `File mismatch. Expected "${fileName}", received "${safeText(file.name)}".`,
+          });
+
+          uploadedItemsForFinalize.push({
+            ...item,
+            status: "failed",
+            reason: `File mismatch. Expected "${fileName}", received "${safeText(file.name)}".`,
+          });
+          continue;
+        }
+
+        if (Number(file.size || 0) > MAX_DIRECT_UPLOAD_BYTES) {
+          updateTracker(itemIndex, {
+            status: "skipped",
+            reason: `File size ${formatBytes(Number(file.size || 0))} exceeds max allowed ${formatBytes(MAX_DIRECT_UPLOAD_BYTES)}.`,
+          });
+
+          uploadedItemsForFinalize.push({
+            ...item,
+            status: "skipped",
+            reason: `File size ${formatBytes(Number(file.size || 0))} exceeds max allowed ${formatBytes(MAX_DIRECT_UPLOAD_BYTES)}.`,
+          });
+          continue;
+        }
+
+        updateTracker(itemIndex, {
+          status: "uploading",
+          reason: "",
+        });
+
+        loadedByItemIndex.set(itemIndex, 0);
+        recomputeUploadProgress();
+
+        try {
+          await uploadSingleFileToPresignedUrl({
+            file,
+            preparedItem: item,
+            onProgress: (loaded, total) => {
+              const effectiveLoaded = Math.min(Number(total || file.size || 0), Number(loaded || 0));
+              loadedByItemIndex.set(itemIndex, effectiveLoaded);
+              recomputeUploadProgress();
+            },
+          });
+
+          loadedByItemIndex.set(itemIndex, Number(file.size || 0));
+          recomputeUploadProgress();
+
+          updateTracker(itemIndex, {
+            status: "processed",
+            reason: "Uploaded to storage. Finalizing...",
+          });
+
+          uploadedItemsForFinalize.push({
+            ...item,
+            status: "uploaded",
+            sizeBytes: Number(file.size || 0),
+            upload: {
+              bucket: safeText(item.upload?.bucket),
+              key: safeText(item.upload?.key),
+              contentType: safeText(item.upload?.contentType || "application/pdf"),
+            },
+          });
+        } catch (error: any) {
+          const reason = safeText(error?.message || "Direct upload failed");
+
+          updateTracker(itemIndex, {
+            status: "failed",
+            reason,
+          });
+
+          uploadedItemsForFinalize.push({
+            ...item,
+            status: "failed",
+            reason,
+          });
+        }
+      }
+
+      if (totalBytes <= 0) {
+        setCurrentBatchLoadedBytes(0);
+        setCurrentBatchUploadPercent(100);
+      } else {
+        setCurrentBatchLoadedBytes(totalBytes);
+        setCurrentBatchUploadPercent(100);
+      }
+
+      const finalizeRes = await fetch("/api/admin/pdf-vault/jobs/process", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          jobId,
+          lockToken,
+          uploadedItems: uploadedItemsForFinalize,
+        }),
+      });
+
+      const finalizeData = await safeReadJson(finalizeRes);
+
+      if (!finalizeRes.ok || !finalizeData?.ok || !finalizeData?.job) {
+        const errMsg =
+          safeText(finalizeData?.error || finalizeData?.message || "Batch finalize failed") ||
+          "Batch finalize failed";
+
+        if (finalizeData?.job) {
+          setActiveJob(finalizeData.job as BulkJobState);
+        }
+
+        throw new Error(errMsg);
+      }
+
+      clearAutoProcessingPause();
+
+      const updatedJob = finalizeData.job as BulkJobState;
+      setActiveJob(updatedJob);
+      applyPreparedBatchResultToUi(updatedJob, meta, uploadedItemsForFinalize);
+    } catch (error: any) {
+      const reason = safeText(error?.message || "Batch processing failed");
       pauseAutoProcessing(reason);
     } finally {
       processInFlightRef.current = false;
@@ -1433,47 +1510,6 @@ export default function HiddenPdfVaultPage() {
   }, [activeJobId]);
 
   useEffect(() => {
-    if (!selectedFiles.length) {
-      setEffectiveBatchSize(batchSize);
-      setBatchSafetyMessage("");
-      if (!isJobActive) {
-        clearAutoProcessingPause();
-      }
-      return;
-    }
-
-    const oversizedFile = findOversizedSelectedFile(selectedFiles);
-    if (oversizedFile) {
-      setEffectiveBatchSize(0);
-      setBatchSafetyMessage(
-        `"${oversizedFile.name}" single-request safe limit se bada hai. Yeh current server-upload flow me fail karega.`
-      );
-      return;
-    }
-
-    const safeSize = computeSafeFixedBatchSize(selectedFiles, batchSize);
-    setEffectiveBatchSize(safeSize);
-
-    if (!safeSize) {
-      setBatchSafetyMessage(
-        "Safe batch size compute nahi ho paayi. Same files dobara select karke retry karo."
-      );
-      return;
-    }
-
-    if (safeSize < batchSize) {
-      setBatchSafetyMessage(
-        `Requested ${batchSize} files/batch tha, lekin current file sizes ke hisaab se safe effective batch size ${safeSize} files/batch hogi.`
-      );
-      return;
-    }
-
-    setBatchSafetyMessage(
-      `Current selection safe hai. Effective browser batch size ${safeSize} files/batch rahegi.`
-    );
-  }, [selectedFiles, batchSize, isJobActive]);
-
-  useEffect(() => {
     if (!accessGranted) return;
     void loadFolders(currentPath);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1521,7 +1557,7 @@ export default function HiddenPdfVaultPage() {
     if (activeJob) return;
 
     void fetchJobStatus(activeJobId).catch(() => {
-      // ignore initial restore error
+      // ignore
     });
   }, [activeJobId, accessGranted, activeJob]);
 
@@ -1531,7 +1567,7 @@ export default function HiddenPdfVaultPage() {
 
     const interval = setInterval(() => {
       void fetchJobStatus(activeJobId).catch(() => {
-        // ignore polling error
+        // ignore
       });
     }, 1200);
 
@@ -1546,23 +1582,26 @@ export default function HiddenPdfVaultPage() {
 
     const processedItems = Number(activeJob?.progress?.processedItems || 0);
     const totalItems = Number(activeJob?.progress?.totalItems || 0);
-    const currentBatchSize = Math.max(
-      1,
-      Number(activeJob?.progress?.batchSize || effectiveBatchSize || batchSize)
-    );
+    const currentBatchSize = Math.max(1, Number(activeJob?.progress?.batchSize || batchSize));
     const nextBatchExpected = Math.min(currentBatchSize, Math.max(0, totalItems - processedItems));
 
     if (nextBatchExpected <= 0) return;
 
     const nextBatchFiles = selectedFiles.slice(processedItems, processedItems + nextBatchExpected);
-    if (nextBatchFiles.length !== nextBatchExpected) return;
+    if (nextBatchFiles.length !== nextBatchExpected) {
+      // direct finalize route itemIndex-based hai; yeh mismatch tab problem hai jab original list missing ho
+      const message =
+        "Current browser me same original PDF list available nahi hai. Agar page refresh hua tha to same original PDF list dubara select karke resume karo.";
+      pauseAutoProcessing(message);
+      return;
+    }
 
     const timer = setTimeout(() => {
       void processNextBatch(activeJob);
     }, 120);
 
     return () => clearTimeout(timer);
-  }, [activeJobId, activeJob, currentStatus, selectedFiles, batchSize, effectiveBatchSize, autoProcessPaused]);
+  }, [activeJobId, activeJob, currentStatus, selectedFiles, batchSize, autoProcessPaused]);
 
   useEffect(() => {
     if (!activeJobId) return;
@@ -1678,7 +1717,7 @@ export default function HiddenPdfVaultPage() {
 
               <h1 className="text-2xl font-extrabold mt-3">Bulk Product PDFs Vault</h1>
               <p className="text-sm text-slate-600 mt-1">
-                Solved PDFs ab batch-based job system par upload honge. Current path:{" "}
+                Solved PDFs ab direct storage upload + job tracking mode me process hongi. Current path:{" "}
                 <b>{titlePath || "root"}</b>
               </p>
             </div>
@@ -1736,12 +1775,12 @@ export default function HiddenPdfVaultPage() {
               <Database size={18} className="mt-0.5 shrink-0 text-blue-800" />
               <div>
                 <div className="text-sm font-extrabold text-blue-900">
-                  Solved PDFs ab browser-batch + job tracking mode me process honge
+                  Solved PDFs ab direct S3 upload + finalize job mode me process hongi
                 </div>
                 <div className="text-sm text-blue-800 mt-2 leading-6">
-                  Single long request ki jagah ab selected PDFs batches me process hongi.
+                  Ab large PDF browser se direct storage par upload hogi, isliye 5MB+ files bhi handle hongi.
                   <br />
-                  Ab current batch ke andar ki PDFs bhi alag se dikhengi, aur upload bytes progress live show hogi.
+                  Per file max size <b>{formatBytes(MAX_DIRECT_UPLOAD_BYTES)}</b> hai. Isse badi file auto-skip hogi, baaki files continue hongi.
                   <br />
                   Best result ke liye upload ke dauran isi tab ko open rakho.
                 </div>
@@ -2193,12 +2232,11 @@ export default function HiddenPdfVaultPage() {
                   className="w-full mt-3 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none"
                   disabled={showTrash || isJobActive}
                 >
+                  <option value="10">10 files / batch</option>
                   <option value="25">25 files / batch</option>
                   <option value="50">50 files / batch</option>
                   <option value="100">100 files / batch</option>
                   <option value="200">200 files / batch</option>
-                  <option value="300">300 files / batch</option>
-                  <option value="500">500 files / batch</option>
                 </select>
 
                 <div className="mt-3 text-xs text-slate-500 leading-6">
@@ -2208,33 +2246,23 @@ export default function HiddenPdfVaultPage() {
                   <br />
                   Selected size: <b>{formatBytes(selectedFilesSize)}</b>
                   <br />
-                  Requested batch size: <b>{batchSize}</b>
+                  Batch size: <b>{batchSize}</b>
                   <br />
-                  Effective safe batch size: <b>{effectiveBatchSize || 0}</b>
+                  Max file size per PDF: <b>{formatBytes(MAX_DIRECT_UPLOAD_BYTES)}</b>
                   <br />
-                  Safe request cap: <b>{formatBytes(SAFE_REQUEST_PAYLOAD_BYTES)}</b>
-                  <br />
-                  Recommended stable batch size: <b>25 or 50</b>
+                  Oversized files: <b>{oversizedSelectedFilesCount}</b>
                 </div>
 
-                {selectedFiles.length > 0 ? (
-                  <div
-                    className={`mt-3 rounded-xl border p-3 text-xs leading-5 ${
-                      !effectiveBatchSize
-                        ? "border-rose-200 bg-rose-50 text-rose-800"
-                        : effectiveBatchSize < batchSize
-                        ? "border-amber-200 bg-amber-50 text-amber-800"
-                        : "border-emerald-200 bg-emerald-50 text-emerald-800"
-                    }`}
-                  >
-                    {batchSafetyMessage}
+                {oversizedSelectedFilesCount > 0 ? (
+                  <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-800">
+                    {oversizedSelectedFilesCount} file 20MB limit se upar hain. Yeh files auto-skip hongi, lekin baaki PDFs upload hoti rahengi.
                   </div>
                 ) : null}
 
                 <button
                   type="button"
                   onClick={createSolvedPdfJob}
-                  disabled={creatingJob || showTrash || isJobActive || (!!selectedFiles.length && !effectiveBatchSize)}
+                  disabled={creatingJob || showTrash || isJobActive}
                   className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-slate-900 hover:bg-slate-950 text-white transition font-extrabold disabled:opacity-60 shadow-sm"
                 >
                   <Upload size={18} />

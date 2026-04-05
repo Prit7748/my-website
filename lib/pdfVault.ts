@@ -1,7 +1,11 @@
 import crypto from "crypto";
 import path from "path";
 import { cookies } from "next/headers";
-import { PutObjectCommand, S3Client, GetObjectCommand } from "@aws-sdk/client-s3";
+import {
+  PutObjectCommand,
+  S3Client,
+  GetObjectCommand,
+} from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import AdmZip from "adm-zip";
 
@@ -25,6 +29,8 @@ export const PDF_VAULT_ROUTE_SEGMENT = PDF_VAULT_HIDDEN_PATH;
 export const PDF_VAULT_PUZZLE_COOKIE_NAME = PDF_VAULT_PUZZLE_COOKIE;
 export const PDF_VAULT_ACCESS_COOKIE_NAME = PDF_VAULT_ACCESS_COOKIE;
 
+export const PDF_VAULT_DIRECT_UPLOAD_MAX_BYTES = 20 * 1024 * 1024;
+
 const s3 = new S3Client({
   region: REGION,
   credentials: {
@@ -39,6 +45,11 @@ function hmac(input: string) {
 
 export function safeStr(x: any) {
   return String(x ?? "").trim();
+}
+
+export function safeNum(x: any, def = 0) {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : def;
 }
 
 export function slugify(input: string) {
@@ -186,6 +197,65 @@ export function buildPdfVaultS3Key(folderPath: string, originalName: string) {
   return `vault/pdfs/${folder ? `${folder}/` : ""}${base}-${rand}${ext}`;
 }
 
+export function assertPdfVaultDirectUploadSize(sizeBytes: number, maxBytes = PDF_VAULT_DIRECT_UPLOAD_MAX_BYTES) {
+  const safeSize = Math.max(0, Math.trunc(Number(sizeBytes || 0)));
+  if (!safeSize) {
+    throw new Error("File size missing");
+  }
+  if (safeSize > maxBytes) {
+    throw new Error(`File exceeds max allowed size of ${maxBytes} bytes`);
+  }
+  return safeSize;
+}
+
+export async function createDirectPdfUploadUrl(args: {
+  folderPath: string;
+  originalName: string;
+  mimeType?: string;
+  sizeBytes: number;
+  expiresInSeconds?: number;
+}) {
+  if (!ACCESS_KEY || !SECRET_KEY) {
+    throw new Error("AWS credentials missing");
+  }
+  if (!BUCKET_PRIVATE) {
+    throw new Error("AWS_S3_BUCKET_PRIVATE missing");
+  }
+
+  const originalName = safeStr(args.originalName);
+  if (!originalName) {
+    throw new Error("originalName required");
+  }
+
+  const ext = fileExt(originalName);
+  if (ext !== ".pdf") {
+    throw new Error("Only PDF files are supported");
+  }
+
+  const sizeBytes = assertPdfVaultDirectUploadSize(args.sizeBytes);
+  const folderPath = cleanFolderPath(args.folderPath) || "root";
+  const key = buildPdfVaultS3Key(folderPath, originalName);
+  const contentType = safeStr(args.mimeType || "application/pdf") || "application/pdf";
+  const expiresIn = Math.max(60, Math.min(Number(args.expiresInSeconds || 900), 3600));
+
+  const command = new PutObjectCommand({
+    Bucket: BUCKET_PRIVATE,
+    Key: key,
+    ContentType: contentType,
+  });
+
+  const uploadUrl = await getSignedUrl(s3, command, { expiresIn });
+
+  return {
+    bucket: BUCKET_PRIVATE,
+    key,
+    uploadUrl,
+    contentType,
+    sizeBytes,
+    expiresIn,
+  };
+}
+
 export async function ensureRootFolder() {
   await dbConnect();
 
@@ -326,7 +396,6 @@ export async function getPdfBufferFromS3(s3Key: string) {
 
 export async function getPdfPageCountFromBuffer(pdfBuffer: Buffer) {
   try {
-    // 1) First try pdf-parse
     try {
       // eslint-disable-next-line @typescript-eslint/no-var-requires
       const pdfParse = require("pdf-parse");
@@ -340,10 +409,8 @@ export async function getPdfPageCountFromBuffer(pdfBuffer: Buffer) {
       console.error("pdf-parse primary detection failed:", err);
     }
 
-    // 2) Fallback: read raw PDF text
     const raw = pdfBuffer.toString("latin1");
 
-    // 2A) Try page tree counts: /Count 123
     const countMatches = [...raw.matchAll(/\/Count\s+(\d+)/g)];
     const countValues = countMatches
       .map((m) => Number(m[1] || 0))
@@ -351,15 +418,12 @@ export async function getPdfPageCountFromBuffer(pdfBuffer: Buffer) {
 
     const maxCount = countValues.length ? Math.max(...countValues) : 0;
 
-    // 2B) Try direct page object count: /Type /Page
-    // avoid counting /Pages
     const pageTypeMatches = raw.match(/\/Type\s*\/Page\b/g) || [];
     const pageTypeCount = pageTypeMatches.length;
 
-    // 3) Best possible fallback result
     const detected = Math.max(maxCount, pageTypeCount, 0);
 
-        return detected > 0 ? detected : 0;
+    return detected > 0 ? detected : 0;
   } catch (err) {
     console.error("PDF page count failed completely:", err);
     return 0;

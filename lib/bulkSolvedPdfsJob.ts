@@ -14,6 +14,7 @@ import {
   fileBaseName,
   fileExt,
   normalizeSkuLike,
+  PDF_VAULT_DIRECT_UPLOAD_MAX_BYTES,
   safeStr,
   uploadPdfBufferToS3,
 } from "@/lib/pdfVault";
@@ -36,6 +37,22 @@ export type BulkSolvedPdfsJobConfig = {
   conflictMode: SolvedPdfConflictMode;
   parentPath: string;
   originalSelectionCount: number;
+};
+
+export type BulkSolvedPdfsFinalizeItem = {
+  itemIndex: number;
+  rowNumber: number;
+  batchNumber: number;
+  fileName: string;
+  skuNormalized?: string;
+  sizeBytes?: number;
+  status: "ready" | "uploaded" | "skipped" | "failed";
+  reason?: string;
+  upload?: {
+    bucket?: string;
+    key?: string;
+    contentType?: string;
+  };
 };
 
 export type BulkSolvedPdfsBatchProcessResult = {
@@ -267,6 +284,313 @@ async function prefetchLiveOfficialPaperSkuSet(skus: string[]) {
   return new Set(rows.map((row) => safeStr(row?.skuNormalized).toUpperCase()).filter(Boolean));
 }
 
+function buildSummaryPatch(args: {
+  currentSummary: any;
+  rowsLength: number;
+  config: BulkSolvedPdfsJobConfig;
+  jobMeta: any;
+  batchValidFiles: number;
+  batchUploadedFiles: number;
+  batchReplacedFiles: number;
+  batchIgnoredFiles: number;
+  batchSkippedFiles: number;
+  batchFailedFiles: number;
+  batchMatchedProducts: number;
+  batchOfficialPapersDeleted: number;
+}) {
+  const {
+    currentSummary,
+    rowsLength,
+    config,
+    jobMeta,
+    batchValidFiles,
+    batchUploadedFiles,
+    batchReplacedFiles,
+    batchIgnoredFiles,
+    batchSkippedFiles,
+    batchFailedFiles,
+    batchMatchedProducts,
+    batchOfficialPapersDeleted,
+  } = args;
+
+  return {
+    totalFiles: safeNum(currentSummary?.totalFiles, rowsLength),
+    validFiles: safeNum(currentSummary?.validFiles, 0) + batchValidFiles,
+    uploadedFiles: safeNum(currentSummary?.uploadedFiles, 0) + batchUploadedFiles,
+    replacedFiles: safeNum(currentSummary?.replacedFiles, 0) + batchReplacedFiles,
+    ignoredFiles: safeNum(currentSummary?.ignoredFiles, 0) + batchIgnoredFiles,
+    skippedFiles: safeNum(currentSummary?.skippedFiles, 0) + batchSkippedFiles,
+    failedFiles: safeNum(currentSummary?.failedFiles, 0) + batchFailedFiles,
+    matchedProducts: safeNum(currentSummary?.matchedProducts, 0) + batchMatchedProducts,
+    officialPapersDeleted:
+      safeNum(currentSummary?.officialPapersDeleted, 0) + batchOfficialPapersDeleted,
+    conflictMode: config.conflictMode,
+    parentPath: config.parentPath,
+    sourceType: safeStr(currentSummary?.sourceType || jobMeta?.sourceType || "browser-batch"),
+    originalSelectionCount: safeNum(
+      currentSummary?.originalSelectionCount,
+      config.originalSelectionCount
+    ),
+    requestedBatchSize: safeNum(
+      currentSummary?.requestedBatchSize,
+      safeNum(jobMeta?.requestedBatchSize, 0)
+    ),
+    effectiveBatchSize: safeNum(
+      currentSummary?.effectiveBatchSize,
+      safeNum(jobMeta?.effectiveBatchSize, 0)
+    ),
+    safeRequestPayloadBytes: safeNum(
+      currentSummary?.safeRequestPayloadBytes,
+      safeNum(jobMeta?.safeRequestPayloadBytes, 0)
+    ),
+    maxDirectUploadBytes: safeNum(
+      currentSummary?.maxDirectUploadBytes,
+      safeNum(jobMeta?.maxDirectUploadBytes, PDF_VAULT_DIRECT_UPLOAD_MAX_BYTES)
+    ),
+  };
+}
+
+async function finalizeSingleUploadedPdf(args: {
+  row: PreparedSolvedPdfClientRow;
+  itemIndex: number;
+  batchNumber: number;
+  folderId: string;
+  uploadedBy: string;
+  conflictMode: SolvedPdfConflictMode;
+  uploadedItem: BulkSolvedPdfsFinalizeItem;
+  activeDuplicatesBySku: Map<string, any[]>;
+  liveOfficialPaperSkuSet: Set<string>;
+  notifiedProductIds: Set<string>;
+}) {
+  const {
+    row,
+    itemIndex,
+    batchNumber,
+    folderId,
+    uploadedBy,
+    conflictMode,
+    uploadedItem,
+    activeDuplicatesBySku,
+    liveOfficialPaperSkuSet,
+    notifiedProductIds,
+  } = args;
+
+  const rowNumber = Number(row?.rowNumber || itemIndex + 1);
+  const originalName = safeStr(row?.originalName);
+  const fileName = safeStr(row?.fileName);
+  const skuNormalized = safeStr(row?.skuNormalized).toUpperCase();
+  const uploadBucket = safeStr(uploadedItem?.upload?.bucket || BUCKET_PRIVATE);
+  const uploadKey = safeStr(uploadedItem?.upload?.key);
+  const sizeBytes = Math.max(
+    0,
+    Math.trunc(Number(uploadedItem?.sizeBytes || row?.sizeBytes || 0))
+  );
+
+  const makeFailure = (status: string, reason: string) => ({
+    itemIndex,
+    rowNumber,
+    batchNumber,
+    identifier: fileName || skuNormalized || `row-${rowNumber}`,
+    sku: skuNormalized,
+    fileName,
+    status,
+    reason,
+    raw: row,
+  });
+
+  if (uploadedItem?.status === "skipped") {
+    return {
+      outcome: "skipped" as const,
+      failure: makeFailure("skipped", safeStr(uploadedItem?.reason || "Skipped before upload")),
+    };
+  }
+
+  if (uploadedItem?.status === "failed") {
+    return {
+      outcome: "failed" as const,
+      failure: makeFailure("failed", safeStr(uploadedItem?.reason || "Upload failed")),
+    };
+  }
+
+  if (uploadedItem?.status !== "uploaded") {
+    return {
+      outcome: "failed" as const,
+      failure: makeFailure(
+        "failed",
+        `Invalid finalize status "${safeStr(uploadedItem?.status || "-")}"`
+      ),
+    };
+  }
+
+  if (!uploadKey) {
+    return {
+      outcome: "failed" as const,
+      failure: makeFailure("failed", "Uploaded S3 key missing"),
+    };
+  }
+
+  if (!fileName || !originalName) {
+    return {
+      outcome: "failed" as const,
+      failure: makeFailure("failed", "Empty file name"),
+    };
+  }
+
+  if (fileExt(fileName).toLowerCase() !== ".pdf") {
+    return {
+      outcome: "skipped" as const,
+      failure: makeFailure("skipped", "Only PDF files allowed"),
+    };
+  }
+
+  if (!skuNormalized) {
+    return {
+      outcome: "failed" as const,
+      failure: makeFailure("failed", "SKU could not be parsed from filename"),
+    };
+  }
+
+  if (!sizeBytes) {
+    return {
+      outcome: "failed" as const,
+      failure: makeFailure("failed", "File size missing"),
+    };
+  }
+
+  if (sizeBytes > PDF_VAULT_DIRECT_UPLOAD_MAX_BYTES) {
+    return {
+      outcome: "skipped" as const,
+      failure: makeFailure(
+        "skipped",
+        `File size exceeds max allowed limit of ${PDF_VAULT_DIRECT_UPLOAD_MAX_BYTES} bytes`
+      ),
+    };
+  }
+
+  const activeDuplicates: any[] = activeDuplicatesBySku.get(skuNormalized) || [];
+  const primaryDuplicate = activeDuplicates.length ? activeDuplicates[0] : null;
+
+  if (activeDuplicates.length && conflictMode === "ignore") {
+    try {
+      await deleteS3ObjectIfExists(uploadKey);
+    } catch {
+      // ignore cleanup failure
+    }
+
+    return {
+      outcome: "skipped" as const,
+      failure: makeFailure("skipped", "Duplicate solved PDF already exists for this SKU"),
+    };
+  }
+
+  try {
+    const sha256Seed = `${uploadKey}:${sizeBytes}:${fileName}:${Date.now()}:${Math.random()}`;
+    const sha256 = crypto.createHash("sha256").update(sha256Seed).digest("hex");
+
+    if (activeDuplicates.length && conflictMode === "replace") {
+      const duplicateIds = toObjectIdStrings(activeDuplicates.map((x: any) => x?._id));
+      if (duplicateIds.length) {
+        await PdfVaultFile.deleteMany({
+          _id: { $in: duplicateIds },
+        });
+      }
+    }
+
+    const created = await createPdfVaultFileRecord({
+      folderId,
+      originalName,
+      s3Bucket: uploadBucket,
+      s3Key: uploadKey,
+      mimeType: "application/pdf",
+      sizeBytes,
+      sha256,
+      uploadedBy,
+    });
+
+    if (
+      activeDuplicates.length &&
+      conflictMode === "replace" &&
+      created?.file?._id &&
+      primaryDuplicate?._id
+    ) {
+      await PdfVaultFile.updateOne(
+        { _id: created.file._id },
+        {
+          $set: {
+            replaceSourceFileId: primaryDuplicate._id,
+          },
+        }
+      );
+    }
+
+    if (activeDuplicates.length && conflictMode === "replace") {
+      const staleKeys = uniqueNonEmptyStrings(activeDuplicates.map((x: any) => x?.s3Key)).filter(
+        (key) => key !== safeStr(uploadKey)
+      );
+
+      for (const staleKey of staleKeys) {
+        try {
+          await deleteS3ObjectIfExists(staleKey);
+        } catch {
+          // ignore cleanup failure
+        }
+      }
+
+      activeDuplicatesBySku.set(skuNormalized, []);
+    } else {
+      activeDuplicatesBySku.set(skuNormalized, [created?.file].filter(Boolean));
+    }
+
+    let officialDeleted = false;
+    if (liveOfficialPaperSkuSet.has(skuNormalized)) {
+      const officialPaperCleanup = await removeActiveOfficialPaperForSku(skuNormalized);
+      if (officialPaperCleanup.deleted) {
+        officialDeleted = true;
+      }
+      liveOfficialPaperSkuSet.delete(skuNormalized);
+    }
+
+    const availabilitySync: any = await syncProductAvailabilityBySku(skuNormalized);
+    void availabilitySync;
+
+    let matchedProduct = false;
+    let notifiedProduct = false;
+
+    if (created?.attachResult?.matched && created?.attachResult?.productId) {
+      matchedProduct = true;
+
+      const productId = safeStr(created.attachResult.productId);
+      if (productId && !notifiedProductIds.has(productId)) {
+        notifiedProductIds.add(productId);
+        try {
+          await notifyReadyForPaidOnDemandOrders(productId);
+          notifiedProduct = true;
+        } catch (err) {
+          console.error("READY_EMAIL_NOTIFY_FAILED:", err);
+        }
+      }
+    }
+
+    return {
+      outcome: activeDuplicates.length && conflictMode === "replace" ? ("replaced" as const) : ("uploaded" as const),
+      matchedProduct,
+      notifiedProduct,
+      officialDeleted,
+    };
+  } catch (err: any) {
+    try {
+      await deleteS3ObjectIfExists(uploadKey);
+    } catch {
+      // ignore cleanup failure
+    }
+
+    return {
+      outcome: "failed" as const,
+      failure: makeFailure("failed", safeStr(err?.message || "Finalize failed")),
+    };
+  }
+}
+
 export async function processBulkSolvedPdfsJobBatch(args: {
   job: any;
   batchNumber: number;
@@ -393,7 +717,6 @@ export async function processBulkSolvedPdfsJobBatch(args: {
     }
 
     const activeDuplicates: any[] = activeDuplicatesBySku.get(skuNormalized) || [];
-    const primaryDuplicate = activeDuplicates.length ? activeDuplicates[0] : null;
 
     if (activeDuplicates.length && config.conflictMode === "ignore") {
       batchSkippedFiles++;
@@ -431,7 +754,6 @@ export async function processBulkSolvedPdfsJobBatch(args: {
 
       if (activeDuplicates.length && config.conflictMode === "replace") {
         const duplicateIds = toObjectIdStrings(activeDuplicates.map((x: any) => x?._id));
-
         if (duplicateIds.length) {
           await PdfVaultFile.deleteMany({
             _id: { $in: duplicateIds },
@@ -454,22 +776,22 @@ export async function processBulkSolvedPdfsJobBatch(args: {
         activeDuplicates.length &&
         config.conflictMode === "replace" &&
         created?.file?._id &&
-        primaryDuplicate?._id
+        activeDuplicates[0]?._id
       ) {
         await PdfVaultFile.updateOne(
           { _id: created.file._id },
           {
             $set: {
-              replaceSourceFileId: primaryDuplicate._id,
+              replaceSourceFileId: activeDuplicates[0]._id,
             },
           }
         );
       }
 
       if (activeDuplicates.length && config.conflictMode === "replace") {
-        const staleKeys = uniqueNonEmptyStrings(
-          activeDuplicates.map((x: any) => x?.s3Key)
-        ).filter((key) => key !== safeStr(uploaded.key));
+        const staleKeys = uniqueNonEmptyStrings(activeDuplicates.map((x: any) => x?.s3Key)).filter(
+          (key) => key !== safeStr(uploaded.key)
+        );
 
         for (const staleKey of staleKeys) {
           try {
@@ -493,6 +815,7 @@ export async function processBulkSolvedPdfsJobBatch(args: {
       }
 
       const availabilitySync: any = await syncProductAvailabilityBySku(skuNormalized);
+      void availabilitySync;
 
       if (created?.attachResult?.matched && created?.attachResult?.productId) {
         batchMatchedProducts++;
@@ -513,45 +836,26 @@ export async function processBulkSolvedPdfsJobBatch(args: {
       } else {
         batchUploadedFiles++;
       }
-
-      void availabilitySync;
     } catch (err: any) {
       batchFailedFiles++;
       pushFailure("failed", safeStr(err?.message || "Upload failed"));
     }
   }
 
-  const nextSummary = {
-    totalFiles: safeNum(currentSummary?.totalFiles, rows.length),
-    validFiles: safeNum(currentSummary?.validFiles, 0) + batchValidFiles,
-    uploadedFiles: safeNum(currentSummary?.uploadedFiles, 0) + batchUploadedFiles,
-    replacedFiles: safeNum(currentSummary?.replacedFiles, 0) + batchReplacedFiles,
-    ignoredFiles: safeNum(currentSummary?.ignoredFiles, 0) + batchIgnoredFiles,
-    skippedFiles: safeNum(currentSummary?.skippedFiles, 0) + batchSkippedFiles,
-    failedFiles: safeNum(currentSummary?.failedFiles, 0) + batchFailedFiles,
-    matchedProducts: safeNum(currentSummary?.matchedProducts, 0) + batchMatchedProducts,
-    officialPapersDeleted:
-      safeNum(currentSummary?.officialPapersDeleted, 0) + batchOfficialPapersDeleted,
-    conflictMode: config.conflictMode,
-    parentPath: config.parentPath,
-    sourceType: "browser-batch",
-    originalSelectionCount: safeNum(
-      currentSummary?.originalSelectionCount,
-      config.originalSelectionCount
-    ),
-    requestedBatchSize: safeNum(
-      currentSummary?.requestedBatchSize,
-      safeNum(job?.meta?.requestedBatchSize, 0)
-    ),
-    effectiveBatchSize: safeNum(
-      currentSummary?.effectiveBatchSize,
-      safeNum(job?.meta?.effectiveBatchSize, 0)
-    ),
-    safeRequestPayloadBytes: safeNum(
-      currentSummary?.safeRequestPayloadBytes,
-      safeNum(job?.meta?.safeRequestPayloadBytes, 0)
-    ),
-  };
+  const nextSummary = buildSummaryPatch({
+    currentSummary,
+    rowsLength: rows.length,
+    config,
+    jobMeta: job?.meta || {},
+    batchValidFiles,
+    batchUploadedFiles,
+    batchReplacedFiles,
+    batchIgnoredFiles,
+    batchSkippedFiles,
+    batchFailedFiles,
+    batchMatchedProducts,
+    batchOfficialPapersDeleted,
+  });
 
   const successDelta = batchUploadedFiles + batchReplacedFiles;
 
@@ -569,5 +873,208 @@ export async function processBulkSolvedPdfsJobBatch(args: {
     failures,
     summaryPatch: nextSummary,
     note: `Batch ${args.batchNumber} processed. Uploaded ${batchUploadedFiles}, Replaced ${batchReplacedFiles}, Skipped ${batchSkippedFiles}, Failed ${batchFailedFiles}.`,
+  } as BulkSolvedPdfsBatchProcessResult;
+}
+
+export async function finalizeBulkSolvedPdfsDirectUploadBatch(args: {
+  job: any;
+  lockToken: string;
+  batchNumber: number;
+  fromIndex: number;
+  toIndex: number;
+  uploadedItems: BulkSolvedPdfsFinalizeItem[];
+}) {
+  await dbConnect();
+  await ensureRootFolder();
+
+  const job = args.job;
+  const config = normalizeBulkSolvedPdfsConfig(job?.config || {});
+  validateBulkSolvedPdfsConfig(config);
+
+  const rows: PreparedSolvedPdfClientRow[] = Array.isArray(job?.input?.rows) ? job.input.rows : [];
+  const batchRows = rows.slice(args.fromIndex, args.toIndex + 1);
+
+  const folder: any = await PdfVaultFolder.findOne({
+    path: config.parentPath,
+    deletedAt: null,
+  });
+
+  if (!folder) {
+    throw new Error("Target solved PDFs folder not found");
+  }
+
+  const currentSummary = job?.summary || {};
+  const uploadedItems = Array.isArray(args.uploadedItems) ? args.uploadedItems : [];
+
+  const uploadedItemByIndex = new Map<number, BulkSolvedPdfsFinalizeItem>();
+  for (const item of uploadedItems) {
+    uploadedItemByIndex.set(Number(item?.itemIndex), item);
+  }
+
+  const firstIndexBySku = new Map<string, number>();
+  for (let i = 0; i < rows.length; i++) {
+    const sku = safeStr(rows[i]?.skuNormalized).toUpperCase();
+    if (!sku) continue;
+    if (!firstIndexBySku.has(sku)) {
+      firstIndexBySku.set(sku, i);
+    }
+  }
+
+  const batchSkuList = uniqueNonEmptyStrings(
+    batchRows.map((row) => safeStr(row?.skuNormalized).toUpperCase())
+  );
+
+  const activeDuplicatesBySku = await prefetchActiveDuplicatesBySku(batchSkuList);
+  const liveOfficialPaperSkuSet = await prefetchLiveOfficialPaperSkuSet(batchSkuList);
+
+  let batchValidFiles = 0;
+  let batchUploadedFiles = 0;
+  let batchReplacedFiles = 0;
+  let batchIgnoredFiles = 0;
+  let batchSkippedFiles = 0;
+  let batchFailedFiles = 0;
+  let batchMatchedProducts = 0;
+  let batchOfficialPapersDeleted = 0;
+
+  const failures: BulkSolvedPdfsBatchProcessResult["failures"] = [];
+  const notifiedProductIds = new Set<string>();
+
+  for (let idx = 0; idx < batchRows.length; idx++) {
+    const row = batchRows[idx];
+    const itemIndex = args.fromIndex + idx;
+    const rowNumber = Number(row?.rowNumber || itemIndex + 1);
+    const fileName = safeStr(row?.fileName);
+    const skuNormalized = safeStr(row?.skuNormalized).toUpperCase();
+
+    const pushFailure = (status: string, reason: string) => {
+      failures.push({
+        itemIndex,
+        rowNumber,
+        batchNumber: args.batchNumber,
+        identifier: fileName || skuNormalized || `row-${rowNumber}`,
+        sku: skuNormalized,
+        fileName,
+        status,
+        reason,
+        raw: row,
+      });
+    };
+
+    const firstIndex = firstIndexBySku.get(skuNormalized);
+    if (typeof firstIndex === "number" && firstIndex !== itemIndex) {
+      batchSkippedFiles++;
+      batchIgnoredFiles++;
+      pushFailure(
+        "skipped",
+        "Duplicate SKU repeated in same selection. Only first occurrence processed."
+      );
+      continue;
+    }
+
+    const uploadedItem = uploadedItemByIndex.get(itemIndex);
+    if (!uploadedItem) {
+      batchFailedFiles++;
+      pushFailure("failed", "Uploaded batch item missing during finalize");
+      continue;
+    }
+
+    if (safeStr(uploadedItem?.fileName) !== fileName) {
+      batchFailedFiles++;
+      pushFailure("failed", "Uploaded item filename mismatch during finalize");
+      continue;
+    }
+
+    if (uploadedItem?.status === "skipped") {
+      batchSkippedFiles++;
+      batchIgnoredFiles++;
+      pushFailure("skipped", safeStr(uploadedItem?.reason || "Skipped before upload"));
+      continue;
+    }
+
+    if (uploadedItem?.status === "failed") {
+      batchFailedFiles++;
+      pushFailure("failed", safeStr(uploadedItem?.reason || "Upload failed"));
+      continue;
+    }
+
+    const finalizeResult = await finalizeSingleUploadedPdf({
+      row,
+      itemIndex,
+      batchNumber: args.batchNumber,
+      folderId: String(folder._id),
+      uploadedBy: safeStr(job?.createdBy),
+      conflictMode: config.conflictMode,
+      uploadedItem,
+      activeDuplicatesBySku,
+      liveOfficialPaperSkuSet,
+      notifiedProductIds,
+    });
+
+    if (finalizeResult.outcome === "uploaded") {
+      batchValidFiles++;
+      batchUploadedFiles++;
+      if (finalizeResult.matchedProduct) batchMatchedProducts++;
+      if (finalizeResult.officialDeleted) batchOfficialPapersDeleted++;
+      continue;
+    }
+
+    if (finalizeResult.outcome === "replaced") {
+      batchValidFiles++;
+      batchReplacedFiles++;
+      if (finalizeResult.matchedProduct) batchMatchedProducts++;
+      if (finalizeResult.officialDeleted) batchOfficialPapersDeleted++;
+      continue;
+    }
+
+    if (finalizeResult.outcome === "skipped") {
+      batchSkippedFiles++;
+      batchIgnoredFiles++;
+      if (finalizeResult.failure) {
+        failures.push(finalizeResult.failure);
+      }
+      continue;
+    }
+
+    batchFailedFiles++;
+    if (finalizeResult.failure) {
+      failures.push(finalizeResult.failure);
+    }
+  }
+
+  const nextSummary = buildSummaryPatch({
+    currentSummary,
+    rowsLength: rows.length,
+    config,
+    jobMeta: {
+      ...(job?.meta || {}),
+      sourceType: "direct-to-s3",
+      maxDirectUploadBytes: PDF_VAULT_DIRECT_UPLOAD_MAX_BYTES,
+    },
+    batchValidFiles,
+    batchUploadedFiles,
+    batchReplacedFiles,
+    batchIgnoredFiles,
+    batchSkippedFiles,
+    batchFailedFiles,
+    batchMatchedProducts,
+    batchOfficialPapersDeleted,
+  });
+
+  const successDelta = batchUploadedFiles + batchReplacedFiles;
+
+  return {
+    processedDelta: batchRows.length,
+    successDelta,
+    failedDelta: batchFailedFiles,
+    skippedDelta: batchSkippedFiles,
+    validDelta: batchValidFiles,
+    nextLastProcessedIndex: args.toIndex,
+    batchNumber: args.batchNumber,
+    fromIndex: args.fromIndex,
+    toIndex: args.toIndex,
+    attempted: batchRows.length,
+    failures,
+    summaryPatch: nextSummary,
+    note: `Batch ${args.batchNumber} finalized. Uploaded ${batchUploadedFiles}, Replaced ${batchReplacedFiles}, Skipped ${batchSkippedFiles}, Failed ${batchFailedFiles}.`,
   } as BulkSolvedPdfsBatchProcessResult;
 }

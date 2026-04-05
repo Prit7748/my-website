@@ -170,15 +170,6 @@ type StageMultipartResponse = {
   error?: string;
 };
 
-type SelectedPdfTracker = {
-  clientFileId: string;
-  name: string;
-  size: number;
-  status: "queued" | "uploading" | "staged" | "failed";
-  blockNumber: number;
-  reason?: string;
-};
-
 function formatBytes(bytes: number) {
   const n = Number(bytes || 0);
   if (n < 1024) return `${n} B`;
@@ -295,11 +286,9 @@ export default function OfficialPapersPage() {
 
   const [conflictMode, setConflictMode] = useState<"ignore" | "replace">("ignore");
   const [batchSize, setBatchSize] = useState(100);
-  const [uploadBlockSize, setUploadBlockSize] = useState(5);
+  const [uploadBlockSize, setUploadBlockSize] = useState(100);
 
   const [selectedPdfFiles, setSelectedPdfFiles] = useState<File[]>([]);
-  const [selectedTrackers, setSelectedTrackers] = useState<SelectedPdfTracker[]>([]);
-  const [stagedItems, setStagedItems] = useState<DirectStagedItem[]>([]);
   const [isStaging, setIsStaging] = useState(false);
   const [creatingJob, setCreatingJob] = useState(false);
   const [currentBlockNumber, setCurrentBlockNumber] = useState(0);
@@ -308,6 +297,7 @@ export default function OfficialPapersPage() {
   const [currentBlockLoadedBytes, setCurrentBlockLoadedBytes] = useState(0);
   const [completedBlockBytes, setCompletedBlockBytes] = useState(0);
   const [currentBlockLabel, setCurrentBlockLabel] = useState("");
+  const [currentBlockFileCount, setCurrentBlockFileCount] = useState(0);
   const [stagingAbortEnabled, setStagingAbortEnabled] = useState(false);
 
   const [activeJob, setActiveJob] = useState<BulkJobState | null>(null);
@@ -350,21 +340,6 @@ export default function OfficialPapersPage() {
     return Math.min(100, Math.round((totalDone / selectedPdfTotalBytes) * 100));
   }, [selectedPdfTotalBytes, completedBlockBytes, currentBlockLoadedBytes]);
 
-  const stagedCount = useMemo(
-    () => selectedTrackers.filter((item) => item.status === "staged").length,
-    [selectedTrackers]
-  );
-
-  const failedStageCount = useMemo(
-    () => selectedTrackers.filter((item) => item.status === "failed").length,
-    [selectedTrackers]
-  );
-
-  const currentBlockTrackers = useMemo(() => {
-    if (!currentBlockNumber) return [];
-    return selectedTrackers.filter((item) => item.blockNumber === currentBlockNumber);
-  }, [selectedTrackers, currentBlockNumber]);
-
   function resetMessages() {
     setServerMessage("");
     setServerMessageType("info");
@@ -377,8 +352,6 @@ export default function OfficialPapersPage() {
   }
 
   function resetStageState(keepSelection = true) {
-    setSelectedTrackers([]);
-    setStagedItems([]);
     setIsStaging(false);
     setCurrentBlockNumber(0);
     setCurrentBlockTotal(0);
@@ -386,6 +359,7 @@ export default function OfficialPapersPage() {
     setCurrentBlockLoadedBytes(0);
     setCompletedBlockBytes(0);
     setCurrentBlockLabel("");
+    setCurrentBlockFileCount(0);
     setStagingAbortEnabled(false);
     currentUploadXhrRef.current = null;
     stagingCancelledRef.current = false;
@@ -563,75 +537,31 @@ export default function OfficialPapersPage() {
     return Array.from(uniqueMap.values());
   }
 
-  function createInitialTrackers(filesToUse: File[]) {
-    return filesToUse.map((file, index) => ({
-      clientFileId: buildClientFileId(file, index),
-      name: file.name,
-      size: Number(file.size || 0),
-      status: "queued" as const,
-      blockNumber: Math.floor(index / Math.max(1, uploadBlockSize)) + 1,
-    }));
-  }
-
-  function setTrackerStatusForIds(
-    clientIds: string[],
-    status: SelectedPdfTracker["status"],
-    reasonMap?: Record<string, string>
-  ) {
-    setSelectedTrackers((prev) =>
-      prev.map((item) => {
-        if (!clientIds.includes(item.clientFileId)) return item;
-        return {
-          ...item,
-          status,
-          reason: reasonMap?.[item.clientFileId] || item.reason,
-        };
-      })
-    );
-  }
-
-  function markTrackerFailures(failures: StageFailureItem[]) {
-    if (!failures.length) return;
-
-    const reasonMap: Record<string, string> = {};
-    const failIds: string[] = [];
-
-    for (const item of failures) {
-      const id = safeText(item.clientFileId);
-      if (!id) continue;
-      failIds.push(id);
-      reasonMap[id] = safeText(item.reason || "Stage upload failed");
-    }
-
-    if (!failIds.length) return;
-    setTrackerStatusForIds(failIds, "failed", reasonMap);
-  }
-
   function uploadBlockViaServer(args: {
     blockNumber: number;
     totalBlocks: number;
     files: File[];
-    trackers: SelectedPdfTracker[];
     blockBytes: number;
+    globalStartIndex: number;
   }) {
     return new Promise<StageMultipartResponse>((resolve, reject) => {
       const xhr = new XMLHttpRequest();
       currentUploadXhrRef.current = xhr;
 
       const formData = new FormData();
-      for (const file of args.files) {
+      args.files.forEach((file) => {
         formData.append("files", file);
-      }
+      });
 
       formData.append("blockNumber", String(args.blockNumber));
       formData.append("totalBlocks", String(args.totalBlocks));
       formData.append(
         "meta",
         JSON.stringify(
-          args.trackers.map((tracker, index) => ({
-            clientFileId: tracker.clientFileId,
-            originalName: args.files[index]?.name || tracker.name,
-            fileName: args.files[index]?.name || tracker.name,
+          args.files.map((file, index) => ({
+            clientFileId: buildClientFileId(file, args.globalStartIndex + index),
+            originalName: file.name,
+            fileName: file.name,
           }))
         )
       );
@@ -700,15 +630,12 @@ export default function OfficialPapersPage() {
     setIsStaging(true);
     resetMessages();
     resetJobState();
-    setStagedItems([]);
     setCompletedBlockBytes(0);
     setCurrentBlockLoadedBytes(0);
     setCurrentBlockPercent(0);
     setCurrentBlockLabel("");
+    setCurrentBlockFileCount(0);
     stagingCancelledRef.current = false;
-
-    const initialTrackers = createInitialTrackers(usableFiles);
-    setSelectedTrackers(initialTrackers);
 
     try {
       const totalBlocks = Math.max(
@@ -719,6 +646,7 @@ export default function OfficialPapersPage() {
 
       const allStagedItems: DirectStagedItem[] = [];
       let completedBytesAccumulator = 0;
+      let stageFailedCount = 0;
 
       for (let blockIndex = 0; blockIndex < totalBlocks; blockIndex++) {
         if (stagingCancelledRef.current) {
@@ -732,21 +660,19 @@ export default function OfficialPapersPage() {
         );
 
         const blockFiles = usableFiles.slice(start, end);
-        const blockTrackers = initialTrackers.slice(start, end);
         const blockBytes = blockFiles.reduce(
           (sum, file) => sum + Number(file.size || 0),
           0
         );
-        const blockIds = blockTrackers.map((item) => item.clientFileId);
 
         const blockNumber = blockIndex + 1;
 
         setCurrentBlockNumber(blockNumber);
         setCurrentBlockLoadedBytes(0);
         setCurrentBlockPercent(0);
+        setCurrentBlockFileCount(blockFiles.length);
         setCurrentBlockLabel(`Block ${blockNumber} / ${totalBlocks}`);
         setStagingAbortEnabled(true);
-        setTrackerStatusForIds(blockIds, "uploading");
 
         let stageData: StageMultipartResponse | null = null;
 
@@ -755,16 +681,11 @@ export default function OfficialPapersPage() {
             blockNumber,
             totalBlocks,
             files: blockFiles,
-            trackers: blockTrackers,
             blockBytes,
+            globalStartIndex: start,
           });
         } catch (error: any) {
-          const reason = safeText(error?.message || "Block upload failed");
-          setTrackerStatusForIds(
-            blockIds,
-            "failed",
-            Object.fromEntries(blockIds.map((id) => [id, reason]))
-          );
+          stageFailedCount += blockFiles.length;
           completedBytesAccumulator += blockBytes;
           setCompletedBlockBytes(completedBytesAccumulator);
           setCurrentBlockLoadedBytes(0);
@@ -777,35 +698,14 @@ export default function OfficialPapersPage() {
         const stagedBlockItems = Array.isArray(stageData?.items) ? stageData.items : [];
         const stageFailures = Array.isArray(stageData?.failures) ? stageData.failures : [];
 
-        const stagedIds = stagedBlockItems
-          .map((item) => safeText(item.clientFileId))
-          .filter(Boolean);
-
-        if (stagedIds.length) {
-          setTrackerStatusForIds(stagedIds, "staged");
-        }
-
-        if (stageFailures.length) {
-          markTrackerFailures(stageFailures);
-        }
-
-        const knownFailedIds = stageFailures
-          .map((item) => safeText(item.clientFileId))
-          .filter(Boolean);
-
-        const missingIds = blockIds.filter(
-          (id) => !stagedIds.includes(id) && !knownFailedIds.includes(id)
+        const knownFailureCount = stageFailures.length;
+        const missingCount = Math.max(
+          0,
+          blockFiles.length - stagedBlockItems.length - knownFailureCount
         );
 
-        if (missingIds.length) {
-          const missingReasonMap = Object.fromEntries(
-            missingIds.map((id) => [id, "Stage verification missing for this file"])
-          );
-          setTrackerStatusForIds(missingIds, "failed", missingReasonMap);
-        }
-
+        stageFailedCount += knownFailureCount + missingCount;
         allStagedItems.push(...stagedBlockItems);
-        setStagedItems([...allStagedItems]);
 
         completedBytesAccumulator += blockBytes;
         setCompletedBlockBytes(completedBytesAccumulator);
@@ -814,7 +714,7 @@ export default function OfficialPapersPage() {
       }
 
       if (!allStagedItems.length) {
-        throw new Error("Koi bhi PDF successfully stage nahi ho paayi");
+        throw new Error("Koi bhi PDF successfully block upload nahi ho paayi");
       }
 
       const createJobRes = await fetch("/api/admin/official-papers/jobs", {
@@ -843,7 +743,9 @@ export default function OfficialPapersPage() {
       finalRefreshDoneRef.current = false;
 
       setServerMessage(
-        `Official papers upload job started. ${allStagedItems.length} PDFs staged successfully.`
+        stageFailedCount > 0
+          ? `Official papers upload job started. ${allStagedItems.length} PDFs block upload ho gayi, ${stageFailedCount} PDFs stage nahi ho paayi.`
+          : `Official papers upload job started. ${allStagedItems.length} PDFs block upload successfully queue ho gayi.`
       );
       setServerMessageType("success");
 
@@ -866,7 +768,7 @@ export default function OfficialPapersPage() {
   }
 
   function cancelCurrentStaging() {
-    const ok = window.confirm("Current official papers staging cancel karna hai?");
+    const ok = window.confirm("Current official papers block upload cancel karna hai?");
     if (!ok) return;
 
     stagingCancelledRef.current = true;
@@ -1189,8 +1091,8 @@ export default function OfficialPapersPage() {
               <h1 className="text-2xl font-extrabold mt-3">IGNOU Official Papers</h1>
               <p className="text-sm text-slate-600 mt-1">
                 Ye page unsolved question papers ke liye hai. Is flow ko intentionally
-                product PDF vault se alag rakha gaya hai, taki safer server-staged bulk
-                upload ho aur signed-browser-upload wali failure chain remove ho.
+                product PDF vault se alag rakha gaya hai, taki safer block-wise server upload
+                aur batch processing ho sake.
               </p>
             </div>
 
@@ -1460,7 +1362,7 @@ export default function OfficialPapersPage() {
               <div className="flex items-center gap-2">
                 <LoaderCircle size={18} className="animate-spin" />
                 {isStaging
-                  ? "Official papers server-staging chal raha hai. Browser se direct S3 PUT nahi ho raha, isliye ye flow zyada stable rahega."
+                  ? "Official papers block upload chal raha hai. UI sirf block-wise progress dikhayegi taki extra re-render aur unnecessary front-end load kam rahe."
                   : "Batch job running. Inactivity auto-logout temporarily paused hai jab tak job finish nahi hoti."}
               </div>
             </div>
@@ -1488,7 +1390,7 @@ export default function OfficialPapersPage() {
                       Click here to select multiple PDFs
                     </div>
                     <div className="mt-1 text-xs text-sky-700">
-                      Official papers ke liye ZIP flow intentionally remove kar diya gaya hai
+                      Yahan sirf large block upload system rakha gaya hai
                     </div>
                   </div>
                 </label>
@@ -1537,11 +1439,9 @@ export default function OfficialPapersPage() {
                   className="w-full mt-3 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none"
                   disabled={showTrash || isLongTaskBusy}
                 >
-                  <option value="1">1 PDF / staging block</option>
-                  <option value="3">3 PDFs / staging block</option>
-                  <option value="5">5 PDFs / staging block</option>
-                  <option value="10">10 PDFs / staging block</option>
-                  <option value="20">20 PDFs / staging block</option>
+                  <option value="100">100 PDFs / block</option>
+                  <option value="200">200 PDFs / block</option>
+                  <option value="500">500 PDFs / block</option>
                 </select>
 
                 <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3 text-xs leading-6 text-slate-700">
@@ -1549,9 +1449,11 @@ export default function OfficialPapersPage() {
                   <br />
                   Total Size: <b>{formatBytes(selectedPdfTotalBytes)}</b>
                   <br />
-                  Staging Blocks: <b>{selectedPdfBlockCount}</b>
+                  Upload Blocks: <b>{selectedPdfBlockCount}</b>
                   <br />
-                  Recommended live-safe block size: <b>3 ya 5</b>
+                  Recommended stable block size: <b>100 ya 200</b>
+                  <br />
+                  500 PDFs / block tab choose karo jab files ka combined size manageable ho.
                   <br />
                   Solved PDF already hone par official paper upload auto-skip ho jayegi.
                 </div>
@@ -1585,7 +1487,7 @@ export default function OfficialPapersPage() {
                     className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-rose-600 hover:bg-rose-700 text-white transition font-extrabold shadow-sm"
                   >
                     <PauseCircle size={18} />
-                    Cancel Current Staging
+                    Cancel Current Block Upload
                   </button>
                 ) : null}
 
@@ -1612,7 +1514,7 @@ export default function OfficialPapersPage() {
                 </div>
 
                 <div className="mt-2 text-xs font-semibold text-blue-900">
-                  Total staging progress: {totalStagePercent}% ({stagedCount} staged / {selectedPdfFiles.length} selected)
+                  Total block upload progress: {totalStagePercent}%
                 </div>
 
                 <div className="mt-4 grid grid-cols-2 gap-3">
@@ -1634,77 +1536,41 @@ export default function OfficialPapersPage() {
                       {currentBlockPercent}%
                     </div>
                     <div className="mt-1 text-xs text-slate-600">
-                      {formatBytes(completedBlockBytes + currentBlockLoadedBytes)} / {formatBytes(selectedPdfTotalBytes)}
+                      {formatBytes(completedBlockBytes + currentBlockLoadedBytes)} /{" "}
+                      {formatBytes(selectedPdfTotalBytes)}
                     </div>
                   </div>
 
                   <div className="rounded-xl border border-blue-200 bg-white p-3">
                     <div className="text-[11px] uppercase font-extrabold text-blue-700">
-                      Staged Files
+                      Current Block Files
                     </div>
-                    <div className="mt-1 text-sm font-extrabold text-slate-900">{stagedCount}</div>
+                    <div className="mt-1 text-sm font-extrabold text-slate-900">
+                      {currentBlockFileCount || 0}
+                    </div>
                   </div>
 
                   <div className="rounded-xl border border-blue-200 bg-white p-3">
                     <div className="text-[11px] uppercase font-extrabold text-blue-700">
-                      Failed Stage
+                      Total Blocks
                     </div>
-                    <div className="mt-1 text-sm font-extrabold text-slate-900">{failedStageCount}</div>
+                    <div className="mt-1 text-sm font-extrabold text-slate-900">
+                      {currentBlockTotal || selectedPdfBlockCount || 0}
+                    </div>
                   </div>
                 </div>
 
-                <div className="mt-4 rounded-xl border border-blue-200 bg-white p-3">
-                  <div className="text-xs font-extrabold text-blue-900 mb-2">
-                    Current Block PDFs
-                  </div>
-
-                  {currentBlockTrackers.length === 0 ? (
-                    <div className="text-xs text-slate-500">No active block yet.</div>
-                  ) : (
-                    <div className="space-y-2 max-h-56 overflow-auto">
-                      {currentBlockTrackers.map((item) => (
-                        <div
-                          key={item.clientFileId}
-                          className="flex items-center justify-between gap-3 rounded-xl border border-slate-200 px-3 py-2"
-                        >
-                          <div className="min-w-0">
-                            <div className="text-xs font-bold text-slate-900 break-all">
-                              {item.name}
-                            </div>
-                            <div className="text-[11px] text-slate-500">
-                              {formatBytes(item.size)}
-                            </div>
-                            {item.reason ? (
-                              <div className="mt-1 text-[11px] text-rose-600 break-words">
-                                {item.reason}
-                              </div>
-                            ) : null}
-                          </div>
-
-                          <span
-                            className={`inline-flex rounded-full px-2 py-1 text-[11px] font-extrabold ${
-                              item.status === "staged"
-                                ? "bg-emerald-100 text-emerald-800"
-                                : item.status === "failed"
-                                ? "bg-rose-100 text-rose-800"
-                                : item.status === "uploading"
-                                ? "bg-blue-100 text-blue-800"
-                                : "bg-slate-100 text-slate-700"
-                            }`}
-                          >
-                            {item.status}
-                          </span>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                <div className="mt-4 rounded-xl border border-blue-200 bg-white p-3 text-xs leading-6 text-slate-700">
+                  Yahan per-file <b>Staged Files</b> aur <b>Failed Stage</b> tracker intentionally
+                  hata diya gaya hai. Ab UI sirf large block-wise progress dikhayegi, jisse extra re-render
+                  aur unnecessary front-end load kam rahega.
                 </div>
               </div>
 
               <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900 leading-6">
-                <b>New stable flow:</b> PDFs select karo → small server staging blocks me upload hoga →
-                staged rows verify hongi → bulk job create hogi → batches process honge. ZIP fallback aur
-                browser signed-upload flow dono intentionally remove kar diye gaye hain.
+                <b>Current upload flow:</b> PDFs select karo → 100/200/500 ke large blocks me upload hoga →
+                direct bulk job create hogi → batches process honge. Per-file staged/failed stage UI remove kar
+                di gayi hai.
               </div>
 
               <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-xs text-emerald-900 leading-6">
@@ -2170,7 +2036,9 @@ export default function OfficialPapersPage() {
               ) : null}
 
               <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900 leading-6">
-                <b>Current status:</b> Official papers upload me ab ZIP option remove ho chuka hai aur job create hone se pehle safer server staging hoti hai. Isse future me signed upload/CORS type issues ka chance bahut kam ho jayega.
+                <b>Current status:</b> Official papers upload me ab UI sirf large block upload system dikhati hai.
+                Staged Files aur Failed Stage wale extra front-end trackers hata diye gaye hain, jabki backend
+                batch processing aur failure logs same tarah safe rahenge.
               </div>
             </div>
           </div>
