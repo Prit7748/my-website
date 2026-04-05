@@ -133,6 +133,14 @@ function mergeSummary(current: any, patch: any) {
   return base;
 }
 
+function overwriteSummary(current: any, patch: any) {
+  const base =
+    current && typeof current === "object" && !Array.isArray(current) ? { ...current } : {};
+  const next =
+    patch && typeof patch === "object" && !Array.isArray(patch) ? patch : {};
+  return { ...base, ...next };
+}
+
 function computeFinalStatus(args: {
   totalItems: number;
   processedItems: number;
@@ -141,6 +149,22 @@ function computeFinalStatus(args: {
   if (args.totalItems <= 0) return "completed" as BulkJobStatus;
   if (args.processedItems < args.totalItems) return "running" as BulkJobStatus;
   return args.failedItems > 0 ? "completed_with_errors" : "completed";
+}
+
+function buildRunningMessage(args: {
+  note?: string;
+  existingMessage?: string;
+  finalStatus: BulkJobStatus;
+}) {
+  if (args.finalStatus === "completed") {
+    return "Bulk job completed successfully.";
+  }
+
+  if (args.finalStatus === "completed_with_errors") {
+    return "Bulk job completed with some failed items.";
+  }
+
+  return safeStr(args.note || args.existingMessage || "");
 }
 
 export function isFinalBulkJobStatus(status: string) {
@@ -348,9 +372,9 @@ export async function updateBulkUploadJobInput(args: {
     return job;
   }
 
-  const nextInput = mergeSummary(job.input || {}, args.inputPatch || {});
-  const nextMeta = mergeSummary(job.meta || {}, args.metaPatch || {});
-  const nextConfig = mergeSummary(job.config || {}, args.configPatch || {});
+  const nextInput = overwriteSummary(job.input || {}, args.inputPatch || {});
+  const nextMeta = overwriteSummary(job.meta || {}, args.metaPatch || {});
+  const nextConfig = overwriteSummary(job.config || {}, args.configPatch || {});
   const nextSummary = mergeSummary(job.summary || {}, args.summaryPatch || {});
 
   const updated: any = await BulkUploadJob.findOneAndUpdate(
@@ -540,12 +564,11 @@ export async function appendBulkUploadJobProgress(args: BulkJobAppendProgressArg
           nextStatus === "completed" || nextStatus === "completed_with_errors"
             ? new Date()
             : null,
-        resultMessage:
-          nextStatus === "completed"
-            ? "Bulk job completed successfully."
-            : nextStatus === "completed_with_errors"
-            ? "Bulk job completed with some failed items."
-            : safeStr(args.note || job?.resultMessage || ""),
+        resultMessage: buildRunningMessage({
+          note: args.note,
+          existingMessage: job?.resultMessage,
+          finalStatus: nextStatus,
+        }),
         "progress.currentBatchNumber": safeBatchNumber,
         "progress.lastProcessedIndex": safeToIndex,
         lastBatch: {
@@ -556,7 +579,10 @@ export async function appendBulkUploadJobProgress(args: BulkJobAppendProgressArg
           success: successDelta,
           failed: failedDelta,
           skipped: skippedDelta,
-          startedAt: asDateOrNull(args.startedAt) || heartbeatAt,
+          startedAt:
+            asDateOrNull(args.startedAt) ||
+            asDateOrNull(job?.lastBatch?.startedAt) ||
+            heartbeatAt,
           endedAt: heartbeatAt,
           note: safeStr(args.note),
         },
@@ -603,7 +629,7 @@ export async function finalizeBulkUploadJob(args: {
   const totalItems = safeNum(job?.progress?.totalItems, 0);
   const processedItems = safeNum(job?.progress?.processedItems, 0);
   const failedItems = safeNum(job?.progress?.failedItems, 0);
-  const nextSummary = mergeSummary(job.summary || {}, args.summaryPatch || {});
+  const nextSummary = overwriteSummary(job.summary || {}, args.summaryPatch || {});
 
   const finalStatus: BulkJobStatus =
     processedItems >= totalItems
@@ -770,11 +796,8 @@ export async function completeBulkUploadJobBatch(args: {
       : "running";
 
   const cleanFailures = sanitizeFailures(args.failures || []);
-
-  const nextSummary =
-    args.summaryPatch && typeof args.summaryPatch === "object"
-      ? { ...(job.summary || {}), ...args.summaryPatch }
-      : job.summary || {};
+  const nextSummary = overwriteSummary(job.summary || {}, args.summaryPatch || {});
+  const now = new Date();
 
   const updated: any = await BulkUploadJob.findOneAndUpdate(
     {
@@ -806,22 +829,21 @@ export async function completeBulkUploadJobBatch(args: {
           success: successDelta,
           failed: failedDelta,
           skipped: skippedDelta,
-          startedAt: job?.lastHeartbeatAt || new Date(),
-          endedAt: new Date(),
+          startedAt: asDateOrNull(job?.lastBatch?.startedAt) || job?.lastHeartbeatAt || now,
+          endedAt: now,
           note: safeStr(args.note),
         },
-        resultMessage:
-          finalStatus === "completed"
-            ? "Bulk job completed successfully."
-            : finalStatus === "completed_with_errors"
-            ? "Bulk job completed with some failed items."
-            : safeStr(job?.resultMessage),
+        resultMessage: buildRunningMessage({
+          note: args.note,
+          existingMessage: job?.resultMessage,
+          finalStatus,
+        }),
         lockToken: "",
         lockExpiresAt: null,
-        lastHeartbeatAt: new Date(),
+        lastHeartbeatAt: now,
         completedAt:
           finalStatus === "completed" || finalStatus === "completed_with_errors"
-            ? new Date()
+            ? now
             : null,
       },
       ...(cleanFailures.length

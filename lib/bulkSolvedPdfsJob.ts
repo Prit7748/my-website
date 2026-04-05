@@ -86,6 +86,10 @@ function uniqueNonEmptyStrings(values: any[]) {
   return Array.from(new Set(values.map((x) => safeStr(x)).filter(Boolean)));
 }
 
+function toObjectIdStrings(values: any[]) {
+  return uniqueNonEmptyStrings(values).filter(Boolean);
+}
+
 async function deleteS3ObjectIfExists(s3Key: string) {
   const key = safeStr(s3Key);
   if (!key) return;
@@ -102,39 +106,11 @@ async function deleteS3ObjectIfExists(s3Key: string) {
   );
 }
 
-async function findActiveDuplicatesBySku(skuNormalized: string) {
-  const sku = safeStr(skuNormalized).toUpperCase();
-  if (!sku) return [];
-
-  await dbConnect();
-
-  const rows: any[] = await PdfVaultFile.find({
-    skuNormalized: sku,
-    deletedAt: null,
-  })
-    .select({
-      _id: 1,
-      folderId: 1,
-      s3Key: 1,
-      skuNormalized: 1,
-      fileName: 1,
-      originalName: 1,
-      uploadedAt: 1,
-      updatedAt: 1,
-    })
-    .sort({ uploadedAt: -1, _id: -1 })
-    .lean();
-
-  return rows;
-}
-
 async function removeActiveOfficialPaperForSku(skuNormalized: string) {
   const sku = safeStr(skuNormalized).toUpperCase();
   if (!sku) {
     return { deleted: false, fileId: "", s3Key: "" };
   }
-
-  await dbConnect();
 
   const official: any = await OfficialPaper.findOne({
     skuNormalized: sku,
@@ -169,12 +145,7 @@ async function notifyReadyForPaidOnDemandOrders(productId: string) {
   const pid = safeStr(productId);
   if (!pid) return;
 
-  await dbConnect();
-
-  const product: any = await Product.findById(pid)
-    .select("availability title")
-    .lean();
-
+  const product: any = await Product.findById(pid).select("availability title").lean();
   if (!product) return;
 
   const now = new Date();
@@ -204,7 +175,8 @@ export function normalizeBulkSolvedPdfsConfig(input: any): BulkSolvedPdfsJobConf
   const parentPath = cleanFolderPath(safeStr(input?.parentPath || "root")) || "root";
 
   return {
-    conflictMode: safeStr(input?.conflictMode).toLowerCase() === "replace" ? "replace" : "ignore",
+    conflictMode:
+      safeStr(input?.conflictMode).toLowerCase() === "replace" ? "replace" : "ignore",
     parentPath,
     originalSelectionCount: Math.max(0, Math.trunc(Number(input?.originalSelectionCount || 0))),
   };
@@ -247,6 +219,54 @@ export function prepareSolvedPdfRowsFromClientFiles(inputRows: any[]) {
   return rows;
 }
 
+async function prefetchActiveDuplicatesBySku(skus: string[]) {
+  const safeSkus = uniqueNonEmptyStrings(skus.map((x) => safeStr(x).toUpperCase()));
+  if (!safeSkus.length) return new Map<string, any[]>();
+
+  const rows: any[] = await PdfVaultFile.find({
+    skuNormalized: { $in: safeSkus },
+    deletedAt: null,
+  })
+    .select({
+      _id: 1,
+      folderId: 1,
+      s3Key: 1,
+      skuNormalized: 1,
+      fileName: 1,
+      originalName: 1,
+      uploadedAt: 1,
+      updatedAt: 1,
+    })
+    .sort({ uploadedAt: -1, _id: -1 })
+    .lean();
+
+  const out = new Map<string, any[]>();
+
+  for (const row of rows) {
+    const sku = safeStr(row?.skuNormalized).toUpperCase();
+    if (!sku) continue;
+    const list = out.get(sku) || [];
+    list.push(row);
+    out.set(sku, list);
+  }
+
+  return out;
+}
+
+async function prefetchLiveOfficialPaperSkuSet(skus: string[]) {
+  const safeSkus = uniqueNonEmptyStrings(skus.map((x) => safeStr(x).toUpperCase()));
+  if (!safeSkus.length) return new Set<string>();
+
+  const rows: Array<{ skuNormalized?: string }> = await OfficialPaper.find({
+    skuNormalized: { $in: safeSkus },
+    deletedAt: null,
+  })
+    .select({ skuNormalized: 1 })
+    .lean();
+
+  return new Set(rows.map((row) => safeStr(row?.skuNormalized).toUpperCase()).filter(Boolean));
+}
+
 export async function processBulkSolvedPdfsJobBatch(args: {
   job: any;
   batchNumber: number;
@@ -285,6 +305,13 @@ export async function processBulkSolvedPdfsJobBatch(args: {
     }
   }
 
+  const batchSkuList = uniqueNonEmptyStrings(
+    batchRows.map((row) => safeStr(row?.skuNormalized).toUpperCase())
+  );
+
+  const activeDuplicatesBySku = await prefetchActiveDuplicatesBySku(batchSkuList);
+  const liveOfficialPaperSkuSet = await prefetchLiveOfficialPaperSkuSet(batchSkuList);
+
   let batchValidFiles = 0;
   let batchUploadedFiles = 0;
   let batchReplacedFiles = 0;
@@ -295,6 +322,7 @@ export async function processBulkSolvedPdfsJobBatch(args: {
   let batchOfficialPapersDeleted = 0;
 
   const failures: BulkSolvedPdfsBatchProcessResult["failures"] = [];
+  const notifiedProductIds = new Set<string>();
 
   for (let idx = 0; idx < batchRows.length; idx++) {
     const row = batchRows[idx];
@@ -357,11 +385,14 @@ export async function processBulkSolvedPdfsJobBatch(args: {
     if (typeof firstIndex === "number" && firstIndex !== itemIndex) {
       batchSkippedFiles++;
       batchIgnoredFiles++;
-      pushFailure("skipped", "Duplicate SKU repeated in same selection. Only first occurrence processed.");
+      pushFailure(
+        "skipped",
+        "Duplicate SKU repeated in same selection. Only first occurrence processed."
+      );
       continue;
     }
 
-    const activeDuplicates: any[] = await findActiveDuplicatesBySku(skuNormalized);
+    const activeDuplicates: any[] = activeDuplicatesBySku.get(skuNormalized) || [];
     const primaryDuplicate = activeDuplicates.length ? activeDuplicates[0] : null;
 
     if (activeDuplicates.length && config.conflictMode === "ignore") {
@@ -399,11 +430,13 @@ export async function processBulkSolvedPdfsJobBatch(args: {
       });
 
       if (activeDuplicates.length && config.conflictMode === "replace") {
-        const duplicateIds = activeDuplicates.map((x: any) => x._id);
+        const duplicateIds = toObjectIdStrings(activeDuplicates.map((x: any) => x?._id));
 
-        await PdfVaultFile.deleteMany({
-          _id: { $in: duplicateIds },
-        });
+        if (duplicateIds.length) {
+          await PdfVaultFile.deleteMany({
+            _id: { $in: duplicateIds },
+          });
+        }
       }
 
       const created = await createPdfVaultFileRecord({
@@ -445,22 +478,33 @@ export async function processBulkSolvedPdfsJobBatch(args: {
             // ignore cleanup failure
           }
         }
+
+        activeDuplicatesBySku.set(skuNormalized, []);
+      } else {
+        activeDuplicatesBySku.set(skuNormalized, [created?.file].filter(Boolean));
       }
 
-      const officialPaperCleanup = await removeActiveOfficialPaperForSku(skuNormalized);
+      if (liveOfficialPaperSkuSet.has(skuNormalized)) {
+        const officialPaperCleanup = await removeActiveOfficialPaperForSku(skuNormalized);
+        if (officialPaperCleanup.deleted) {
+          batchOfficialPapersDeleted++;
+        }
+        liveOfficialPaperSkuSet.delete(skuNormalized);
+      }
+
       const availabilitySync: any = await syncProductAvailabilityBySku(skuNormalized);
-
-      if (officialPaperCleanup.deleted) {
-        batchOfficialPapersDeleted++;
-      }
 
       if (created?.attachResult?.matched && created?.attachResult?.productId) {
         batchMatchedProducts++;
 
-        try {
-          await notifyReadyForPaidOnDemandOrders(String(created.attachResult.productId));
-        } catch (err) {
-          console.error("READY_EMAIL_NOTIFY_FAILED:", err);
+        const productId = safeStr(created.attachResult.productId);
+        if (productId && !notifiedProductIds.has(productId)) {
+          notifiedProductIds.add(productId);
+          try {
+            await notifyReadyForPaidOnDemandOrders(productId);
+          } catch (err) {
+            console.error("READY_EMAIL_NOTIFY_FAILED:", err);
+          }
         }
       }
 
@@ -494,6 +538,18 @@ export async function processBulkSolvedPdfsJobBatch(args: {
     originalSelectionCount: safeNum(
       currentSummary?.originalSelectionCount,
       config.originalSelectionCount
+    ),
+    requestedBatchSize: safeNum(
+      currentSummary?.requestedBatchSize,
+      safeNum(job?.meta?.requestedBatchSize, 0)
+    ),
+    effectiveBatchSize: safeNum(
+      currentSummary?.effectiveBatchSize,
+      safeNum(job?.meta?.effectiveBatchSize, 0)
+    ),
+    safeRequestPayloadBytes: safeNum(
+      currentSummary?.safeRequestPayloadBytes,
+      safeNum(job?.meta?.safeRequestPayloadBytes, 0)
     ),
   };
 

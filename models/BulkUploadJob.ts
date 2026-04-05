@@ -222,22 +222,22 @@ const BulkUploadJobSchema = new Schema(
 
     meta: {
       type: Schema.Types.Mixed,
-      default: {},
+      default: () => ({}),
     },
 
     config: {
       type: Schema.Types.Mixed,
-      default: {},
+      default: () => ({}),
     },
 
     input: {
       type: Schema.Types.Mixed,
-      default: {},
+      default: () => ({}),
     },
 
     summary: {
       type: Schema.Types.Mixed,
-      default: {},
+      default: () => ({}),
     },
 
     progress: {
@@ -252,7 +252,7 @@ const BulkUploadJobSchema = new Schema(
 
     failures: {
       type: [FailureRowSchema],
-      default: [],
+      default: () => [],
     },
 
     resultMessage: {
@@ -279,6 +279,7 @@ const BulkUploadJobSchema = new Schema(
     lockExpiresAt: {
       type: Date,
       default: null,
+      index: true,
     },
 
     startedAt: {
@@ -398,11 +399,19 @@ BulkUploadJobSchema.pre("save", function () {
   }));
 });
 
-BulkUploadJobSchema.index({ jobType: 1, status: 1, createdAt: -1 });
-BulkUploadJobSchema.index({ createdBy: 1, status: 1, createdAt: -1 });
-BulkUploadJobSchema.index({ createdAt: -1 });
-BulkUploadJobSchema.index({ completedAt: -1 });
-BulkUploadJobSchema.index({ lockExpiresAt: 1 });
-BulkUploadJobSchema.index({ createdBy: 1, jobType: 1, createdAt: -1 });
+BulkUploadJobSchema.index(
+  { jobType: 1, status: 1, createdAt: -1 },
+  { name: "bulkjob_type_status_created_idx" }
+);
+
+BulkUploadJobSchema.index(
+  { createdBy: 1, status: 1, createdAt: -1 },
+  { name: "bulkjob_createdby_status_created_idx" }
+);
+
+BulkUploadJobSchema.index(
+  { createdBy: 1, jobType: 1, createdAt: -1 },
+  { name: "bulkjob_createdby_type_created_idx" }
+);
 
 export default models.BulkUploadJob || model("BulkUploadJob", BulkUploadJobSchema);

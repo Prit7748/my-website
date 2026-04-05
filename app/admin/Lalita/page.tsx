@@ -182,6 +182,14 @@ type ProcessBatchMeta = {
 
 const ACTIVE_JOB_STORAGE_KEY = "isp_pdf_vault_active_job_id";
 
+/**
+ * Vercel request body limit 4.5 MB hoti hai.
+ * Hum intentionally lower safety cap use kar rahe hain taaki multipart/form-data overhead ki wajah se 413 na aaye.
+ */
+const SAFE_REQUEST_PAYLOAD_BYTES = 3.5 * 1024 * 1024;
+const FORM_DATA_BASE_OVERHEAD_BYTES = 32 * 1024;
+const FORM_DATA_PER_FILE_OVERHEAD_BYTES = 4 * 1024;
+
 function formatBytes(bytes: number) {
   const n = Number(bytes || 0);
   if (n < 1024) return `${n} B`;
@@ -206,6 +214,10 @@ function formatDateTime(input?: string | null) {
 
 function safeText(x: any) {
   return String(x ?? "").trim();
+}
+
+function clampNum(n: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, n));
 }
 
 function notifyLongTaskStart() {
@@ -270,6 +282,84 @@ function batchFileTone(status: CurrentBatchFileStatus) {
   return "bg-slate-100 text-slate-700 border-slate-200";
 }
 
+function estimateBatchPayloadBytes(files: File[]) {
+  const list = Array.isArray(files) ? files : [];
+  return list.reduce(
+    (sum, file) =>
+      sum +
+      Number(file?.size || 0) +
+      FORM_DATA_PER_FILE_OVERHEAD_BYTES,
+    FORM_DATA_BASE_OVERHEAD_BYTES
+  );
+}
+
+function findOversizedSelectedFile(
+  files: File[],
+  maxBytes = SAFE_REQUEST_PAYLOAD_BYTES
+) {
+  return (
+    (Array.isArray(files) ? files : []).find(
+      (file) => estimateBatchPayloadBytes([file]) > maxBytes
+    ) || null
+  );
+}
+
+function computeSafeFixedBatchSize(
+  files: File[],
+  requestedBatchSize: number,
+  maxBytes = SAFE_REQUEST_PAYLOAD_BYTES
+) {
+  const list = Array.isArray(files) ? files : [];
+  if (!list.length) return 0;
+
+  const desired = clampNum(
+    Math.trunc(Number(requestedBatchSize || 0)) || 1,
+    1,
+    500
+  );
+
+  let best = desired;
+
+  for (let start = 0; start < list.length; start++) {
+    let count = 0;
+    let usedBytes = FORM_DATA_BASE_OVERHEAD_BYTES;
+
+    for (let i = start; i < list.length && count < desired; i++) {
+      const nextFileBytes =
+        Number(list[i]?.size || 0) + FORM_DATA_PER_FILE_OVERHEAD_BYTES;
+
+      if (count === 0 && usedBytes + nextFileBytes > maxBytes) {
+        return 0;
+      }
+
+      if (count > 0 && usedBytes + nextFileBytes > maxBytes) {
+        break;
+      }
+
+      usedBytes += nextFileBytes;
+      count += 1;
+    }
+
+    best = Math.min(best, count);
+
+    if (best <= 1) {
+      return 1;
+    }
+  }
+
+  return Math.max(1, best);
+}
+
+function isPayloadTooLargeMessage(message: string) {
+  const raw = safeText(message).toLowerCase();
+  return (
+    raw.includes("function_payload_too_large") ||
+    raw.includes("payload too large") ||
+    raw.includes("request entity too large") ||
+    raw.includes("413")
+  );
+}
+
 export default function HiddenPdfVaultPage() {
   const [bootLoading, setBootLoading] = useState(true);
   const [accessGranted, setAccessGranted] = useState(false);
@@ -307,6 +397,8 @@ export default function HiddenPdfVaultPage() {
   const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
   const [conflictMode, setConflictMode] = useState<"ignore" | "replace">("ignore");
   const [batchSize, setBatchSize] = useState(100);
+  const [effectiveBatchSize, setEffectiveBatchSize] = useState(100);
+  const [batchSafetyMessage, setBatchSafetyMessage] = useState("");
   const [creatingJob, setCreatingJob] = useState(false);
 
   const [activeJob, setActiveJob] = useState<BulkJobState | null>(null);
@@ -333,6 +425,9 @@ export default function HiddenPdfVaultPage() {
   const [processedItemStatusMap, setProcessedItemStatusMap] = useState<
     Record<number, { status: "processed" | "failed" | "skipped"; reason?: string }>
   >({});
+
+  const [autoProcessPaused, setAutoProcessPaused] = useState(false);
+  const [autoProcessPauseReason, setAutoProcessPauseReason] = useState("");
 
   const processInFlightRef = useRef(false);
   const longTaskActiveRef = useRef(false);
@@ -388,6 +483,18 @@ export default function HiddenPdfVaultPage() {
     setServerMessageType("info");
   }
 
+  function clearAutoProcessingPause() {
+    setAutoProcessPaused(false);
+    setAutoProcessPauseReason("");
+  }
+
+  function pauseAutoProcessing(reason: string) {
+    setAutoProcessPaused(true);
+    setAutoProcessPauseReason(reason);
+    setServerMessage(reason);
+    setServerMessageType("error");
+  }
+
   function resetBatchUiProgress(clearSelected = false) {
     setCurrentBatchTrackers([]);
     setCurrentBatchMeta(null);
@@ -399,6 +506,9 @@ export default function HiddenPdfVaultPage() {
 
     if (clearSelected) {
       setSelectedFiles([]);
+      setEffectiveBatchSize(batchSize);
+      setBatchSafetyMessage("");
+      clearAutoProcessingPause();
       const input = document.getElementById("vault-upload-input") as HTMLInputElement | null;
       if (input) input.value = "";
     }
@@ -647,8 +757,30 @@ export default function HiddenPdfVaultPage() {
       return;
     }
 
+    const oversizedFile = findOversizedSelectedFile(selectedFiles);
+    if (oversizedFile) {
+      const errMsg =
+        `"${oversizedFile.name}" itna bada hai ki current server-upload flow me single request safe limit cross kar raha hai. ` +
+        `Is file ko direct client-to-storage flow me shift karna padega, ya file size kam karni padegi.`;
+      setServerMessage(errMsg);
+      setServerMessageType("error");
+      alert(errMsg);
+      return;
+    }
+
+    const safeBatchSize = computeSafeFixedBatchSize(selectedFiles, batchSize);
+    if (!safeBatchSize) {
+      const errMsg =
+        "Current selection ke liye safe batch size compute nahi ho paayi. Same PDFs dobara select karke retry karo.";
+      setServerMessage(errMsg);
+      setServerMessageType("error");
+      alert(errMsg);
+      return;
+    }
+
     setCreatingJob(true);
     resetMessages();
+    clearAutoProcessingPause();
     setActiveJob(null);
     setActiveJobId("");
     finalRefreshDoneRef.current = false;
@@ -658,7 +790,7 @@ export default function HiddenPdfVaultPage() {
       const payload = {
         parentPath: currentPath,
         conflictMode,
-        batchSize,
+        batchSize: safeBatchSize,
         originalSelectionCount: selectedFiles.length,
         files: selectedFiles.map((file) => ({
           name: file.name,
@@ -689,8 +821,14 @@ export default function HiddenPdfVaultPage() {
       setActiveJobId(job?._id || "");
       safePersistActiveJobId(job?._id || "");
       finalRefreshDoneRef.current = false;
+      setEffectiveBatchSize(safeBatchSize);
 
-      setServerMessage("Bulk solved PDFs job started successfully.");
+      const successMessage =
+        safeBatchSize < batchSize
+          ? `Bulk solved PDFs job started. Requested ${batchSize} files/batch tha, lekin safe upload ke liye auto-adjust karke ${safeBatchSize} files/batch use hoga.`
+          : "Bulk solved PDFs job started successfully.";
+
+      setServerMessage(successMessage);
       setServerMessageType("success");
     } catch (e: any) {
       const errMsg = e?.message || "Server error";
@@ -783,10 +921,14 @@ export default function HiddenPdfVaultPage() {
   async function processNextBatch(job: BulkJobState) {
     const jobId = safeText(job?._id);
     if (!jobId || processInFlightRef.current) return;
+    if (autoProcessPaused) return;
 
     const processedItems = Number(job?.progress?.processedItems || 0);
     const totalItems = Number(job?.progress?.totalItems || 0);
-    const currentBatchSize = Math.max(1, Number(job?.progress?.batchSize || batchSize));
+    const currentBatchSize = Math.max(
+      1,
+      Number(job?.progress?.batchSize || effectiveBatchSize || batchSize)
+    );
 
     if (processedItems >= totalItems) return;
 
@@ -794,10 +936,30 @@ export default function HiddenPdfVaultPage() {
     const nextBatchFiles = selectedFiles.slice(processedItems, processedItems + nextBatchExpected);
 
     if (nextBatchFiles.length !== nextBatchExpected) {
-      setServerMessage(
-        "Current browser me required PDF batch files available nahi hain. Agar page refresh hua tha, same original PDF list dubara select karke continue karo."
+      const msg =
+        "Current browser me required PDF batch files available nahi hain. Agar page refresh hua tha, same original PDF list dubara select karke continue karo.";
+      pauseAutoProcessing(msg);
+      return;
+    }
+
+    const estimatedPayloadBytes = estimateBatchPayloadBytes(nextBatchFiles);
+    if (estimatedPayloadBytes > SAFE_REQUEST_PAYLOAD_BYTES) {
+      const msg =
+        `Current batch estimated request size ${formatBytes(estimatedPayloadBytes)} hai, ` +
+        `jo safe upload limit ${formatBytes(SAFE_REQUEST_PAYLOAD_BYTES)} se upar hai. ` +
+        `Auto processing pause kar di gayi hai. Same files select rehne do aur smaller effective batch size ke saath resume/start karo.`;
+      pauseAutoProcessing(msg);
+      setCurrentBatchTrackers(
+        nextBatchFiles.map((file, idx) => ({
+          clientFileId: buildClientFileId(file, processedItems + idx),
+          itemIndex: processedItems + idx,
+          rowNumber: processedItems + idx + 1,
+          name: file.name,
+          size: Number(file.size || 0),
+          status: "queued",
+          reason: "Paused before upload because estimated request payload was too large.",
+        }))
       );
-      setServerMessageType("info");
       return;
     }
 
@@ -878,10 +1040,15 @@ export default function HiddenPdfVaultPage() {
 
       setCurrentBatchUploadPercent(100);
       setCurrentBatchLoadedBytes(totalBytes);
+      clearAutoProcessingPause();
       setActiveJob(updatedJob);
       applyBatchResultToUi(updatedJob, meta, nextBatchFiles);
     } catch (error: any) {
-      const reason = safeText(error?.message || "Batch processing failed");
+      const rawReason = safeText(error?.message || "Batch processing failed");
+      const reason = isPayloadTooLargeMessage(rawReason)
+        ? `Vercel payload limit hit ho gayi. Auto processing pause kar di gayi hai, isliye same first batch baar-baar repeat nahi hoga. Smaller safe batch size ke saath resume/start karo. Original error: ${rawReason}`
+        : `Batch auto-processing pause kar di gayi hai: ${rawReason}`;
+
       setCurrentBatchTrackers((prev) =>
         prev.map((item) => ({
           ...item,
@@ -889,8 +1056,8 @@ export default function HiddenPdfVaultPage() {
           reason,
         }))
       );
-      setServerMessage(reason);
-      setServerMessageType("error");
+
+      pauseAutoProcessing(reason);
     } finally {
       processInFlightRef.current = false;
       currentBatchXhrRef.current = null;
@@ -927,6 +1094,7 @@ export default function HiddenPdfVaultPage() {
         setActiveJob(data.job as BulkJobState);
       }
 
+      clearAutoProcessingPause();
       setServerMessage("Bulk job cancelled.");
       setServerMessageType("info");
     } catch (e: any) {
@@ -1265,6 +1433,47 @@ export default function HiddenPdfVaultPage() {
   }, [activeJobId]);
 
   useEffect(() => {
+    if (!selectedFiles.length) {
+      setEffectiveBatchSize(batchSize);
+      setBatchSafetyMessage("");
+      if (!isJobActive) {
+        clearAutoProcessingPause();
+      }
+      return;
+    }
+
+    const oversizedFile = findOversizedSelectedFile(selectedFiles);
+    if (oversizedFile) {
+      setEffectiveBatchSize(0);
+      setBatchSafetyMessage(
+        `"${oversizedFile.name}" single-request safe limit se bada hai. Yeh current server-upload flow me fail karega.`
+      );
+      return;
+    }
+
+    const safeSize = computeSafeFixedBatchSize(selectedFiles, batchSize);
+    setEffectiveBatchSize(safeSize);
+
+    if (!safeSize) {
+      setBatchSafetyMessage(
+        "Safe batch size compute nahi ho paayi. Same files dobara select karke retry karo."
+      );
+      return;
+    }
+
+    if (safeSize < batchSize) {
+      setBatchSafetyMessage(
+        `Requested ${batchSize} files/batch tha, lekin current file sizes ke hisaab se safe effective batch size ${safeSize} files/batch hogi.`
+      );
+      return;
+    }
+
+    setBatchSafetyMessage(
+      `Current selection safe hai. Effective browser batch size ${safeSize} files/batch rahegi.`
+    );
+  }, [selectedFiles, batchSize, isJobActive]);
+
+  useEffect(() => {
     if (!accessGranted) return;
     void loadFolders(currentPath);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1333,10 +1542,14 @@ export default function HiddenPdfVaultPage() {
     if (!activeJobId) return;
     if (!activeJob) return;
     if (isFinalStatus(currentStatus)) return;
+    if (autoProcessPaused) return;
 
     const processedItems = Number(activeJob?.progress?.processedItems || 0);
     const totalItems = Number(activeJob?.progress?.totalItems || 0);
-    const currentBatchSize = Math.max(1, Number(activeJob?.progress?.batchSize || batchSize));
+    const currentBatchSize = Math.max(
+      1,
+      Number(activeJob?.progress?.batchSize || effectiveBatchSize || batchSize)
+    );
     const nextBatchExpected = Math.min(currentBatchSize, Math.max(0, totalItems - processedItems));
 
     if (nextBatchExpected <= 0) return;
@@ -1349,7 +1562,7 @@ export default function HiddenPdfVaultPage() {
     }, 120);
 
     return () => clearTimeout(timer);
-  }, [activeJobId, activeJob, currentStatus, selectedFiles, batchSize]);
+  }, [activeJobId, activeJob, currentStatus, selectedFiles, batchSize, effectiveBatchSize, autoProcessPaused]);
 
   useEffect(() => {
     if (!activeJobId) return;
@@ -1361,6 +1574,7 @@ export default function HiddenPdfVaultPage() {
 
     finalRefreshDoneRef.current = true;
     safePersistActiveJobId("");
+    clearAutoProcessingPause();
 
     if (isFinalStatus(currentStatus)) {
       resetBatchUiProgress(true);
@@ -1813,6 +2027,39 @@ export default function HiddenPdfVaultPage() {
             </div>
           ) : null}
 
+          {autoProcessPaused && activeJob && !isFinalStatus(currentStatus) ? (
+            <div className="mt-4 rounded-2xl border border-rose-200 bg-rose-50 p-4">
+              <div className="flex items-start justify-between gap-4 flex-wrap">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 text-sm font-extrabold text-rose-800">
+                    <AlertTriangle size={18} />
+                    Auto Processing Paused
+                  </div>
+                  <div className="mt-2 text-sm text-rose-800 leading-6">
+                    {autoProcessPauseReason || "Current upload temporarily paused hai."}
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (!selectedFiles.length) {
+                      alert("Same original PDF list dubara select karo, phir Resume Upload dabao.");
+                      return;
+                    }
+                    clearAutoProcessingPause();
+                    setServerMessage("Auto processing resumed.");
+                    setServerMessageType("info");
+                  }}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-rose-700 hover:bg-rose-800 text-white font-bold shadow-sm"
+                >
+                  <Upload size={16} />
+                  Resume Upload
+                </button>
+              </div>
+            </div>
+          ) : null}
+
           {isJobActive ? (
             <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm font-semibold text-amber-900">
               <div className="flex items-center gap-2">
@@ -1916,11 +2163,14 @@ export default function HiddenPdfVaultPage() {
                     const onlyPdf = all.filter((file) => safeText(file.name).toLowerCase().endsWith(".pdf"));
 
                     resetBatchUiProgress(false);
+                    clearAutoProcessingPause();
                     setSelectedFiles(onlyPdf);
 
                     if (onlyPdf.length !== all.length) {
                       setServerMessage("Non-PDF files ignore kar di gayi hain. Sirf PDFs select hui hain.");
                       setServerMessageType("info");
+                    } else {
+                      resetMessages();
                     }
                   }}
                   className="hidden"
@@ -1958,13 +2208,33 @@ export default function HiddenPdfVaultPage() {
                   <br />
                   Selected size: <b>{formatBytes(selectedFilesSize)}</b>
                   <br />
+                  Requested batch size: <b>{batchSize}</b>
+                  <br />
+                  Effective safe batch size: <b>{effectiveBatchSize || 0}</b>
+                  <br />
+                  Safe request cap: <b>{formatBytes(SAFE_REQUEST_PAYLOAD_BYTES)}</b>
+                  <br />
                   Recommended stable batch size: <b>25 or 50</b>
                 </div>
+
+                {selectedFiles.length > 0 ? (
+                  <div
+                    className={`mt-3 rounded-xl border p-3 text-xs leading-5 ${
+                      !effectiveBatchSize
+                        ? "border-rose-200 bg-rose-50 text-rose-800"
+                        : effectiveBatchSize < batchSize
+                        ? "border-amber-200 bg-amber-50 text-amber-800"
+                        : "border-emerald-200 bg-emerald-50 text-emerald-800"
+                    }`}
+                  >
+                    {batchSafetyMessage}
+                  </div>
+                ) : null}
 
                 <button
                   type="button"
                   onClick={createSolvedPdfJob}
-                  disabled={creatingJob || showTrash || isJobActive}
+                  disabled={creatingJob || showTrash || isJobActive || (!!selectedFiles.length && !effectiveBatchSize)}
                   className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-slate-900 hover:bg-slate-950 text-white transition font-extrabold disabled:opacity-60 shadow-sm"
                 >
                   <Upload size={18} />

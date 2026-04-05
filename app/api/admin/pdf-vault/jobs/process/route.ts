@@ -4,7 +4,6 @@ import { getAuthUser, hasPermission } from "@/lib/auth";
 import {
   claimBulkUploadJobBatch,
   completeBulkUploadJobBatch,
-  failBulkUploadJob,
   getBulkUploadJob,
   isFinalBulkJobStatus,
   toPlainBulkJob,
@@ -13,6 +12,10 @@ import { processBulkSolvedPdfsJobBatch } from "@/lib/bulkSolvedPdfsJob";
 import { hasPdfVaultPageAccess, safeStr } from "@/lib/pdfVault";
 
 export const runtime = "nodejs";
+
+const SAFE_REQUEST_PAYLOAD_BYTES = Math.trunc(3.5 * 1024 * 1024);
+const FORM_DATA_BASE_OVERHEAD_BYTES = 32 * 1024;
+const FORM_DATA_PER_FILE_OVERHEAD_BYTES = 4 * 1024;
 
 function safeNum(x: any, def = 0) {
   const n = Number(x);
@@ -31,10 +34,18 @@ function isPdfName(name: string) {
   return normalizeName(name).toLowerCase().endsWith(".pdf");
 }
 
+function formatBytes(bytes: number) {
+  const n = Number(bytes || 0);
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(n / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+}
+
 function getBatchPayloadStats(files: File[]) {
   const count = Array.isArray(files) ? files.length : 0;
   const totalBytes = (Array.isArray(files) ? files : []).reduce(
-    (sum, file) => sum + Number(file?.size || 0),
+    (sum: number, file: File) => sum + Number(file?.size || 0),
     0
   );
 
@@ -45,10 +56,19 @@ function getBatchPayloadStats(files: File[]) {
   };
 }
 
+function estimateMultipartPayloadBytes(files: File[]) {
+  return (Array.isArray(files) ? files : []).reduce(
+    (sum: number, file: File) =>
+      sum +
+      Number(file?.size || 0) +
+      FORM_DATA_PER_FILE_OVERHEAD_BYTES,
+    FORM_DATA_BASE_OVERHEAD_BYTES
+  );
+}
+
 function computeDynamicLockMs(files: File[]) {
   const { totalMB } = getBatchPayloadStats(files);
 
-  // Base 4 min + size-based buffer, max 15 min
   const estimatedMinutes = 4 + Math.ceil(totalMB / 75);
   return clamp(estimatedMinutes * 60 * 1000, 2 * 60 * 1000, 15 * 60 * 1000);
 }
@@ -149,11 +169,47 @@ async function unlockBatchWithoutProgress(args: {
   }
 }
 
+async function parseIncomingFormData(req: NextRequest) {
+  try {
+    const formData = await req.formData();
+    return { ok: true as const, formData };
+  } catch (error: any) {
+    const raw = safeStr(error?.message || "Unable to parse multipart form data");
+    const lower = raw.toLowerCase();
+
+    const isTooLarge =
+      lower.includes("payload too large") ||
+      lower.includes("entity too large") ||
+      lower.includes("body exceeded") ||
+      lower.includes("request size") ||
+      lower.includes("too large") ||
+      lower.includes("413");
+
+    return {
+      ok: false as const,
+      res: NextResponse.json(
+        {
+          ok: false,
+          error: isTooLarge
+            ? "Batch request payload too large. Smaller batch size ke saath retry karo."
+            : raw || "Unable to parse multipart form data",
+          retryable: true,
+          code: isTooLarge ? "PAYLOAD_TOO_LARGE" : "INVALID_MULTIPART_BODY",
+        },
+        { status: isTooLarge ? 413 : 400 }
+      ),
+    };
+  }
+}
+
 export async function POST(req: NextRequest) {
   const guard = await assertVaultWriteAccess();
   if (!guard.ok) return guard.res;
 
-  const formData = await req.formData();
+  const parsed = await parseIncomingFormData(req);
+  if (!parsed.ok) return parsed.res;
+
+  const formData = parsed.formData;
   const jobId = safeStr(formData.get("jobId"));
 
   if (!jobId) {
@@ -213,12 +269,34 @@ export async function POST(req: NextRequest) {
       {
         ok: false,
         error: "No PDF files received for current batch.",
+        retryable: true,
       },
       { status: 400 }
     );
   }
 
-  const nonPdf = batchFiles.find((file) => !isPdfName(file.name));
+  const estimatedPayloadBytes = estimateMultipartPayloadBytes(batchFiles);
+  if (estimatedPayloadBytes > SAFE_REQUEST_PAYLOAD_BYTES) {
+    return NextResponse.json(
+      {
+        ok: false,
+        error:
+          `Batch request safe limit cross kar rahi hai. Estimated payload ${formatBytes(
+            estimatedPayloadBytes
+          )} hai, jabki safe limit ${formatBytes(
+            SAFE_REQUEST_PAYLOAD_BYTES
+          )} rakhi gayi hai. Smaller batch size ke saath retry karo.`,
+        retryable: true,
+        code: "PAYLOAD_TOO_LARGE",
+        estimatedPayloadBytes,
+        safeRequestPayloadBytes: SAFE_REQUEST_PAYLOAD_BYTES,
+        job: toPlainBulkJob(currentJob),
+      },
+      { status: 413 }
+    );
+  }
+
+  const nonPdf = batchFiles.find((file: File) => !isPdfName(file.name));
   if (nonPdf) {
     return NextResponse.json(
       {
@@ -290,6 +368,7 @@ export async function POST(req: NextRequest) {
         ok: false,
         error: message,
         retryable: true,
+        code: "BATCH_COUNT_MISMATCH",
         job: toPlainBulkJob(released || lockedJob),
       },
       { status: 409 }
@@ -327,6 +406,7 @@ export async function POST(req: NextRequest) {
           ok: false,
           error: message,
           retryable: true,
+          code: "BATCH_ORDER_MISMATCH",
           job: toPlainBulkJob(released || lockedJob),
         },
         { status: 409 }
@@ -371,18 +451,27 @@ export async function POST(req: NextRequest) {
       { status: 200 }
     );
   } catch (error: any) {
-    const failedJob = await failBulkUploadJob({
+    const message = safeStr(
+      error?.message || "Solved PDFs batch processing failed"
+    );
+
+    const released = await unlockBatchWithoutProgress({
       jobId,
       createdBy,
       lockToken: claim.lockToken,
-      message: safeStr(error?.message || "Solved PDFs batch processing failed"),
+      note: message,
+      batchNumber: lockedWindow.batchNumber,
+      fromIndex: lockedWindow.fromIndex,
+      toIndex: lockedWindow.toIndex,
     });
 
     return NextResponse.json(
       {
         ok: false,
-        error: safeStr(error?.message || "Solved PDFs batch processing failed"),
-        job: toPlainBulkJob(failedJob),
+        error: message,
+        retryable: true,
+        code: "BATCH_PROCESSING_FAILED",
+        job: toPlainBulkJob(released || lockedJob),
       },
       { status: 500 }
     );
