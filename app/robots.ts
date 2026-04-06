@@ -8,6 +8,6 @@ export default function robots() {
         disallow: ["/admin", "/api/admin"],
       },
     ],
-    sitemap: "https://www.ignoustudentsportal.com/sitemap.xml",
+    sitemap: "https://www.istudentsportal.com/sitemap.xml",
   };
 }

@@ -23,7 +23,6 @@ const nextConfig: NextConfig = {
 
     remotePatterns: [
       { protocol: "https", hostname: "istudentsportal.com" },
-      { protocol: "https", hostname: "ignoustudentsportal.com" },
       { protocol: "https", hostname: "res.cloudinary.com" },
       { protocol: "https", hostname: "*.amazonaws.com" },
       { protocol: "https", hostname: "*.r2.cloudflarestorage.com" },

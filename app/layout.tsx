@@ -21,7 +21,7 @@ export const viewport: Viewport = {
 };
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://ignoustudentsportal.com"),
+  metadataBase: new URL("https://istudentsportal.com"),
   title: {
     default: "IGNOU Students Portal - Solved Assignments & Notes",
     template: "%s | IGNOU Students Portal",
@@ -43,7 +43,7 @@ export const metadata: Metadata = {
   },
   openGraph: {
     type: "website",
-    url: "https://ignoustudentsportal.com",
+    url: "https://istudentsportal.com",
     siteName: "IGNOU Students Portal",
     title: "IGNOU Students Portal - Solved Assignments & Notes",
     description:

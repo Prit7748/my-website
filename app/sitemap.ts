@@ -2,7 +2,7 @@ import dbConnect from "@/lib/db";
 import Blog from "@/models/Blog";
 
 export default async function sitemap() {
-  const baseUrl = "https://www.ignoustudentsportal.com"; 
+  const baseUrl = "https://www.istudentsportal.com"; 
   // ⚠️ production domain, localhost nahi
 
   await dbConnect();
