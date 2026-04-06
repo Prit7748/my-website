@@ -1,3 +1,4 @@
+// app/[category]/[slug]/page.tsx
 import { cache } from "react";
 import type { Metadata } from "next";
 import { notFound, permanentRedirect } from "next/navigation";

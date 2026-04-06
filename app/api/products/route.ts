@@ -1,12 +1,12 @@
-// app/api/products/route.ts
 import { NextResponse } from "next/server";
-
 import dbConnect from "@/lib/db";
 import Product from "@/models/Product";
 import GlobalToggle from "@/models/GlobalToggle";
 import { attachResolvedOnDemandTimingToProducts } from "@/lib/onDemandTiming";
 
-export const runtime = "nodejs";
+/* =========================
+   Basic helpers
+   ========================= */
 
 function safeStr(x: any) {
   return String(x ?? "").trim();
@@ -47,22 +47,9 @@ function fileNameOf(urlOrPath: string) {
   return (parts[parts.length - 1] || "").toLowerCase();
 }
 
-function categorySlugFromProductCategory(category?: string) {
-  const c = safeStr(category).toLowerCase();
-
-  if (c === "solved assignments") return "solved-assignments";
-  if (c === "handwritten pdfs") return "handwritten-pdfs";
-  if (c.includes("handwritten") && (c.includes("hardcopy") || c.includes("delivery"))) {
-    return "handwritten-hardcopy";
-  }
-  if (c.includes("question") && (c.includes("paper") || c.includes("pyq"))) return "question-papers";
-  if (c.includes("guess")) return "guess-papers";
-  if (c.includes("ebook") || c.includes("notes")) return "ebooks";
-  if (c.includes("project") || c.includes("synopsis")) return "projects";
-  if (c.includes("combo")) return "combo";
-
-  return "products";
-}
+/* =========================
+   Image normalization
+   ========================= */
 
 function normalizeImagesToUrls(images: any) {
   const arr = Array.isArray(images) ? images : [];
@@ -70,23 +57,49 @@ function normalizeImagesToUrls(images: any) {
     return { urls: [] as string[], thumbUrl: "", quickUrl: "" };
   }
 
-  const urls = arr
-    .map((x: any) => {
-      if (typeof x === "string") return safeStr(x);
-      if (x && typeof x === "object" && typeof x.url === "string") return safeStr(x.url);
-      return "";
-    })
+  const allStrings = arr.every((x: any) => typeof x === "string");
+  if (allStrings) {
+    const urls = Array.from(
+      new Set(
+        arr
+          .map((s: string) => safeStr(s))
+          .filter(Boolean)
+      )
+    ).sort((a, b) => fileNameOf(a).localeCompare(fileNameOf(b), undefined, { numeric: true }));
+
+    const thumbUrl = urls[0] || "";
+    const quickUrl = urls[1] || urls[0] || "";
+    return { urls, thumbUrl, quickUrl };
+  }
+
+  const strings: string[] = arr
+    .filter((x: any) => typeof x === "string")
+    .map((s: string) => safeStr(s))
     .filter(Boolean);
 
-  const unique = Array.from(new Set(urls)).sort((a, b) =>
-    fileNameOf(a).localeCompare(fileNameOf(b), undefined, { numeric: true })
+  const objects = arr
+    .filter((x: any) => x && typeof x === "object" && typeof x.url === "string" && x.url.trim())
+    .sort((a: any, b: any) => {
+      const ak = safeStr(a.sortKey || a.filename || fileNameOf(a.url)).toLowerCase();
+      const bk = safeStr(b.sortKey || b.filename || fileNameOf(b.url)).toLowerCase();
+      return ak.localeCompare(bk, undefined, { numeric: true });
+    })
+    .map((x: any) => safeStr(x.url))
+    .filter(Boolean);
+
+  const urls = Array.from(new Set([...strings, ...objects])).sort((a, b) =>
+    fileNameOf(a).localeCompare(b, undefined, { numeric: true })
   );
 
-  const thumbUrl = unique[0] || "";
-  const quickUrl = unique[1] || unique[0] || "";
+  const thumbUrl = urls[0] || "";
+  const quickUrl = urls[1] || urls[0] || "";
 
-  return { urls: unique, thumbUrl, quickUrl };
+  return { urls, thumbUrl, quickUrl };
 }
+
+/* =========================
+   Search normalization + ranking
+   ========================= */
 
 function normalizeQuery(q: string) {
   return safeStr(q)
@@ -146,6 +159,10 @@ function scoreProductForQuery(p: any, q: string) {
   return s;
 }
 
+/* =========================
+   Availability helpers
+   ========================= */
+
 function normAvail(v?: string) {
   return safeStr(v).toLowerCase();
 }
@@ -182,14 +199,9 @@ function resolveAvailability(rawAvailability: string, onDemandSalesEnabled: bool
   return "available";
 }
 
-function buildBaseLiveFilter() {
-  return {
-    $and: [
-      { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] },
-      { $or: [{ isActive: true }, { isActive: { $exists: false } }] },
-    ],
-  };
-}
+/* =========================
+   API
+   ========================= */
 
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url);
@@ -221,7 +233,8 @@ export async function GET(req: Request) {
   if (sort === "price_desc") sortObj = { price: -1, _id: -1 };
 
   const filter: any = {
-    ...buildBaseLiveFilter(),
+    isActive: true,
+    $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
   };
 
   if (categories.length) filter.category = { $in: categories };
@@ -326,7 +339,7 @@ export async function GET(req: Request) {
       }
 
       if (andParts.length) {
-        regexFilter.$and = [...(Array.isArray(regexFilter.$and) ? regexFilter.$and : []), ...andParts];
+        regexFilter.$and = andParts;
       } else {
         const rx = new RegExp(escapeRegex(search), "i");
         regexFilter.$or = [{ subjectCode: rx }, { title: rx }, { slug: rx }];
@@ -354,7 +367,6 @@ export async function GET(req: Request) {
 
     const rawAvailability = safeStr(p.availability || "");
     const effectiveAvailability = resolveAvailability(rawAvailability, onDemandSalesEnabled);
-    const categorySlug = categorySlugFromProductCategory(p.category);
 
     return {
       _id: p._id,
@@ -362,8 +374,6 @@ export async function GET(req: Request) {
       title: p.title || "",
       slug: p.slug || "",
       category: p.category || "",
-      categorySlug,
-      href: `/${categorySlug}/${encodeURIComponent(p.slug || "")}`,
 
       subjectCode: p.subjectCode || "",
       subjectTitleHi: p.subjectTitleHi || "",
@@ -382,7 +392,7 @@ export async function GET(req: Request) {
       language: p.language || "",
 
       price: Number(p.price || 0),
-      oldPrice: p.oldPrice !== undefined && p.oldPrice !== null ? Number(p.oldPrice) : null,
+      oldPrice: p.oldPrice ? Number(p.oldPrice) : null,
       shortDesc: p.shortDesc || "",
       isDigital: !!p.isDigital,
       pdfUrl: p.pdfUrl || "",
@@ -399,9 +409,6 @@ export async function GET(req: Request) {
       thumbUrl: finalThumb,
       quickUrl: finalQuick,
       thumbnailUrl: finalThumb,
-
-      createdAt: p.createdAt || null,
-      updatedAt: p.updatedAt || null,
     };
   });
 
@@ -413,10 +420,6 @@ export async function GET(req: Request) {
     title: p.title || "",
     slug: p.slug || "",
     category: p.category || "",
-    categorySlug: p.categorySlug || categorySlugFromProductCategory(p.category),
-    href:
-      p.href ||
-      `/${p.categorySlug || categorySlugFromProductCategory(p.category)}/${encodeURIComponent(p.slug || "")}`,
 
     subjectCode: p.subjectCode || "",
     subjectTitleHi: p.subjectTitleHi || "",
@@ -430,7 +433,7 @@ export async function GET(req: Request) {
     language: p.language || "",
 
     price: Number(p.price || 0),
-    oldPrice: p.oldPrice !== undefined && p.oldPrice !== null ? Number(p.oldPrice) : null,
+    oldPrice: p.oldPrice ? Number(p.oldPrice) : null,
     shortDesc: p.shortDesc || "",
     isDigital: !!p.isDigital,
     pdfUrl: p.pdfUrl || "",
@@ -455,9 +458,6 @@ export async function GET(req: Request) {
     thumbUrl: p.thumbUrl || "",
     quickUrl: p.quickUrl || "",
     thumbnailUrl: p.thumbnailUrl || "",
-
-    createdAt: p.createdAt || null,
-    updatedAt: p.updatedAt || null,
   }));
 
   let coursesFlat: string[] = [];
@@ -465,7 +465,8 @@ export async function GET(req: Request) {
 
   if (includeFacets) {
     const baseForFacets: any = {
-      ...buildBaseLiveFilter(),
+      isActive: true,
+      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
     };
 
     if (categories.length) baseForFacets.category = { $in: categories };
