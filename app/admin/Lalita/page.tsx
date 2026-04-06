@@ -91,7 +91,8 @@ type FileListResponse = {
 
 type UploadApiResponse = {
   ok?: boolean;
-  status?: "uploaded" | "replaced" | "skipped";
+  action?: "prepare" | "finalize";
+  status?: "ready" | "uploaded" | "replaced" | "skipped";
   message?: string;
   error?: string;
   needsPuzzle?: boolean;
@@ -99,6 +100,13 @@ type UploadApiResponse = {
   skuNormalized?: string;
   fileId?: string;
   pageCount?: number;
+  uploadUrl?: string;
+  uploadToken?: string;
+  s3Key?: string;
+  contentType?: string;
+  expiresInSeconds?: number;
+  maxFileBytes?: number;
+  warnings?: string[];
   counts?: {
     total?: number;
     uploaded?: number;
@@ -107,6 +115,14 @@ type UploadApiResponse = {
     failed?: number;
     done?: number;
   };
+};
+
+type PreparedDirectUpload = {
+  uploadUrl: string;
+  uploadToken: string;
+  s3Key: string;
+  contentType: string;
+  fileName: string;
 };
 
 const MAX_DIRECT_UPLOAD_BYTES = 20 * 1024 * 1024;
@@ -123,13 +139,6 @@ function formatDate(input?: string | null) {
   if (!input) return "-";
   const d = new Date(input);
   if (Number.isNaN(d.getTime())) return "-";
-  return d.toLocaleString("en-IN");
-}
-
-function formatDateTime(input?: string | null) {
-  if (!input) return "—";
-  const d = new Date(input);
-  if (Number.isNaN(d.getTime())) return "—";
   return d.toLocaleString("en-IN");
 }
 
@@ -172,6 +181,18 @@ function normalizeSelectedPdfFiles(fileList: FileList | File[] | null | undefine
   }
 
   return out;
+}
+
+function parseS3ErrorMessage(input: string) {
+  const text = safeText(input);
+  if (!text) return "";
+
+  const match = text.match(/<Message>([\s\S]*?)<\/Message>/i);
+  if (match?.[1]) {
+    return safeText(match[1]);
+  }
+
+  return text.slice(0, 300);
 }
 
 export default function HiddenPdfVaultPage() {
@@ -238,6 +259,8 @@ export default function HiddenPdfVaultPage() {
   const uploadAbortControllerRef = useRef<AbortController | null>(null);
   const uploadCancelRequestedRef = useRef(false);
   const uploadNextIndexRef = useRef(0);
+  const uploadTargetPathRef = useRef("root");
+  const uploadConflictModeRef = useRef<"ignore" | "replace">("ignore");
 
   const titlePath = useMemo(() => breadcrumbs.map((x) => x.name).join(" / "), [breadcrumbs]);
   const searchActive = globalSearch.trim().length > 0;
@@ -282,6 +305,8 @@ export default function HiddenPdfVaultPage() {
     uploadAbortControllerRef.current = null;
     uploadCancelRequestedRef.current = false;
     uploadNextIndexRef.current = 0;
+    uploadTargetPathRef.current = currentPath;
+    uploadConflictModeRef.current = conflictMode;
 
     if (!keepSelection) {
       setSelectedFiles([]);
@@ -479,27 +504,89 @@ export default function HiddenPdfVaultPage() {
     }
   }
 
-  async function uploadSinglePdf(file: File) {
-    const formData = new FormData();
-    formData.append("file", file);
-    formData.append("parentPath", currentPath);
-    formData.append("conflictMode", conflictMode);
-
+  async function prepareDirectUpload(
+    file: File,
+    targetPath: string,
+    mode: "ignore" | "replace"
+  ) {
     const controller = new AbortController();
     uploadAbortControllerRef.current = controller;
 
     const res = await fetch("/api/admin/pdf-vault/upload", {
       method: "POST",
-      body: formData,
+      headers: { "Content-Type": "application/json" },
       credentials: "include",
       signal: controller.signal,
+      body: JSON.stringify({
+        action: "prepare",
+        parentPath: targetPath,
+        conflictMode: mode,
+        fileName: file.name,
+        sizeBytes: Number(file.size || 0),
+      }),
     });
 
     const data = (await safeReadJson(res)) as UploadApiResponse & Record<string, any>;
     return { res, data };
   }
 
-  async function runDirectUpload(startIndex: number) {
+  async function uploadFileToS3(file: File, prepared: PreparedDirectUpload) {
+    const controller = new AbortController();
+    uploadAbortControllerRef.current = controller;
+
+    const res = await fetch(prepared.uploadUrl, {
+      method: "PUT",
+      headers: {
+        "Content-Type": safeText(prepared.contentType || file.type || "application/pdf"),
+      },
+      body: file,
+      signal: controller.signal,
+    });
+
+    if (res.ok) {
+      return { ok: true as const, error: "" };
+    }
+
+    const errorText = parseS3ErrorMessage(await res.text().catch(() => ""));
+    return {
+      ok: false as const,
+      error: errorText || `Direct S3 upload failed (${res.status})`,
+    };
+  }
+
+  async function finalizeDirectUpload(
+    file: File,
+    prepared: PreparedDirectUpload,
+    targetPath: string,
+    mode: "ignore" | "replace"
+  ) {
+    const controller = new AbortController();
+    uploadAbortControllerRef.current = controller;
+
+    const res = await fetch("/api/admin/pdf-vault/upload", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      signal: controller.signal,
+      body: JSON.stringify({
+        action: "finalize",
+        parentPath: targetPath,
+        conflictMode: mode,
+        fileName: file.name,
+        s3Key: prepared.s3Key,
+        uploadToken: prepared.uploadToken,
+      }),
+    });
+
+    const data = (await safeReadJson(res)) as UploadApiResponse & Record<string, any>;
+    return { res, data };
+  }
+
+  async function runDirectUpload(
+    startIndex: number,
+    targetPath: string,
+    mode: "ignore" | "replace"
+  ) {
     if (!selectedFiles.length) {
       alert("Pehle PDF files select karo.");
       return;
@@ -520,6 +607,7 @@ export default function HiddenPdfVaultPage() {
     let processedCount = startIndex === 0 ? 0 : uploadProcessedCount;
     let skippedCount = startIndex === 0 ? 0 : uploadSkippedCount;
     let failedCount = startIndex === 0 ? 0 : uploadFailedCount;
+    const failureMessages: string[] = [];
 
     if (startIndex === 0) {
       setUploadUploadedCount(0);
@@ -540,25 +628,39 @@ export default function HiddenPdfVaultPage() {
         setUploadCurrentIndex(i + 1);
         setUploadCurrentFileName(file.name);
 
+        if (Math.max(0, Math.trunc(Number(file.size || 0))) > MAX_DIRECT_UPLOAD_BYTES) {
+          skippedCount += 1;
+          processedCount += 1;
+          setUploadSkippedCount(skippedCount);
+          setUploadProcessedCount(processedCount);
+          continue;
+        }
+
         try {
-          const { res, data } = await uploadSinglePdf(file);
+          const preparedResponse = await prepareDirectUpload(file, targetPath, mode);
 
           if (uploadCancelRequestedRef.current) {
             break;
           }
 
-          if (!res.ok || !data?.ok) {
+          const preparedData = preparedResponse.data;
+          if (!preparedResponse.res.ok || !preparedData?.ok) {
             const errMsg =
-              safeText(data?.error || data?.message || "Upload failed") || "Upload failed";
+              safeText(preparedData?.error || preparedData?.message || "Upload prepare failed") ||
+              "Upload prepare failed";
 
-            if (res.status === 401 || res.status === 403 || data?.needsPuzzle) {
+            if (
+              preparedResponse.res.status === 401 ||
+              preparedResponse.res.status === 403 ||
+              preparedData?.needsPuzzle
+            ) {
               setIsUploading(false);
               setUploadPaused(true);
               setUploadPauseReason(errMsg);
               setServerMessage(errMsg);
               setServerMessageType("error");
 
-              if (data?.needsPuzzle) {
+              if (preparedData?.needsPuzzle) {
                 setAccessGranted(false);
                 await loadBootstrap();
               }
@@ -567,18 +669,96 @@ export default function HiddenPdfVaultPage() {
 
             failedCount += 1;
             processedCount += 1;
-
+            failureMessages.push(errMsg);
             setUploadFailedCount(failedCount);
             setUploadProcessedCount(processedCount);
             continue;
           }
 
-          const status = safeText(data?.status).toLowerCase();
+          if (safeText(preparedData?.status).toLowerCase() === "skipped") {
+            skippedCount += 1;
+            processedCount += 1;
+            setUploadSkippedCount(skippedCount);
+            setUploadProcessedCount(processedCount);
+            continue;
+          }
+
+          const prepared: PreparedDirectUpload = {
+            uploadUrl: safeText(preparedData?.uploadUrl),
+            uploadToken: safeText(preparedData?.uploadToken),
+            s3Key: safeText(preparedData?.s3Key),
+            contentType: safeText(preparedData?.contentType || "application/pdf"),
+            fileName: safeText(preparedData?.fileName || file.name),
+          };
+
+          if (!prepared.uploadUrl || !prepared.uploadToken || !prepared.s3Key) {
+            failedCount += 1;
+            processedCount += 1;
+            failureMessages.push("Prepare response incomplete");
+            setUploadFailedCount(failedCount);
+            setUploadProcessedCount(processedCount);
+            continue;
+          }
+
+          const s3Upload = await uploadFileToS3(file, prepared);
+
+          if (uploadCancelRequestedRef.current) {
+            break;
+          }
+
+          if (!s3Upload.ok) {
+            failedCount += 1;
+            processedCount += 1;
+            failureMessages.push(s3Upload.error || "Direct S3 upload failed");
+            setUploadFailedCount(failedCount);
+            setUploadProcessedCount(processedCount);
+            continue;
+          }
+
+          const finalResponse = await finalizeDirectUpload(file, prepared, targetPath, mode);
+
+          if (uploadCancelRequestedRef.current) {
+            break;
+          }
+
+          const finalData = finalResponse.data;
+
+          if (!finalResponse.res.ok || !finalData?.ok) {
+            const errMsg =
+              safeText(finalData?.error || finalData?.message || "Upload finalize failed") ||
+              "Upload finalize failed";
+
+            if (
+              finalResponse.res.status === 401 ||
+              finalResponse.res.status === 403 ||
+              finalData?.needsPuzzle
+            ) {
+              setIsUploading(false);
+              setUploadPaused(true);
+              setUploadPauseReason(errMsg);
+              setServerMessage(errMsg);
+              setServerMessageType("error");
+
+              if (finalData?.needsPuzzle) {
+                setAccessGranted(false);
+                await loadBootstrap();
+              }
+              return;
+            }
+
+            failedCount += 1;
+            processedCount += 1;
+            failureMessages.push(errMsg);
+            setUploadFailedCount(failedCount);
+            setUploadProcessedCount(processedCount);
+            continue;
+          }
+
+          const status = safeText(finalData?.status).toLowerCase();
 
           if (status === "uploaded" || status === "replaced") {
             uploadedCount += 1;
             processedCount += 1;
-
             setUploadUploadedCount(uploadedCount);
             setUploadProcessedCount(processedCount);
             continue;
@@ -587,7 +767,6 @@ export default function HiddenPdfVaultPage() {
           if (status === "skipped") {
             skippedCount += 1;
             processedCount += 1;
-
             setUploadSkippedCount(skippedCount);
             setUploadProcessedCount(processedCount);
             continue;
@@ -595,7 +774,7 @@ export default function HiddenPdfVaultPage() {
 
           failedCount += 1;
           processedCount += 1;
-
+          failureMessages.push("Unknown finalize response");
           setUploadFailedCount(failedCount);
           setUploadProcessedCount(processedCount);
         } catch (error: any) {
@@ -609,12 +788,14 @@ export default function HiddenPdfVaultPage() {
             break;
           }
 
-          setIsUploading(false);
-          setUploadPaused(true);
-          setUploadPauseReason(reason);
-          setServerMessage(reason);
-          setServerMessageType("error");
-          return;
+          failedCount += 1;
+          processedCount += 1;
+          failureMessages.push(reason || "Upload interrupted");
+          setUploadFailedCount(failedCount);
+          setUploadProcessedCount(processedCount);
+          continue;
+        } finally {
+          uploadAbortControllerRef.current = null;
         }
       }
 
@@ -631,9 +812,10 @@ export default function HiddenPdfVaultPage() {
       }
 
       if (processedCount >= selectedFiles.length) {
+        const firstFailure = safeText(failureMessages[0] || "");
         const summaryMessage =
           failedCount > 0 || skippedCount > 0
-            ? `Upload finished. Actual uploaded ${uploadedCount} / ${selectedFiles.length}. Skipped ${skippedCount}, Failed ${failedCount}.`
+            ? `Upload finished. Actual uploaded ${uploadedCount} / ${selectedFiles.length}. Skipped ${skippedCount}, Failed ${failedCount}.${firstFailure ? ` First issue: ${firstFailure}` : ""}`
             : `Upload finished successfully. ${uploadedCount} / ${selectedFiles.length} PDFs uploaded.`;
 
         setServerMessage(summaryMessage);
@@ -655,9 +837,11 @@ export default function HiddenPdfVaultPage() {
 
     resetMessages();
     resetUploadProgress(true);
+    uploadTargetPathRef.current = currentPath;
+    uploadConflictModeRef.current = conflictMode;
     setUploadTotalCount(selectedFiles.length);
     uploadNextIndexRef.current = 0;
-    await runDirectUpload(0);
+    await runDirectUpload(0, uploadTargetPathRef.current, uploadConflictModeRef.current);
   }
 
   async function resumeDirectUpload() {
@@ -669,7 +853,11 @@ export default function HiddenPdfVaultPage() {
     resetMessages();
     setUploadPaused(false);
     setUploadPauseReason("");
-    await runDirectUpload(uploadNextIndexRef.current);
+    await runDirectUpload(
+      uploadNextIndexRef.current,
+      uploadTargetPathRef.current,
+      uploadConflictModeRef.current
+    );
   }
 
   function cancelCurrentUpload() {
@@ -1136,8 +1324,8 @@ export default function HiddenPdfVaultPage() {
 
               <h1 className="text-2xl font-extrabold mt-3">Bulk Product PDFs Vault</h1>
               <p className="text-sm text-slate-600 mt-1">
-                Solved PDFs ab simple direct final upload mode me process hongi. Current path:{" "}
-                <b>{titlePath || "root"}</b>
+                Solved PDFs ab direct browser to S3 final upload mode me process hongi. Current
+                path: <b>{titlePath || "root"}</b>
               </p>
             </div>
 
@@ -1194,15 +1382,17 @@ export default function HiddenPdfVaultPage() {
               <Info size={18} className="mt-0.5 shrink-0 text-blue-800" />
               <div>
                 <div className="text-sm font-extrabold text-blue-900">
-                  Simple strong upload system
+                  Direct S3 upload system
                 </div>
                 <div className="text-sm text-blue-800 mt-2 leading-6">
-                  Is page par ab batch/job/block UI hata di gayi hai. Upload counter tabhi badega jab file
-                  <b> actual me S3 + database me final save </b> ho jayegi.
+                  Ab browser se PDF direct S3 par upload hogi, phir final record database me save
+                  hoga. Uploaded counter tabhi badega jab file <b>actual me S3 + database</b> dono
+                  me finalize ho jayegi.
                   <br />
                   Per PDF max size <b>{formatBytes(MAX_DIRECT_UPLOAD_BYTES)}</b> hai.
                   <br />
-                  Agar upload beech me stop hota hai, jo PDFs uploaded count me aa chuki hain woh already saved hoti hain.
+                  Agar upload beech me stop hota hai, jo PDFs uploaded count me aa chuki hain woh
+                  already saved hoti hain.
                 </div>
               </div>
             </div>
@@ -1397,7 +1587,7 @@ export default function HiddenPdfVaultPage() {
 
                 {oversizedSelectedFilesCount > 0 ? (
                   <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-800">
-                    {oversizedSelectedFilesCount} file 20MB limit se upar hain. Ye files skip ho sakti hain, baaki PDFs continue hongi.
+                    {oversizedSelectedFilesCount} file 20MB limit se upar hain. Ye files skip hongi, baaki PDFs continue hongi.
                   </div>
                 ) : null}
 
@@ -1474,6 +1664,10 @@ export default function HiddenPdfVaultPage() {
                         Current file: <b>{uploadCurrentIndex}. {uploadCurrentFileName}</b>
                       </div>
                     ) : null}
+
+                    <div className="mt-2 text-xs text-blue-900">
+                      Folder snapshot: <b>{uploadTargetPathRef.current || currentPath}</b>
+                    </div>
                   </div>
                 ) : null}
 
