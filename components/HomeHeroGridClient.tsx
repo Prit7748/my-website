@@ -23,4 +23,4 @@ export default function HomeHeroGridClient({ offersHref = "/offers", notices, le
       left={left}
     />
   );
-}
+}  

@@ -1237,4 +1237,4 @@ export default async function Home() {
       <FloatingButtons />
     </main>
   );
-}
+} 

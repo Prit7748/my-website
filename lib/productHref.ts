@@ -1,15 +1,8 @@
-export type ProductHrefInput = {
-  slug?: string;
-  category?: string;
-  categorySlug?: string;
-  href?: string;
-};
-
-function safeText(input: unknown) {
-  return String(input ?? "").trim();
-}
+// ✅ FILE: lib/productHref.ts
+// (Complete replace)
 
 const CATEGORY_TO_SLUG: Record<string, string> = {
+  // ✅ exact DB labels (recommended)
   "Solved Assignments": "solved-assignments",
   "Handwritten PDFs": "handwritten-pdfs",
   "Handwritten Hardcopy (Delivery)": "handwritten-hardcopy",
@@ -22,36 +15,34 @@ const CATEGORY_TO_SLUG: Record<string, string> = {
   "eBooks": "ebooks",
   "Ebooks": "ebooks",
   "Projects & Synopsis": "projects",
-  Projects: "projects",
-  Combo: "combo",
-  Products: "products",
+  "Projects": "projects",
+  "Combo": "combo",
 };
 
 function normalizeCategory(input: string) {
-  return safeText(input)
+  return (input || "")
+    .trim()
     .toLowerCase()
-    .replace(/&/g, " and ")
+    .replace(/&/g, "and")
     .replace(/\//g, " ")
-    .replace(/[()]/g, " ")
+    .replace(/\(|\)/g, " ")
     .replace(/\s+/g, " ")
     .trim();
 }
 
 export function slugifyCategory(input: string) {
-  const raw = safeText(input);
+  const raw = (input || "").trim();
 
-  if (!raw) return "";
-
-  if (/^[a-z0-9]+(?:-[a-z0-9]+)*$/i.test(raw)) {
+  // ✅ if already a slug (like "solved-assignments") keep it
+  if (/^[a-z0-9]+(-[a-z0-9]+)*$/.test(raw.toLowerCase())) {
     return raw.toLowerCase();
   }
 
-  if (CATEGORY_TO_SLUG[raw]) {
-    return CATEGORY_TO_SLUG[raw];
-  }
+  // ✅ direct match with DB labels
+  if (CATEGORY_TO_SLUG[raw]) return CATEGORY_TO_SLUG[raw];
 
-  const normalized = normalizeCategory(raw);
-
+  // ✅ normalized match (covers: "Handwritten Hardcopy Delivery", "handwritten hardcopy (delivery)" etc.)
+  const n = normalizeCategory(raw);
   const normalizedMap: Record<string, string> = {
     "solved assignments": "solved-assignments",
     "handwritten pdfs": "handwritten-pdfs",
@@ -65,33 +56,26 @@ export function slugifyCategory(input: string) {
     "projects synopsis": "projects",
     "projects": "projects",
     "combo": "combo",
-    "products": "products",
   };
 
-  if (normalizedMap[normalized]) {
-    return normalizedMap[normalized];
-  }
+  if (normalizedMap[n]) return normalizedMap[n];
 
-  return normalized
+  // ✅ fallback: slugify (but avoid random wrong slugs when category missing)
+  return n
     .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
+    .replace(/(^-|-$)/g, "");
 }
 
-export function productHref(input: ProductHrefInput) {
-  const explicitHref = safeText(input?.href);
-  if (explicitHref.startsWith("/")) {
-    return explicitHref;
-  }
+export function productHref(p: { slug?: string; category?: string }) {
+  const prodSlug = (p.slug || "").trim();
+  const cat = (p.category || "").trim();
 
-  const slug = safeText(input?.slug);
-  if (!slug) return "/products";
+  // ✅ if slug missing, safe fallback
+  if (!prodSlug) return "/products";
 
-  const directCategorySlug = safeText(input?.categorySlug);
-  const resolvedCategorySlug = directCategorySlug || slugifyCategory(safeText(input?.category));
+  // ✅ if category missing/unknown => send to /products/:slug (your redirect page should handle it)
+  const catSlug = slugifyCategory(cat);
+  if (!catSlug) return `/products/${prodSlug}`;
 
-  if (!resolvedCategorySlug) {
-    return `/products/${encodeURIComponent(slug)}`;
-  }
-
-  return `/${resolvedCategorySlug}/${encodeURIComponent(slug)}`;
+  return `/${catSlug}/${prodSlug}`;
 }

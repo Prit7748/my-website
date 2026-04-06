@@ -27,4 +27,4 @@ export default async function Page({ searchParams }: PageProps) {
       initialPageParam={typeof sp.page === "string" ? sp.page : "1"}
     />
   );
-}
+} 
