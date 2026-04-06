@@ -23,12 +23,26 @@ declare global {
   }
 }
 
+function safeStr(x: any) {
+  return String(x ?? "").trim();
+}
+
+function normPhone(x: any) {
+  return safeStr(x).replace(/[^\d+]/g, "");
+}
+
+function isAdminRole(role: string) {
+  const r = safeStr(role).toLowerCase();
+  return r === "master_admin" || r === "co_admin" || r === "admin";
+}
+
 export default function LoginClient() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
   const redirectTarget = useMemo(() => {
-    const raw = String(searchParams.get("redirect") || "").trim();
+    const raw =
+      safeStr(searchParams.get("redirect")) || safeStr(searchParams.get("next")) || "";
     if (!raw) return "/dashboard";
     if (!raw.startsWith("/")) return "/dashboard";
     if (raw.startsWith("//")) return "/dashboard";
@@ -52,19 +66,6 @@ export default function LoginClient() {
   const handleInputChange = (e: any) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });
   };
-
-  function safeStr(x: any) {
-    return String(x ?? "").trim();
-  }
-
-  function normPhone(x: any) {
-    return safeStr(x).replace(/[^\d+]/g, "");
-  }
-
-  function isAdminRole(role: string) {
-    const r = (role || "").toLowerCase();
-    return r === "master_admin" || r === "co_admin" || r === "admin";
-  }
 
   function getPostLoginPath(role: string) {
     if (isAdminRole(role)) return "/admin";
@@ -407,6 +408,9 @@ export default function LoginClient() {
                       </div>
                       <p className="text-[11px] text-slate-500">
                         Co-Admin login ke liye Admin Key required hai.
+                      </p>
+                      <p className="text-[11px] font-semibold text-slate-600">
+                        Admin session manual logout tak active rahegi. Browser close hone par session end ho jayegi.
                       </p>
                     </div>
                   )}
