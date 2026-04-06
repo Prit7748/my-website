@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+
 import dbConnect from "@/lib/db";
 import Product from "@/models/Product";
 import GlobalToggle from "@/models/GlobalToggle";
@@ -27,6 +28,44 @@ function slugFromRequest(req: Request, params?: any) {
 
 function normAvail(v?: string) {
   return safeStr(v).toLowerCase();
+}
+
+function categorySlugFromProductCategory(category?: string) {
+  const c = safeStr(category).toLowerCase();
+
+  if (c === "solved assignments") return "solved-assignments";
+  if (c === "handwritten pdfs") return "handwritten-pdfs";
+  if (c.includes("handwritten") && (c.includes("hardcopy") || c.includes("delivery"))) {
+    return "handwritten-hardcopy";
+  }
+  if (c.includes("question") && (c.includes("paper") || c.includes("pyq"))) return "question-papers";
+  if (c.includes("guess")) return "guess-papers";
+  if (c.includes("ebook") || c.includes("notes")) return "ebooks";
+  if (c.includes("project") || c.includes("synopsis")) return "projects";
+  if (c.includes("combo")) return "combo";
+
+  return "products";
+}
+
+function normalizeImages(images: any, thumbnailUrl?: string, quickUrl?: string) {
+  const raw = Array.isArray(images) ? images : [];
+  const urls = raw
+    .map((x: any) => {
+      if (typeof x === "string") return safeStr(x);
+      if (x && typeof x === "object" && typeof x.url === "string") return safeStr(x.url);
+      return "";
+    })
+    .filter(Boolean);
+
+  const unique = Array.from(new Set(urls));
+  const thumb = safeStr(thumbnailUrl) || unique[0] || "";
+  const quick = safeStr(quickUrl) || unique[1] || unique[0] || "";
+
+  return {
+    images: unique,
+    thumbnailUrl: thumb,
+    quickUrl: quick,
+  };
 }
 
 async function getOnDemandSalesEnabled() {
@@ -77,16 +116,21 @@ export async function GET(
 
     const p: any = await Product.findOne({
       slug,
-      $or: [{ isActive: true }, { isActive: { $exists: false } }],
+      $and: [
+        { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] },
+        { $or: [{ isActive: true }, { isActive: { $exists: false } }] },
+      ],
     }).lean();
 
     if (!p) {
       return NextResponse.json({ error: "Not found", slug }, { status: 404 });
     }
 
+    const normalizedImages = normalizeImages(p.images, p.thumbnailUrl, p.quickUrl);
     const onDemandSalesEnabled = await getOnDemandSalesEnabled();
     const rawAvailability = safeStr(p.availability || "");
     const resolvedAvail = resolveAvailability(rawAvailability, onDemandSalesEnabled);
+
     const resolvedTiming = await resolveOnDemandTimingForProduct({
       category: p.category,
       courseCodes: Array.isArray(p.courseCodes) ? p.courseCodes : [],
@@ -102,6 +146,8 @@ export async function GET(
           slug: p.slug || "",
           sku: p.sku || "",
           category: p.category || "",
+          categorySlug: categorySlugFromProductCategory(p.category),
+          href: `/${categorySlugFromProductCategory(p.category)}/${encodeURIComponent(p.slug || "")}`,
 
           subjectCode: p.subjectCode || "",
           subjectTitleHi: p.subjectTitleHi || "",
@@ -123,6 +169,7 @@ export async function GET(
           availability: rawAvailability || "",
           effectiveAvailability: resolvedAvail,
           onDemandSalesEnabled,
+          canPurchase: resolvedAvail !== "want_to_buy",
 
           deliverWithinMinutes: Math.max(
             1,
@@ -144,20 +191,30 @@ export async function GET(
           pdfUrl: p.pdfUrl || "",
           pdfKey: p.pdfKey || "",
 
-          images: Array.isArray(p.images) ? p.images : [],
-          thumbnailUrl: p.thumbnailUrl || "",
-          quickUrl: p.quickUrl || "",
+          images: normalizedImages.images,
+          thumbnailUrl: normalizedImages.thumbnailUrl,
+          quickUrl: normalizedImages.quickUrl,
 
           createdAt: p.createdAt || null,
           updatedAt: p.updatedAt || null,
         },
       },
-      { status: 200 }
+      {
+        status: 200,
+        headers: {
+          "Cache-Control": "no-store",
+        },
+      }
     );
   } catch (e: any) {
     return NextResponse.json(
       { error: "Server error", details: e?.message || "unknown" },
-      { status: 500 }
+      {
+        status: 500,
+        headers: {
+          "Cache-Control": "no-store",
+        },
+      }
     );
   }
 }

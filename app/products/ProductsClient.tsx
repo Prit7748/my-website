@@ -1,3 +1,4 @@
+// app/products/ProductsClient.tsx
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -25,7 +26,6 @@ import {
   ChevronDown,
 } from "lucide-react";
 
-// --- TYPES ---
 type ApiProductCard = {
   title: string;
   slug: string;
@@ -38,6 +38,7 @@ type ApiProductCard = {
   images?: string[];
   thumbUrl?: string;
   quickUrl?: string;
+  thumbnailUrl?: string;
   isDigital?: boolean;
 };
 
@@ -57,9 +58,9 @@ type ProductsClientProps = {
   initialLanguageParam?: string;
   initialSortParam?: string;
   initialPageParam?: string;
+  initialResponse?: ApiProductsResponse | null;
 };
 
-// --- HELPERS ---
 function safeStr(x: any) {
   return String(x || "").trim();
 }
@@ -84,8 +85,21 @@ function isAlpha1(s: string) {
 function isHardcopyCategory(category?: string) {
   return safeStr(category).toLowerCase() === "handwritten hardcopy (delivery)".toLowerCase();
 }
+function categorySlugFromProductCategory(category?: string) {
+  const c = safeStr(category).toLowerCase();
+  if (c === "solved assignments") return "solved-assignments";
+  if (c === "handwritten pdfs") return "handwritten-pdfs";
+  if (c.includes("handwritten") && (c.includes("hardcopy") || c.includes("delivery"))) {
+    return "handwritten-hardcopy";
+  }
+  if (c.includes("question") && (c.includes("paper") || c.includes("pyq"))) return "question-papers";
+  if (c.includes("guess")) return "guess-papers";
+  if (c.includes("ebook") || c.includes("notes")) return "ebooks";
+  if (c.includes("project") || c.includes("synopsis")) return "projects";
+  if (c.includes("combo")) return "combo";
+  return "products";
+}
 
-// ✅ Normalize query (search assist)
 function normalizeQuery(raw: string) {
   const s = safeStr(raw).toUpperCase();
   const cleaned = s.replace(/[^A-Z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
@@ -93,7 +107,6 @@ function normalizeQuery(raw: string) {
   return { cleaned, compact };
 }
 
-// ✅ Extract subject code variants
 function extractSubjectCodeVariants(raw: string) {
   const { compact } = normalizeQuery(raw);
   const m1 = compact.match(/([A-Z]{2,6})(\d{2,4})/);
@@ -101,7 +114,6 @@ function extractSubjectCodeVariants(raw: string) {
 
   const letters = m1[1];
   const digits = m1[2];
-
   const digitsNoLeading = String(Number(digits));
   const pad3 = digitsNoLeading.padStart(3, "0");
 
@@ -122,7 +134,20 @@ function extractSubjectCodeVariants(raw: string) {
   return { code: `${letters}${pad3}`, variants };
 }
 
-/** ✅ Portal dropdown so it NEVER hides behind products */
+function buildInitialMeta(initialResponse: ApiProductsResponse | null | undefined, fallbackPage: number) {
+  const m = initialResponse?.pagination || initialResponse?.meta || {};
+  return {
+    total: Number(m.total || 0),
+    page: Number(m.page || fallbackPage || 1),
+    totalPages: Number(m.totalPages || 1),
+    limit: Number(m.limit || 12),
+  };
+}
+
+function sameStringArray(a: string[], b: string[]) {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
 function PortalDropdown({
   open,
   anchorEl,
@@ -164,11 +189,11 @@ function PortalDropdown({
 
   useEffect(() => {
     if (!open) return;
-    const onKey_queries = (e: KeyboardEvent) => {
+    const onKeyQueries = (e: KeyboardEvent) => {
       if (e.key === "Escape") onRequestClose();
     };
-    document.addEventListener("keydown", onKey_queries);
-    return () => document.removeEventListener("keydown", onKey_queries);
+    document.addEventListener("keydown", onKeyQueries);
+    return () => document.removeEventListener("keydown", onKeyQueries);
   }, [open, onRequestClose]);
 
   if (!mounted || !open || !anchorEl) return null;
@@ -187,7 +212,6 @@ function PortalDropdown({
   );
 }
 
-/** ✅ Industrial dropdown multi-select with internal search + big-list friendly behavior (Course) */
 function MultiSelectDropdown({
   label,
   items,
@@ -436,7 +460,6 @@ function ProductsGridSkeleton() {
   );
 }
 
-// ✅ MAIN COMPONENT
 export default function ProductsClient({
   initialSearchParam = "",
   initialCategoryParam = "",
@@ -445,11 +468,13 @@ export default function ProductsClient({
   initialLanguageParam = "",
   initialSortParam = "latest",
   initialPageParam = "1",
+  initialResponse = null,
 }: ProductsClientProps) {
   const router = useRouter();
   const sp = useSearchParams();
 
   const didHydrateSyncRef = useRef(false);
+  const skipFirstClientFetchRef = useRef(Boolean(initialResponse));
 
   const initialUrlSearch = safeStr(initialSearchParam);
   const initialUrlCategory = parseCsvParam(safeStr(initialCategoryParam));
@@ -467,6 +492,9 @@ export default function ProductsClient({
   const urlSort = (safeStr(sp.get("sort")) as SortKey) || "latest";
   const urlPage = Number(sp.get("page") || "1") || 1;
 
+  const hasInitialResponse = initialResponse !== null && initialResponse !== undefined;
+  const initialMeta = buildInitialMeta(initialResponse, initialUrlPage);
+
   const [isFilterOpen, setIsFilterOpen] = useState(false);
 
   const [searchInput, setSearchInput] = useState(initialUrlSearch);
@@ -479,14 +507,11 @@ export default function ProductsClient({
 
   const [sort, setSort] = useState<SortKey>(initialUrlSort || "latest");
 
-  const [loading, setLoading] = useState(true);
-  const [items, setItems] = useState<ApiProductCard[]>([]);
-  const [meta, setMeta] = useState({
-    total: 0,
-    page: Math.max(1, initialUrlPage),
-    totalPages: 1,
-    limit: 12,
-  });
+  const [loading, setLoading] = useState(!hasInitialResponse);
+  const [items, setItems] = useState<ApiProductCard[]>(
+    Array.isArray(initialResponse?.products) ? initialResponse!.products : []
+  );
+  const [meta, setMeta] = useState(initialMeta);
 
   const [suggestLoading, setSuggestLoading] = useState(false);
   const [suggestions, setSuggestions] = useState<ApiProductCard[]>([]);
@@ -514,6 +539,22 @@ export default function ProductsClient({
   const defaultSessionFallback = ["2025-2026", "2024-2025", "2023-2024"];
 
   useEffect(() => {
+    const bootList = Array.isArray(initialResponse?.products) ? initialResponse!.products : [];
+    for (const p of bootList) {
+      const c = safeStr(p.category);
+      if (c) cacheRef.current.categories.add(c);
+      for (const cc of safeArr<string>(p.courseCodes)) {
+        const k = toUpper(cc);
+        if (k) cacheRef.current.courses.add(k);
+      }
+      const s = safeStr(p.session);
+      if (s) cacheRef.current.sessions.add(s);
+      const l = safeStr(p.language);
+      if (l) cacheRef.current.languages.add(l);
+    }
+  }, [initialResponse]);
+
+  useEffect(() => {
     if (isFilterOpen) document.body.style.overflow = "hidden";
     else document.body.style.overflow = "auto";
 
@@ -539,17 +580,17 @@ export default function ProductsClient({
       syncUrl({ search: next, page: 1 });
     }, 350);
     return () => clearTimeout(t);
-  }, [searchInput]);
+  }, [searchInput, search]);
 
   useEffect(() => {
     if (!didHydrateSyncRef.current) {
       didHydrateSyncRef.current = true;
 
       const sameSearch = urlSearch === initialUrlSearch;
-      const sameCat = JSON.stringify(urlCategory) === JSON.stringify(initialUrlCategory);
-      const sameCourse = JSON.stringify(urlCourse) === JSON.stringify(initialUrlCourse);
-      const sameSession = JSON.stringify(urlSession) === JSON.stringify(initialUrlSession);
-      const sameLang = JSON.stringify(urlLang) === JSON.stringify(initialUrlLang);
+      const sameCat = sameStringArray(urlCategory, initialUrlCategory);
+      const sameCourse = sameStringArray(urlCourse, initialUrlCourse);
+      const sameSession = sameStringArray(urlSession, initialUrlSession);
+      const sameLang = sameStringArray(urlLang, initialUrlLang);
       const sameSort = urlSort === initialUrlSort;
       const samePage = (urlPage || 1) === (initialUrlPage || 1);
 
@@ -567,9 +608,8 @@ export default function ProductsClient({
     setSelectedLang(urlLang);
 
     setSort((urlSort as SortKey) || "latest");
-
     setMeta((m) => ({ ...m, page: urlPage || 1 }));
-  }, [sp]);
+  }, [sp, urlSearch, urlCategory, urlCourse, urlSession, urlLang, urlSort, urlPage, initialUrlSearch, initialUrlCategory, initialUrlCourse, initialUrlSession, initialUrlLang, initialUrlSort, initialUrlPage]);
 
   function syncUrl(partial: {
     search?: string;
@@ -643,6 +683,20 @@ export default function ProductsClient({
 
   useEffect(() => {
     let cancelled = false;
+
+    const sameAsInitial =
+      search === initialUrlSearch &&
+      sameStringArray(selectedCat, initialUrlCategory) &&
+      sameStringArray(selectedCourse, initialUrlCourse) &&
+      sameStringArray(selectedSession, initialUrlSession) &&
+      sameStringArray(selectedLang, initialUrlLang) &&
+      sort === initialUrlSort &&
+      meta.page === initialUrlPage;
+
+    if (skipFirstClientFetchRef.current && sameAsInitial) {
+      skipFirstClientFetchRef.current = false;
+      return;
+    }
 
     (async () => {
       setLoading(true);
@@ -718,13 +772,20 @@ export default function ProductsClient({
       cancelled = true;
     };
   }, [
-    selectedCat.join(","),
-    selectedCourse.join(","),
-    selectedSession.join(","),
-    selectedLang.join(","),
+    selectedCat,
+    selectedCourse,
+    selectedSession,
+    selectedLang,
     search,
     sort,
     meta.page,
+    initialUrlSearch,
+    initialUrlCategory,
+    initialUrlCourse,
+    initialUrlSession,
+    initialUrlLang,
+    initialUrlSort,
+    initialUrlPage,
   ]);
 
   useEffect(() => {
@@ -790,13 +851,13 @@ export default function ProductsClient({
       cancelled = true;
       clearTimeout(t);
     };
-  }, [searchInput, selectedCat.join(","), selectedCourse.join(","), selectedSession.join(","), selectedLang.join(",")]);
+  }, [searchInput, selectedCat, selectedCourse, selectedSession, selectedLang]);
 
   const countText = useMemo(() => {
-    if (loading) return "Loading…";
+    if (loading && !items.length && !hasInitialResponse) return "Loading…";
     if (meta.total) return `${meta.total} results`;
     return `${items.length} results`;
-  }, [loading, meta.total, items.length]);
+  }, [loading, meta.total, items.length, hasInitialResponse]);
 
   const similarCodes = useMemo(() => {
     if (loading) return [];
@@ -1252,21 +1313,24 @@ export default function ProductsClient({
 
                     {suggestions.length ? (
                       <div className="max-h-[360px] overflow-auto">
-                        {suggestions.map((p) => (
-                          <Link
-                            key={p.slug}
-                            href={`/${(p.category || "products").toString().toLowerCase().includes("solved") ? "solved-assignments" : "products"}/${p.slug}`}
-                            className="block px-4 py-3 hover:bg-slate-50 border-b border-slate-50"
-                            onClick={() => setShowSuggest(false)}
-                          >
-                            <div className="text-sm font-extrabold text-slate-900 line-clamp-1">{p.title}</div>
-                            <div className="mt-1 text-[11px] font-bold text-slate-600">
-                              {safeStr(p.category) ? safeStr(p.category) : "Product"}
-                              {safeStr(p.session) ? ` • ${safeStr(p.session)}` : ""}
-                              {safeStr(p.language) ? ` • ${safeStr(p.language)}` : ""}
-                            </div>
-                          </Link>
-                        ))}
+                        {suggestions.map((p) => {
+                          const href = `/${categorySlugFromProductCategory(p.category)}/${encodeURIComponent(p.slug)}`;
+                          return (
+                            <Link
+                              key={p.slug}
+                              href={href}
+                              className="block px-4 py-3 hover:bg-slate-50 border-b border-slate-50"
+                              onClick={() => setShowSuggest(false)}
+                            >
+                              <div className="text-sm font-extrabold text-slate-900 line-clamp-1">{p.title}</div>
+                              <div className="mt-1 text-[11px] font-bold text-slate-600">
+                                {safeStr(p.category) ? safeStr(p.category) : "Product"}
+                                {safeStr(p.session) ? ` • ${safeStr(p.session)}` : ""}
+                                {safeStr(p.language) ? ` • ${safeStr(p.language)}` : ""}
+                              </div>
+                            </Link>
+                          );
+                        })}
                       </div>
                     ) : (
                       <div className="p-4">
@@ -1303,7 +1367,7 @@ export default function ProductsClient({
           </div>
 
           <div className="mt-5">
-            {loading ? (
+            {loading && !items.length ? (
               <ProductsGridSkeleton />
             ) : items.length === 0 ? (
               <div className="rounded-2xl border border-gray-200 bg-white shadow-sm p-6">

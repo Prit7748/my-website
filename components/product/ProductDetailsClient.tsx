@@ -1,10 +1,13 @@
+// components/product/ProductDetailsClient.tsx
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
 import Image from "next/image";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+
 import { useCart } from "@/context/CartContext";
+import { productHref } from "@/lib/productHref";
 import { trackViewItem } from "../../lib/analytics";
 
 import TopBar from "@/components/TopBar";
@@ -48,6 +51,8 @@ type Product = {
   slug: string;
   sku?: string;
   category?: string;
+  categorySlug?: string;
+  href?: string;
 
   subjectCode?: string;
   subjectTitleHi?: string;
@@ -71,6 +76,7 @@ type Product = {
   effectiveAvailability?: string;
   onDemandSalesEnabled?: boolean;
   comingSoonSalesEnabled?: boolean;
+  canPurchase?: boolean;
 
   isDigital?: boolean;
   pdfUrl?: string;
@@ -84,6 +90,8 @@ type Product = {
     title: string;
     slug: string;
     category?: string;
+    categorySlug?: string;
+    href?: string;
     price?: number;
     thumbUrl?: string;
   }>;
@@ -93,6 +101,8 @@ type ApiProductCard = {
   title: string;
   slug: string;
   category?: string;
+  categorySlug?: string;
+  href?: string;
   courseCodes?: string[];
   session?: string;
   language?: string;
@@ -100,6 +110,7 @@ type ApiProductCard = {
   oldPrice?: number | null;
   images?: string[];
   thumbUrl?: string;
+  thumbnailUrl?: string;
   quickUrl?: string;
   isDigital?: boolean;
   availability?: string;
@@ -134,14 +145,11 @@ function isHindiLike(lang: string) {
 }
 function pickSubjectTitleByLanguage(p: Product) {
   const lang = safeStr(p.language);
-  if (isHindiLike(lang))
-    return safeStr(p.subjectTitleHi) || safeStr(p.subjectTitleEn) || "";
+  if (isHindiLike(lang)) return safeStr(p.subjectTitleHi) || safeStr(p.subjectTitleEn) || "";
   return safeStr(p.subjectTitleEn) || safeStr(p.subjectTitleHi) || "";
 }
 function pickCourseTitleByLanguage(p: Product) {
-  const titles = Array.isArray(p.courseTitles)
-    ? p.courseTitles.filter(Boolean)
-    : [];
+  const titles = Array.isArray(p.courseTitles) ? p.courseTitles.filter(Boolean) : [];
   return titles[0] ? safeStr(titles[0]) : "";
 }
 function isVideoUrl(url: string) {
@@ -268,13 +276,21 @@ export default function ProductDetailsClient({
     text: "",
   });
 
-  const categoryLabel = useMemo(
-    () => categoryLabelFromSlug(categorySlug),
-    [categorySlug]
-  );
+  const categoryLabel = useMemo(() => categoryLabelFromSlug(categorySlug), [categorySlug]);
 
   const isHardcopy = useMemo(() => variant === "hardcopy", [variant]);
   const qtyLocked = useMemo(() => !isHardcopy, [isHardcopy]);
+
+  const canonicalProductHref = useMemo(
+    () =>
+      productHref({
+        slug: product.slug,
+        category: product.category,
+        categorySlug: product.categorySlug || categorySlug,
+        href: product.href,
+      }),
+    [product.slug, product.category, product.categorySlug, product.href, categorySlug]
+  );
 
   useEffect(() => {
     if (qtyLocked) setQuantity(1);
@@ -282,10 +298,7 @@ export default function ProductDetailsClient({
 
   useEffect(() => {
     if (!ctaToast.show) return;
-    const t = setTimeout(
-      () => setCtaToast({ show: false, text: "" }),
-      1400
-    );
+    const t = setTimeout(() => setCtaToast({ show: false, text: "" }), 1400);
     return () => clearTimeout(t);
   }, [ctaToast.show]);
 
@@ -299,8 +312,7 @@ export default function ProductDetailsClient({
   }, [product]);
 
   useEffect(() => {
-    if (selectedMediaIndex > Math.max(0, media.length - 1))
-      setSelectedMediaIndex(0);
+    if (selectedMediaIndex > Math.max(0, media.length - 1)) setSelectedMediaIndex(0);
   }, [media.length, selectedMediaIndex]);
 
   useEffect(() => {
@@ -316,24 +328,16 @@ export default function ProductDetailsClient({
 
   useEffect(() => {
     if (!isHardcopy) return;
-    const t = setInterval(
-      () => setWaPulseText((p) => (p === "en" ? "hi" : "en")),
-      3000
-    );
+    const t = setInterval(() => setWaPulseText((p) => (p === "en" ? "hi" : "en")), 3000);
     return () => clearInterval(t);
   }, [isHardcopy]);
 
-  const heroUrl =
-    media[selectedMediaIndex] || product?.thumbnailUrl || "/images/cover1.jpg";
+  const heroUrl = media[selectedMediaIndex] || product?.thumbnailUrl || "/images/cover1.jpg";
   const heroIsVideo = isVideoUrl(heroUrl);
   const hasDiscount =
     !!product.oldPrice && Number(product.oldPrice) > Number(product.price || 0);
-  const subjectTitle = useMemo(() => pickSubjectTitleByLanguage(product), [
-    product,
-  ]);
-  const courseTitle = useMemo(() => pickCourseTitleByLanguage(product), [
-    product,
-  ]);
+  const subjectTitle = useMemo(() => pickSubjectTitleByLanguage(product), [product]);
+  const courseTitle = useMemo(() => pickCourseTitleByLanguage(product), [product]);
 
   const computedTitle = useMemo(() => {
     const t = safeStr(product.title);
@@ -342,21 +346,16 @@ export default function ProductDetailsClient({
     if (safeStr(product.subjectCode)) parts.push(safeStr(product.subjectCode));
     if (safeStr(product.session)) parts.push(safeStr(product.session));
     if (safeStr(product.language)) parts.push(safeStr(product.language));
-    return parts.length
-      ? `IGNOU Combo (${parts.join(" • ")})`
-      : "IGNOU Combo";
+    return parts.length ? `IGNOU Combo (${parts.join(" • ")})` : "IGNOU Combo";
   }, [product.title, product.subjectCode, product.session, product.language]);
 
   const computedShortDesc = useMemo(() => {
     const s = safeStr(product.shortDesc);
     if (s) return s;
     const bits: string[] = [];
-    if (safeStr(product.subjectCode))
-      bits.push(`Subject: ${safeStr(product.subjectCode)}`);
-    if (safeStr(product.session))
-      bits.push(`Session: ${safeStr(product.session)}`);
-    if (safeStr(product.language))
-      bits.push(`Medium: ${safeStr(product.language)}`);
+    if (safeStr(product.subjectCode)) bits.push(`Subject: ${safeStr(product.subjectCode)}`);
+    if (safeStr(product.session)) bits.push(`Session: ${safeStr(product.session)}`);
+    if (safeStr(product.language)) bits.push(`Medium: ${safeStr(product.language)}`);
     return bits.length
       ? `A curated combo pack for better value. ${bits.join(" | ")}`
       : `A curated combo pack for better value.`;
@@ -418,27 +417,22 @@ export default function ProductDetailsClient({
   useEffect(() => {
     try {
       const saved = localStorage.getItem("isp_user_email") || "";
-      if (saved && !wtbForm.email)
-        setWtbForm((p) => ({ ...p, email: saved }));
+      if (saved && !wtbForm.email) setWtbForm((p) => ({ ...p, email: saved }));
     } catch {}
   }, [wtbForm.email]);
 
   const waBuyMsg = encodeURIComponent(
-    `Hi! I want to buy this product:\n\n${computedTitle}\n${
-      pageUrl || pathname
-    }\n\nPlease share details.`
+    `Hi! I want to buy this product:\n\n${computedTitle}\n${pageUrl || canonicalProductHref}\n\nPlease share details.`
   );
   const waSamplesMsg = encodeURIComponent(
     `Hi! Please share handwriting samples.\n\nProduct: ${computedTitle}\nSubject Code: ${safeStr(
       product.subjectCode
     )}\nSession: ${safeStr(product.session)}\nMedium: ${safeStr(
       product.language
-    )}\n\nLink: ${pageUrl || pathname}`
+    )}\n\nLink: ${pageUrl || canonicalProductHref}`
   );
   const waReviewMsg = encodeURIComponent(
-    `Hi! I purchased this product and want to share my review:\n\n${computedTitle}\n${
-      pageUrl || pathname
-    }\n\nRating: ⭐⭐⭐⭐⭐\nReview: `
+    `Hi! I purchased this product and want to share my review:\n\n${computedTitle}\n${pageUrl || canonicalProductHref}\n\nRating: ⭐⭐⭐⭐⭐\nReview: `
   );
 
   const waBuyLink = `https://wa.me/91${waNumber}?text=${waBuyMsg}`;
@@ -460,9 +454,7 @@ export default function ProductDetailsClient({
       quantity: qtyLocked ? 1 : quantity,
       category: safeStr(product.category),
       courseCode: (product.courseCodes?.[0] || "").toString(),
-      availability: safeStr(
-        product.effectiveAvailability || product.availability || "available"
-      ),
+      availability: safeStr(product.effectiveAvailability || product.availability || "available"),
       canPurchase: !isOutOfStock(product),
     } as any);
 
@@ -500,9 +492,7 @@ export default function ProductDetailsClient({
           productId,
           email,
           phone,
-          message:
-            message ||
-            `Interested in: ${computedTitle}\nLink: ${pageUrl || pathname}`,
+          message: message || `Interested in: ${computedTitle}\nLink: ${pageUrl || canonicalProductHref}`,
         }),
       });
 
@@ -531,24 +521,16 @@ export default function ProductDetailsClient({
     const oos = isOutOfStock(product);
 
     return (
-      <div
-        className={`flex gap-3 ${isMobile ? "" : "w-full"} ${
-          isHardcopy ? "flex-col sm:flex-row" : ""
-        }`}
-      >
+      <div className={`flex gap-3 ${isMobile ? "" : "w-full"} ${isHardcopy ? "flex-col sm:flex-row" : ""}`}>
         <div
           className={`flex items-center rounded-2xl bg-white h-14 border ${
-            qtyLocked
-              ? "border-gray-200 opacity-70"
-              : "border-gray-200"
+            qtyLocked ? "border-gray-200 opacity-70" : "border-gray-200"
           } shadow-sm`}
         >
           <button
             onClick={() => setQuantity(Math.max(1, quantity - 1))}
             className={`px-3 h-full rounded-l-2xl ${
-              qtyLocked
-                ? "cursor-not-allowed"
-                : "hover:bg-gray-50 text-gray-800"
+              qtyLocked ? "cursor-not-allowed" : "hover:bg-gray-50 text-gray-800"
             }`}
             disabled={qtyLocked}
             aria-label="Decrease quantity"
@@ -563,9 +545,7 @@ export default function ProductDetailsClient({
           <button
             onClick={() => setQuantity(quantity + 1)}
             className={`px-3 h-full rounded-r-2xl ${
-              qtyLocked
-                ? "cursor-not-allowed"
-                : "hover:bg-gray-50 text-gray-800"
+              qtyLocked ? "cursor-not-allowed" : "hover:bg-gray-50 text-gray-800"
             }`}
             disabled={qtyLocked}
             aria-label="Increase quantity"
@@ -578,13 +558,7 @@ export default function ProductDetailsClient({
           <div className="flex-1 min-w-0 flex gap-3">
             <button
               onClick={handleAddToCart}
-              className="
-                flex-1 min-w-0 h-14 px-4 rounded-2xl font-extrabold text-sm md:text-base
-                bg-blue-700 text-white hover:bg-blue-800 transition
-                shadow-[0_14px_35px_-18px_rgba(37,99,235,0.7)]
-                active:scale-[0.98]
-                inline-flex items-center justify-center gap-2
-              "
+              className="flex-1 min-w-0 h-14 px-4 rounded-2xl font-extrabold text-sm md:text-base bg-blue-700 text-white hover:bg-blue-800 transition shadow-[0_14px_35px_-18px_rgba(37,99,235,0.7)] active:scale-[0.98] inline-flex items-center justify-center gap-2"
               aria-label="Add to cart"
               title="Add to cart"
             >
@@ -594,21 +568,7 @@ export default function ProductDetailsClient({
 
             <button
               onClick={handleHardcopyWhatsApp}
-              className="
-                isp-wa-pulse
-                relative h-14 rounded-2xl font-extrabold text-sm md:text-[15px]
-                bg-emerald-600 text-white
-                shadow-[0_14px_35px_-18px_rgba(16,185,129,0.85)]
-                ring-2 ring-emerald-300/60
-                hover:bg-emerald-700 transition
-                active:scale-[0.98]
-                overflow-hidden
-                shrink-0
-                px-4 sm:px-5
-                w-[44%] sm:w-[38%] lg:w-[34%]
-                min-w-[190px] sm:min-w-[210px]
-                max-w-[280px]
-              "
+              className="isp-wa-pulse relative h-14 rounded-2xl font-extrabold text-sm md:text-[15px] bg-emerald-600 text-white shadow-[0_14px_35px_-18px_rgba(16,185,129,0.85)] ring-2 ring-emerald-300/60 hover:bg-emerald-700 transition active:scale-[0.98] overflow-hidden shrink-0 px-4 sm:px-5 w-[44%] sm:w-[38%] lg:w-[34%] min-w-[190px] sm:min-w-[210px] max-w-[280px]"
             >
               <span className="absolute inset-0 opacity-30 bg-[radial-gradient(600px_120px_at_20%_0%,rgba(255,255,255,0.6),transparent)]" />
               <span className="relative inline-flex items-center justify-center gap-2 w-full h-full">
@@ -636,26 +596,12 @@ export default function ProductDetailsClient({
           <button
             type="button"
             onClick={() => {
-              setCtaToast({
-                show: true,
-                text: "Want to Buy request form opened ✅",
-              });
+              setCtaToast({ show: true, text: "Want to Buy request form opened ✅" });
               setWtbOpen(true);
             }}
-            className="
-              flex-1 h-14 rounded-2xl font-extrabold text-base
-              !opacity-100 !text-white
-              !bg-orange-600 hover:!bg-orange-700
-              border-2 !border-orange-300
-              shadow-[0_18px_45px_-18px_rgba(234,88,12,0.95)]
-              ring-2 ring-orange-200/80
-              active:scale-[0.98]
-              inline-flex items-center justify-center gap-2
-              relative overflow-hidden
-            "
+            className="flex-1 h-14 rounded-2xl font-extrabold text-base !opacity-100 !text-white !bg-orange-600 hover:!bg-orange-700 border-2 !border-orange-300 shadow-[0_18px_45px_-18px_rgba(234,88,12,0.95)] ring-2 ring-orange-200/80 active:scale-[0.98] inline-flex items-center justify-center gap-2 relative overflow-hidden"
             style={{
-              background:
-                "linear-gradient(90deg, #ea580c 0%, #e11d48 100%)",
+              background: "linear-gradient(90deg, #ea580c 0%, #e11d48 100%)",
               color: "#fff",
               opacity: 1,
             }}
@@ -675,13 +621,7 @@ export default function ProductDetailsClient({
         ) : (
           <button
             onClick={handleAddToCart}
-            className="
-              flex-1 h-14 rounded-2xl font-extrabold text-base
-              bg-blue-700 text-white hover:bg-blue-800 transition
-              shadow-[0_14px_35px_-18px_rgba(37,99,235,0.65)]
-              active:scale-[0.98]
-              flex items-center justify-center gap-2
-            "
+            className="flex-1 h-14 rounded-2xl font-extrabold text-base bg-blue-700 text-white hover:bg-blue-800 transition shadow-[0_14px_35px_-18px_rgba(37,99,235,0.65)] active:scale-[0.98] flex items-center justify-center gap-2"
           >
             <ShoppingCart size={20} /> Add to Cart
           </button>
@@ -705,28 +645,26 @@ export default function ProductDetailsClient({
       title: computedTitle,
       slug: product.slug,
       category: product.category,
-      courseCodes: Array.isArray(product.courseCodes)
-        ? product.courseCodes
-        : [],
+      categorySlug: product.categorySlug || categorySlug,
+      href: canonicalProductHref,
+      courseCodes: Array.isArray(product.courseCodes) ? product.courseCodes : [],
       session: product.session || "",
       language: product.language || "",
       price: Number(product.price || 0),
       oldPrice: product.oldPrice ? Number(product.oldPrice) : null,
       images: Array.isArray(product.images) ? product.images : [],
       thumbUrl: product.thumbnailUrl || "",
+      thumbnailUrl: product.thumbnailUrl || "",
       quickUrl: product.quickUrl || "",
       isDigital: !!product.isDigital,
-      availability:
-        product.effectiveAvailability || product.availability || "available",
+      availability: product.effectiveAvailability || product.availability || "available",
       canPurchase: !isOutOfStock(product),
     };
 
     try {
       const raw = localStorage.getItem(RV_KEY) || "[]";
       const prev = safeJsonParse<ApiProductCard[]>(raw, []);
-      const cleaned = Array.isArray(prev)
-        ? prev.filter((x) => x && x.slug)
-        : [];
+      const cleaned = Array.isArray(prev) ? prev.filter((x) => x && x.slug) : [];
       const withoutCurrent = cleaned.filter((x) => x.slug !== card.slug);
       const next = [card, ...withoutCurrent].slice(0, RV_MAX);
       localStorage.setItem(RV_KEY, JSON.stringify(next));
@@ -734,8 +672,8 @@ export default function ProductDetailsClient({
     } catch {}
   }, [
     product.slug,
-    computedTitle,
     product.category,
+    product.categorySlug,
     product.courseCodes,
     product.session,
     product.language,
@@ -747,6 +685,9 @@ export default function ProductDetailsClient({
     product.isDigital,
     product.effectiveAvailability,
     product.availability,
+    computedTitle,
+    categorySlug,
+    canonicalProductHref,
   ]);
 
   useEffect(() => {
@@ -761,6 +702,7 @@ export default function ProductDetailsClient({
         q1.set("sort", "latest");
         if (cat) q1.set("category", cat);
         if (primaryCourse) q1.set("course", primaryCourse);
+
         const r1 = await fetch(`/api/products?${q1.toString()}`, {
           cache: "no-store",
         });
@@ -768,6 +710,7 @@ export default function ProductDetailsClient({
         const list1 = Array.isArray(d1.products) ? d1.products : [];
         const uniq: ApiProductCard[] = [];
         const seen = new Set<string>();
+
         for (const p of list1) {
           if (!p?.slug || p.slug === product.slug) continue;
           if (seen.has(p.slug)) continue;
@@ -775,6 +718,7 @@ export default function ProductDetailsClient({
           uniq.push(p);
           if (uniq.length >= 12) break;
         }
+
         setRelated(uniq);
       } catch {
         setRelated([]);
@@ -786,16 +730,14 @@ export default function ProductDetailsClient({
 
   const comboHref = useMemo(() => {
     const q = new URLSearchParams();
-    if (safeStr(product.subjectCode))
-      q.set("subject", safeStr(product.subjectCode));
+    if (safeStr(product.subjectCode)) q.set("subject", safeStr(product.subjectCode));
     if (safeStr(product.session)) q.set("session", safeStr(product.session));
     if (safeStr(product.language)) q.set("medium", safeStr(product.language));
     return `/combo?${q.toString()}`;
   }, [product.subjectCode, product.session, product.language]);
 
   const showComboBanner = categorySlug !== "combo";
-  const showSolvedHandwrittenBanner =
-    safeStr(product.category) === "Solved Assignments";
+  const showSolvedHandwrittenBanner = safeStr(product.category) === "Solved Assignments";
 
   const TrustDeliverySection = () => (
     <div className="rounded-2xl border border-emerald-100 bg-gradient-to-r from-emerald-50 to-white p-4 shadow-sm transition hover:shadow-md">
@@ -808,9 +750,7 @@ export default function ProductDetailsClient({
             Fast Dispatch • Safe Packing • All India Delivery
           </div>
           <div className="mt-1 text-xs text-slate-700 font-semibold leading-relaxed">
-            We pack carefully and ship fast. You’ll receive genuine handwritten
-            hardcopy delivered to your address. For quickest confirmation and
-            tracking support, prefer WhatsApp.
+            We pack carefully and ship fast. You’ll receive genuine handwritten hardcopy delivered to your address. For quickest confirmation and tracking support, prefer WhatsApp.
           </div>
           <div className="mt-3 flex flex-wrap gap-2">
             <span className="inline-flex items-center gap-2 rounded-xl border border-emerald-100 bg-white px-3 py-2 text-[12px] font-extrabold text-emerald-800">
@@ -857,14 +797,13 @@ export default function ProductDetailsClient({
     const items = Array.isArray((product as any).comboItems)
       ? (product as any).comboItems.filter((x: any) => x && x.slug)
       : [];
+
     return (
       <div className="mt-6 rounded-2xl border border-slate-200 bg-white shadow-sm overflow-hidden transition hover:shadow-md">
         <div className="px-4 py-3 bg-gradient-to-r from-slate-50 to-white border-b border-slate-200">
           <div className="flex items-center gap-2">
             <Sparkles size={16} className="text-blue-700" />
-            <div className="text-sm font-extrabold text-slate-900">
-              Included Products
-            </div>
+            <div className="text-sm font-extrabold text-slate-900">Included Products</div>
           </div>
           <div className="mt-1 text-xs text-slate-600 font-semibold">
             Combo details are shown here (auto).
@@ -872,45 +811,45 @@ export default function ProductDetailsClient({
         </div>
 
         {items.length === 0 ? (
-          <div className="p-4 text-sm text-slate-700 font-semibold">
-            No included items found yet.
-          </div>
+          <div className="p-4 text-sm text-slate-700 font-semibold">No included items found yet.</div>
         ) : (
           <div className="p-4 grid grid-cols-1 md:grid-cols-2 gap-3">
-            {items.slice(0, 12).map((it: any) => (
-              <div
-                key={it.slug}
-                className="rounded-2xl border border-slate-200 bg-slate-50 p-3 flex gap-3 items-start"
-              >
-                <div className="relative w-14 h-20 rounded-xl overflow-hidden bg-white border border-slate-200 flex-shrink-0">
-                  {it.thumbUrl ? (
-                    <Image
-                      src={it.thumbUrl}
-                      alt={it.title}
-                      fill
-                      className="object-cover"
-                    />
-                  ) : null}
-                </div>
-                <div className="min-w-0">
-                  <div className="text-xs font-extrabold text-slate-900 line-clamp-2">
-                    {it.title}
+            {items.slice(0, 12).map((it: any) => {
+              const itemHref = productHref({
+                slug: it.slug,
+                category: it.category,
+                categorySlug: it.categorySlug,
+                href: it.href,
+              });
+
+              return (
+                <div
+                  key={it.slug}
+                  className="rounded-2xl border border-slate-200 bg-slate-50 p-3 flex gap-3 items-start"
+                >
+                  <div className="relative w-14 h-20 rounded-xl overflow-hidden bg-white border border-slate-200 flex-shrink-0">
+                    {it.thumbUrl ? (
+                      <Image src={it.thumbUrl} alt={it.title} fill className="object-cover" />
+                    ) : null}
                   </div>
-                  <div className="mt-1 text-[11px] font-bold text-slate-600">
-                    {safeStr(it.category) ? safeStr(it.category) : "Product"}
-                    {typeof it.price === "number"
-                      ? ` • ₹${money(it.price)}`
-                      : ""}
+                  <div className="min-w-0">
+                    <div className="text-xs font-extrabold text-slate-900 line-clamp-2">
+                      {it.title}
+                    </div>
+                    <div className="mt-1 text-[11px] font-bold text-slate-600">
+                      {safeStr(it.category) ? safeStr(it.category) : "Product"}
+                      {typeof it.price === "number" ? ` • ₹${money(it.price)}` : ""}
+                    </div>
+                    <Link
+                      href={itemHref}
+                      className="mt-2 inline-flex items-center gap-1 text-[11px] font-extrabold text-blue-700 hover:underline"
+                    >
+                      View <ChevronRight size={14} />
+                    </Link>
                   </div>
-                  <Link
-                    href={`/products/${it.slug}`}
-                    className="mt-2 inline-flex items-center gap-1 text-[11px] font-extrabold text-blue-700 hover:underline"
-                  >
-                    View <ChevronRight size={14} />
-                  </Link>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>
@@ -928,16 +867,11 @@ export default function ProductDetailsClient({
             Home
           </Link>
           <ChevronRight size={12} className="text-gray-300" />
-          <Link
-            href={`/${categorySlug}`}
-            className="hover:text-blue-700 font-extrabold"
-          >
+          <Link href={`/${categorySlug}`} className="hover:text-blue-700 font-extrabold">
             {categoryLabel}
           </Link>
           <ChevronRight size={12} className="text-gray-300" />
-          <span className="text-gray-900 font-extrabold truncate">
-            {computedTitle}
-          </span>
+          <span className="text-gray-900 font-extrabold truncate">{computedTitle}</span>
         </div>
       </div>
 
@@ -999,27 +933,15 @@ export default function ProductDetailsClient({
                     >
                       {isVideoUrl(url) ? (
                         <div className="absolute inset-0 bg-slate-900 text-white flex items-center justify-center">
-                          <span className="text-[10px] font-extrabold">
-                            VIDEO
-                          </span>
+                          <span className="text-[10px] font-extrabold">VIDEO</span>
                         </div>
                       ) : (
-                        <Image
-                          src={url}
-                          alt={`thumb-${i + 1}`}
-                          fill
-                          className="object-cover"
-                        />
+                        <Image src={url} alt={`thumb-${i + 1}`} fill className="object-cover" />
                       )}
                     </button>
                     {!isHardcopy ? (
                       <button
-                        onClick={() =>
-                          downloadImageSmart(
-                            url,
-                            `${product.slug}-img-${i + 1}.jpg`
-                          )
-                        }
+                        onClick={() => downloadImageSmart(url, `${product.slug}-img-${i + 1}.jpg`)}
                         className="absolute -top-2 -right-2 h-8 w-8 rounded-full bg-white border border-gray-200 shadow-sm flex items-center justify-center text-gray-700 hover:text-blue-700 hover:border-blue-200 transition"
                         aria-label="Download image"
                         title="Download image"
@@ -1036,9 +958,7 @@ export default function ProductDetailsClient({
               <div className="flex items-start gap-3">
                 <div
                   className={`mt-0.5 rounded-xl p-2 ${
-                    isHardcopy
-                      ? "bg-orange-50 text-orange-700"
-                      : "bg-emerald-50 text-emerald-700"
+                    isHardcopy ? "bg-orange-50 text-orange-700" : "bg-emerald-50 text-emerald-700"
                   }`}
                 >
                   {isHardcopy ? <Truck size={18} /> : <FileText size={18} />}
@@ -1056,8 +976,7 @@ export default function ProductDetailsClient({
                   </div>
                   {!isHardcopy ? (
                     <div className="mt-2 inline-flex items-center gap-2 text-[11px] font-extrabold text-gray-600">
-                      <Info size={14} className="text-amber-600" /> Quantity
-                      locked to 1
+                      <Info size={14} className="text-amber-600" /> Quantity locked to 1
                     </div>
                   ) : null}
                 </div>
@@ -1118,9 +1037,7 @@ export default function ProductDetailsClient({
                     <Star key={i} size={14} fill="currentColor" />
                   ))}
                 </div>
-                <span className="text-xs text-gray-500 font-semibold">
-                  Trusted by students
-                </span>
+                <span className="text-xs text-gray-500 font-semibold">Trusted by students</span>
               </div>
             </div>
 
@@ -1180,16 +1097,13 @@ export default function ProductDetailsClient({
                       <span className="text-xs font-extrabold text-purple-800 uppercase">
                         Select Format
                       </span>
-                      <button
-                        onClick={() => setIsHandwrittenOpen(false)}
-                        aria-label="Close"
-                      >
+                      <button onClick={() => setIsHandwrittenOpen(false)} aria-label="Close">
                         <X size={14} className="text-purple-400 hover:text-purple-800" />
                       </button>
                     </div>
 
                     <Link
-                      href={`/handwritten-hardcopy`}
+                      href="/handwritten-hardcopy"
                       className="flex items-center gap-3 p-3 hover:bg-gray-50 border-b border-gray-50"
                     >
                       <div className="p-2 bg-orange-100 text-orange-700 rounded-full">
@@ -1206,7 +1120,7 @@ export default function ProductDetailsClient({
                     </Link>
 
                     <Link
-                      href={`/handwritten-pdfs`}
+                      href="/handwritten-pdfs"
                       className="flex items-center gap-3 p-3 hover:bg-gray-50"
                     >
                       <div className="p-2 bg-blue-100 text-blue-700 rounded-full">
@@ -1228,9 +1142,7 @@ export default function ProductDetailsClient({
 
             {safeStr(product.shortDesc) || safeStr(computedShortDesc) ? (
               <p className="text-gray-700 mb-6 leading-relaxed text-sm md:text-base font-semibold">
-                {safeStr(product.shortDesc)
-                  ? safeStr(product.shortDesc)
-                  : computedShortDesc}
+                {safeStr(product.shortDesc) ? safeStr(product.shortDesc) : computedShortDesc}
               </p>
             ) : null}
 
@@ -1242,9 +1154,7 @@ export default function ProductDetailsClient({
               <div className="grid grid-cols-1 md:grid-cols-2 text-sm md:divide-x border-gray-100">
                 <div className="p-4 space-y-3">
                   <div className="flex flex-col">
-                    <span className="text-xs text-gray-400 font-extrabold">
-                      Subject Code
-                    </span>
+                    <span className="text-xs text-gray-400 font-extrabold">Subject Code</span>
                     <span className="font-extrabold text-slate-900">
                       {safeStr(product.subjectCode) || "-"}
                     </span>
@@ -1254,47 +1164,34 @@ export default function ProductDetailsClient({
                     <span className="text-xs text-gray-400 font-extrabold">
                       Subject Title ({safeStr(product.language) || "Medium"})
                     </span>
-                    <span className="font-extrabold text-slate-900">
-                      {subjectTitle || "-"}
-                    </span>
+                    <span className="font-extrabold text-slate-900">{subjectTitle || "-"}</span>
                   </div>
 
                   <div className="flex flex-col">
-                    <span className="text-xs text-gray-400 font-extrabold">
-                      Course Code
-                    </span>
+                    <span className="text-xs text-gray-400 font-extrabold">Course Code</span>
                     <span className="font-extrabold text-slate-900">
-                      {Array.isArray(product.courseCodes) &&
-                      product.courseCodes.length
+                      {Array.isArray(product.courseCodes) && product.courseCodes.length
                         ? product.courseCodes.join(", ")
                         : "-"}
                     </span>
                   </div>
 
                   <div className="flex flex-col">
-                    <span className="text-xs text-gray-400 font-extrabold">
-                      Course Title
-                    </span>
-                    <span className="font-extrabold text-slate-900">
-                      {courseTitle || "-"}
-                    </span>
+                    <span className="text-xs text-gray-400 font-extrabold">Course Title</span>
+                    <span className="font-extrabold text-slate-900">{courseTitle || "-"}</span>
                   </div>
                 </div>
 
                 <div className="p-4 space-y-3">
                   <div className="flex flex-col">
-                    <span className="text-xs text-gray-400 font-extrabold">
-                      Medium
-                    </span>
+                    <span className="text-xs text-gray-400 font-extrabold">Medium</span>
                     <span className="font-extrabold text-slate-900">
                       {safeStr(product.language) || "-"}
                     </span>
                   </div>
 
                   <div className="flex flex-col">
-                    <span className="text-xs text-gray-400 font-extrabold">
-                      Session
-                    </span>
+                    <span className="text-xs text-gray-400 font-extrabold">Session</span>
                     <span className="font-extrabold text-slate-900">
                       {safeStr(product.session) || "-"}
                     </span>
@@ -1302,12 +1199,8 @@ export default function ProductDetailsClient({
 
                   {!isHardcopy ? (
                     <div className="flex flex-col">
-                      <span className="text-xs text-gray-400 font-extrabold">
-                        No. of Pages
-                      </span>
-                      <span className="font-extrabold text-slate-900">
-                        {String(product.pages || 0)}
-                      </span>
+                      <span className="text-xs text-gray-400 font-extrabold">No. of Pages</span>
+                      <span className="font-extrabold text-slate-900">{String(product.pages || 0)}</span>
                     </div>
                   ) : (
                     <div className="rounded-xl border border-emerald-100 bg-emerald-50 p-3">
@@ -1342,9 +1235,7 @@ export default function ProductDetailsClient({
                           <Zap size={16} />
                         </div>
                         <div className="text-xs text-amber-900 font-semibold leading-relaxed">
-                          This product is <b>On Demand</b>. You can place the
-                          order normally, and delivery/upload will be processed
-                          by our team.
+                          This product is <b>On Demand</b>. You can place the order normally, and delivery/upload will be processed by our team.
                         </div>
                       </div>
                     </div>
@@ -1357,8 +1248,7 @@ export default function ProductDetailsClient({
                           <MessageCircle size={16} />
                         </div>
                         <div className="text-xs text-orange-900 font-semibold leading-relaxed">
-                          This item is currently not instantly available. Tap{" "}
-                          <b>Want to Buy</b> to submit your requirement.
+                          This item is currently not instantly available. Tap <b>Want to Buy</b> to submit your requirement.
                         </div>
                       </div>
                     </div>
@@ -1370,8 +1260,7 @@ export default function ProductDetailsClient({
             {!!safeStr(product.importantNote) && (
               <div className="bg-amber-50 p-4 rounded-2xl border border-amber-100 shadow-sm transition hover:shadow-md">
                 <h3 className="font-extrabold text-amber-900 text-xs uppercase tracking-wide mb-2 flex items-center gap-2">
-                  <AlertCircle size={14} className="text-amber-700" />{" "}
-                  Important Note
+                  <AlertCircle size={14} className="text-amber-700" /> Important Note
                 </h3>
                 <div className="text-xs text-amber-900 whitespace-pre-line font-semibold leading-relaxed">
                   {safeStr(product.importantNote)}
@@ -1381,12 +1270,9 @@ export default function ProductDetailsClient({
 
             {isHardcopy ? (
               <div className="mt-6 rounded-2xl border border-gray-200 bg-white p-4 shadow-sm transition hover:shadow-md">
-                <div className="text-[12px] font-extrabold text-slate-800">
-                  Delivery Note
-                </div>
+                <div className="text-[12px] font-extrabold text-slate-800">Delivery Note</div>
                 <div className="mt-1 text-[12px] text-slate-600 font-semibold leading-relaxed">
-                  Dispatch & delivery time may vary by location. For quickest
-                  confirmation and delivery support, use WhatsApp.
+                  Dispatch & delivery time may vary by location. For quickest confirmation and delivery support, use WhatsApp.
                 </div>
               </div>
             ) : null}
@@ -1466,10 +1352,7 @@ export default function ProductDetailsClient({
             <h2 className="text-lg md:text-xl font-extrabold text-slate-900 flex items-center gap-2">
               <Sparkles className="text-blue-700" size={18} /> Related Products
             </h2>
-            <Link
-              href="/products"
-              className="text-sm font-extrabold text-blue-700 hover:underline"
-            >
+            <Link href="/products" className="text-sm font-extrabold text-blue-700 hover:underline">
               View all →
             </Link>
           </div>
@@ -1525,17 +1408,13 @@ export default function ProductDetailsClient({
 
       {wtbOpen ? (
         <div className="fixed inset-0 z-[999] flex items-center justify-center px-4">
-          <div
-            className="absolute inset-0 bg-black/40"
-            onClick={() => !wtbLoading && setWtbOpen(false)}
-          />
+          <div className="absolute inset-0 bg-black/40" onClick={() => !wtbLoading && setWtbOpen(false)} />
           <div className="relative w-full max-w-lg rounded-3xl bg-white border border-gray-200 shadow-2xl overflow-hidden">
             <div className="p-5 border-b border-gray-200 flex items-center justify-between">
               <div>
                 <div className="text-lg font-extrabold">Want to Buy</div>
                 <div className="text-sm text-slate-600">
-                  This item is currently not instantly available. Share details
-                  and we’ll contact you.
+                  This item is currently not instantly available. Share details and we’ll contact you.
                 </div>
               </div>
               <button
@@ -1548,15 +1427,10 @@ export default function ProductDetailsClient({
 
             <div className="p-5 space-y-4">
               <div className="rounded-2xl border border-orange-100 bg-orange-50 p-4">
-                <div className="text-xs font-extrabold text-orange-900">
-                  Product
-                </div>
-                <div className="mt-1 text-sm font-extrabold text-slate-900">
-                  {computedTitle}
-                </div>
+                <div className="text-xs font-extrabold text-orange-900">Product</div>
+                <div className="mt-1 text-sm font-extrabold text-slate-900">{computedTitle}</div>
                 <div className="mt-1 text-xs text-slate-700 font-semibold">
-                  Price: ₹{money(Number(product.price || 0))} • Category:{" "}
-                  {safeStr(product.category) || categoryLabel}
+                  Price: ₹{money(Number(product.price || 0))} • Category: {safeStr(product.category) || categoryLabel}
                 </div>
               </div>
 
@@ -1566,9 +1440,7 @@ export default function ProductDetailsClient({
                 </label>
                 <input
                   value={wtbForm.email}
-                  onChange={(e) =>
-                    setWtbForm((p) => ({ ...p, email: e.target.value }))
-                  }
+                  onChange={(e) => setWtbForm((p) => ({ ...p, email: e.target.value }))}
                   className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 outline-none focus:border-orange-500 transition font-medium"
                   placeholder="your@email.com"
                 />
@@ -1580,9 +1452,7 @@ export default function ProductDetailsClient({
                 </label>
                 <input
                   value={wtbForm.phone}
-                  onChange={(e) =>
-                    setWtbForm((p) => ({ ...p, phone: e.target.value }))
-                  }
+                  onChange={(e) => setWtbForm((p) => ({ ...p, phone: e.target.value }))}
                   className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 outline-none focus:border-orange-500 transition font-medium"
                   placeholder="10 digit mobile"
                 />
@@ -1594,9 +1464,7 @@ export default function ProductDetailsClient({
                 </label>
                 <textarea
                   value={wtbForm.message}
-                  onChange={(e) =>
-                    setWtbForm((p) => ({ ...p, message: e.target.value }))
-                  }
+                  onChange={(e) => setWtbForm((p) => ({ ...p, message: e.target.value }))}
                   className="w-full px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 outline-none focus:border-orange-500 transition font-medium min-h-[90px]"
                   placeholder="Any preference / urgency / quantity etc."
                 />
@@ -1607,14 +1475,7 @@ export default function ProductDetailsClient({
                   type="button"
                   onClick={() => setWtbOpen(false)}
                   disabled={wtbLoading}
-                  className="
-                    inline-flex items-center justify-center gap-2
-                    px-5 py-2.5 rounded-xl
-                    !bg-white hover:!bg-gray-50
-                    border border-gray-200
-                    !text-slate-900 font-extrabold
-                    transition disabled:opacity-60
-                  "
+                  className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl !bg-white hover:!bg-gray-50 border border-gray-200 !text-slate-900 font-extrabold transition disabled:opacity-60"
                   style={{ opacity: 1 }}
                 >
                   Cancel
@@ -1624,27 +1485,14 @@ export default function ProductDetailsClient({
                   type="button"
                   onClick={submitWantToBuy}
                   disabled={wtbLoading}
-                  className="
-                    inline-flex items-center justify-center gap-2
-                    px-6 py-2.5 rounded-xl
-                    !bg-emerald-600 hover:!bg-emerald-700
-                    !text-white font-extrabold
-                    shadow-[0_14px_35px_-18px_rgba(16,185,129,0.95)]
-                    ring-2 ring-emerald-200/80
-                    transition disabled:opacity-60
-                  "
+                  className="inline-flex items-center justify-center gap-2 px-6 py-2.5 rounded-xl !bg-emerald-600 hover:!bg-emerald-700 !text-white font-extrabold shadow-[0_14px_35px_-18px_rgba(16,185,129,0.95)] ring-2 ring-emerald-200/80 transition disabled:opacity-60"
                   style={{
-                    background:
-                      "linear-gradient(90deg,#059669 0%,#16a34a 100%)",
+                    background: "linear-gradient(90deg,#059669 0%,#16a34a 100%)",
                     color: "#fff",
                     opacity: 1,
                   }}
                 >
-                  {wtbLoading ? (
-                    <Loader2 className="animate-spin" size={18} />
-                  ) : (
-                    <MessageCircle size={18} />
-                  )}
+                  {wtbLoading ? <Loader2 className="animate-spin" size={18} /> : <MessageCircle size={18} />}
                   Submit
                 </button>
               </div>

@@ -3,7 +3,15 @@
 import { useMemo, useState, useEffect, useRef } from "react";
 import Image from "next/image";
 import Link from "next/link";
-import { FileText, Truck, Sparkles, ShoppingCart, CheckCircle2, XCircle } from "lucide-react";
+import {
+  FileText,
+  Truck,
+  Sparkles,
+  ShoppingCart,
+  CheckCircle2,
+  XCircle,
+} from "lucide-react";
+
 import { productHref } from "@/lib/productHref";
 import { useCart } from "@/context/CartContext";
 import { trackSelectItem } from "../lib/analytics";
@@ -21,6 +29,8 @@ type ApiProduct = {
   title: string;
   slug: string;
   category?: string;
+  categorySlug?: string;
+  href?: string;
 
   courseCode?: string;
   courseCodes?: string[];
@@ -127,7 +137,12 @@ function firstValidImage(product: ApiProduct) {
   }
 
   const uploaded = pickSortedImagePair(product.images).all;
-  return uploaded[0] || "";
+  return (
+    safeText(product.thumbnailUrl) ||
+    safeText(product.thumbUrl) ||
+    uploaded[0] ||
+    ""
+  );
 }
 
 function secondValidImage(product: ApiProduct, fallback: string) {
@@ -136,7 +151,7 @@ function secondValidImage(product: ApiProduct, fallback: string) {
   }
 
   const pair = pickSortedImagePair(product.images);
-  return pair.second || pair.first || "";
+  return safeText(product.quickUrl) || pair.second || pair.first || fallback;
 }
 
 export default function ProductCard({ product }: { product: ApiProduct }) {
@@ -146,39 +161,52 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
 
   const { cart, addToCart, removeFromCart } = useCart();
 
-  const [toast, setToast] = useState<{ show: boolean; text: string; kind: "add" | "remove" | "info" | "success" }>({
+  const [toast, setToast] = useState<{
+    show: boolean;
+    text: string;
+    kind: "add" | "remove" | "info" | "success";
+  }>({
     show: false,
     text: "",
     kind: "add",
   });
+
   const toastTimer = useRef<any>(null);
 
-  const imgPrimary = useMemo(() => {
-    return firstValidImage(product);
-  }, [product]);
+  const imgPrimary = useMemo(() => firstValidImage(product), [product]);
 
-  const imgQuick = useMemo(() => {
-    return secondValidImage(product, imgPrimary);
-  }, [product, imgPrimary]);
+  const imgQuick = useMemo(() => secondValidImage(product, imgPrimary), [product, imgPrimary]);
 
   useEffect(() => {
     setImgBroken(false);
   }, [imgPrimary]);
 
-  const hasDiscount = !!product.oldPrice && Number(product.oldPrice) > Number(product.price || 0);
+  const hasDiscount =
+    !!product.oldPrice && Number(product.oldPrice) > Number(product.price || 0);
+
   const discountPct = hasDiscount
-    ? Math.round(((Number(product.oldPrice) - Number(product.price)) / Number(product.oldPrice)) * 100)
+    ? Math.round(
+        ((Number(product.oldPrice) - Number(product.price)) / Number(product.oldPrice)) * 100
+      )
     : 0;
 
   const isHardcopy = safeText(product.category).toLowerCase().includes("hardcopy");
   const isDigital = product.isDigital ?? !isHardcopy;
 
-  const href = productHref({ slug: product.slug, category: product.category });
+  const href = useMemo(
+    () =>
+      productHref({
+        slug: product.slug,
+        category: product.category,
+        categorySlug: product.categorySlug,
+        href: product.href,
+      }),
+    [product.slug, product.category, product.categorySlug, product.href]
+  );
 
   const courseCodeText = extractCourseCodesText(product) || "";
 
   const availability = normAvail(product.availability || "available");
-
   const isWantToBuy = isWantToBuyAvailability(availability) || product.canPurchase === false;
   const isOnDemand = !isWantToBuy && isOnDemandAvailability(availability);
 
@@ -196,6 +224,7 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
 
   function showToast(kind: "add" | "remove" | "info" | "success", text?: string) {
     if (toastTimer.current) clearTimeout(toastTimer.current);
+
     setToast({
       show: true,
       kind,
@@ -209,12 +238,17 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
           ? "Request received ✅"
           : "Updated"),
     });
-    toastTimer.current = setTimeout(() => setToast((p) => ({ ...p, show: false })), 1800);
+
+    toastTimer.current = setTimeout(
+      () => setToast((p) => ({ ...p, show: false })),
+      1800
+    );
   }
 
   async function handleWantToBuy(e: React.MouseEvent) {
     e.preventDefault();
     e.stopPropagation();
+
     if (wantLoading) return;
 
     setWantLoading(true);
@@ -281,6 +315,7 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
           cls: "bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-700",
         };
       }
+
       return {
         text: wantLoading ? "Submitting..." : "Want to Buy",
         cls: "bg-orange-50 text-orange-700 border-orange-200 hover:bg-orange-100",
@@ -309,9 +344,7 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
 
   return (
     <div
-      className="group relative rounded-2xl border border-gray-200 bg-white overflow-hidden
-                 transition-all duration-300 hover:-translate-y-1 hover:shadow-xl
-                 active:scale-[0.99]"
+      className="group relative rounded-2xl border border-gray-200 bg-white overflow-hidden transition-all duration-300 hover:-translate-y-1 hover:shadow-xl active:scale-[0.99]"
     >
       {toast.show && (
         <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20">
@@ -402,21 +435,31 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
           </h3>
 
           <div className="mt-2 flex items-end gap-2">
-            <div className="text-blue-700 font-extrabold text-sm md:text-base">₹{money(product.price)}</div>
+            <div className="text-blue-700 font-extrabold text-sm md:text-base">
+              ₹{money(product.price)}
+            </div>
             {!!product.oldPrice && Number(product.oldPrice) > 0 && (
-              <div className="text-xs text-gray-400 line-through font-bold">₹{money(Number(product.oldPrice))}</div>
+              <div className="text-xs text-gray-400 line-through font-bold">
+                ₹{money(Number(product.oldPrice))}
+              </div>
             )}
           </div>
 
           <div className="mt-2 text-[11px] text-gray-600 font-bold flex flex-wrap gap-x-2 gap-y-1">
             {courseCodeText ? (
-              <span className="rounded-md bg-gray-50 px-2 py-1 border border-gray-100">{courseCodeText}</span>
+              <span className="rounded-md bg-gray-50 px-2 py-1 border border-gray-100">
+                {courseCodeText}
+              </span>
             ) : null}
             {product.session ? (
-              <span className="rounded-md bg-gray-50 px-2 py-1 border border-gray-100">{product.session}</span>
+              <span className="rounded-md bg-gray-50 px-2 py-1 border border-gray-100">
+                {product.session}
+              </span>
             ) : null}
             {product.language ? (
-              <span className="rounded-md bg-gray-50 px-2 py-1 border border-gray-100">{product.language}</span>
+              <span className="rounded-md bg-gray-50 px-2 py-1 border border-gray-100">
+                {product.language}
+              </span>
             ) : null}
           </div>
         </div>

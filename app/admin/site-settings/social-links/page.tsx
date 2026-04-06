@@ -233,7 +233,7 @@ export default function AdminSocialLinksPage() {
                 <input
                   value={newUrl}
                   onChange={(e) => setNewUrl(e.target.value)}
-                  placeholder="https://wa.me/91xxxxxxxxxx"
+                  placeholder="https://wa.me/917496865680"
                   className="mt-1 w-full px-4 py-2 rounded-xl border border-gray-200 bg-white outline-none focus:ring-2 focus:ring-slate-200"
                 />
               </div>
