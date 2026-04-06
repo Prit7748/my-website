@@ -1,5 +1,6 @@
 import Image from "next/image";
 import Link from "next/link";
+import Script from "next/script";
 import {
   ShieldCheck,
   Truck,
@@ -42,6 +43,7 @@ import ComboCategorySetting from "@/models/ComboCategorySetting";
 import Combo from "@/models/Combo";
 import Product from "@/models/Product";
 import Blog from "@/models/Blog";
+import { productHref } from "@/lib/productHref";
 import {
   buildAssignmentMasterThumbUrl,
   buildHardcopyMasterThumbUrl,
@@ -49,6 +51,8 @@ import {
 import type { NoticeItem } from "@/components/NotificationTicker";
 
 export const revalidate = 300;
+
+const SITE_URL = "https://istudentsportal.com";
 
 type HomeCategory = {
   title: string;
@@ -87,6 +91,7 @@ type LatestHomeProduct = {
   oldPrice: number;
   image: string;
   category: string;
+  href: string;
 };
 
 type LatestHomeBlog = {
@@ -113,6 +118,13 @@ function safeNum(x: any, fallback: number) {
 function formatMoney(x: any) {
   const n = safeNum(x, 0);
   return `₹${n}`;
+}
+
+function absoluteUrl(path: string) {
+  const clean = safeStr(path);
+  if (!clean) return SITE_URL;
+  if (/^https?:\/\//i.test(clean)) return clean;
+  return `${SITE_URL}${clean.startsWith("/") ? clean : `/${clean}`}`;
 }
 
 function formatComboDiscountLabel(discountType: any, discountValue: any) {
@@ -421,7 +433,7 @@ async function getLatestProducts(): Promise<LatestHomeProduct[]> {
     slug: { $exists: true, $ne: "" },
     $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
   })
-    .sort({ createdAt: -1, _id: -1 })
+    .sort({ updatedAt: -1, createdAt: -1, _id: -1 })
     .limit(6)
     .select({
       _id: 1,
@@ -442,20 +454,28 @@ async function getLatestProducts(): Promise<LatestHomeProduct[]> {
       courseCodes: 1,
       courseCode: 1,
       updatedAt: 1,
+      createdAt: 1,
     })
     .lean();
 
   return (rows || [])
-    .map((row: any) => ({
-      id: String(row?._id || ""),
-      slug: safeStr(row?.slug),
-      title: safeStr(row?.title),
-      price: safeNum(row?.price, 0),
-      oldPrice: safeNum(row?.oldPrice, 0),
-      image: resolveLatestProductImage(row),
-      category: safeStr(row?.category),
-    }))
-    .filter((x: LatestHomeProduct) => x.slug && x.title);
+    .map((row: any) => {
+      const slug = safeStr(row?.slug);
+      const category = safeStr(row?.category);
+      const href = productHref({ slug, category });
+
+      return {
+        id: String(row?._id || ""),
+        slug,
+        title: safeStr(row?.title),
+        price: safeNum(row?.price, 0),
+        oldPrice: safeNum(row?.oldPrice, 0),
+        image: resolveLatestProductImage(row),
+        category,
+        href,
+      };
+    })
+    .filter((x: LatestHomeProduct) => x.slug && x.title && x.href);
 }
 
 async function getLatestBlogs(): Promise<LatestHomeBlog[]> {
@@ -677,8 +697,61 @@ export default async function Home() {
       ? `Category-Based Offers • Up to ${comboBanner.maxDiscountPercent}% OFF`
       : "Category-Based Combo Offers";
 
+  const websiteJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "WebSite",
+    name: "IGNOU Students Portal",
+    url: SITE_URL,
+    potentialAction: {
+      "@type": "SearchAction",
+      target: `${SITE_URL}/products?search={search_term_string}`,
+      "query-input": "required name=search_term_string",
+    },
+  };
+
+  const organizationJsonLd = {
+    "@context": "https://schema.org",
+    "@type": "Organization",
+    name: "IGNOU Students Portal",
+    url: SITE_URL,
+    logo: absoluteUrl("/logo.png"),
+  };
+
+  const latestProductsJsonLd =
+    latestProducts.length > 0
+      ? {
+          "@context": "https://schema.org",
+          "@type": "ItemList",
+          name: "Latest Updated Products",
+          itemListElement: latestProducts.map((product, index) => ({
+            "@type": "ListItem",
+            position: index + 1,
+            url: absoluteUrl(product.href),
+            name: product.title,
+          })),
+        }
+      : null;
+
   return (
     <main className="min-h-screen bg-white">
+      <Script
+        id="isp-home-website-jsonld"
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(websiteJsonLd) }}
+      />
+      <Script
+        id="isp-home-organization-jsonld"
+        type="application/ld+json"
+        dangerouslySetInnerHTML={{ __html: JSON.stringify(organizationJsonLd) }}
+      />
+      {latestProductsJsonLd ? (
+        <Script
+          id="isp-home-latest-products-jsonld"
+          type="application/ld+json"
+          dangerouslySetInnerHTML={{ __html: JSON.stringify(latestProductsJsonLd) }}
+        />
+      ) : null}
+
       <style>{`
         @keyframes floaty {
           0% { transform: translate3d(0, 0, 0); }
@@ -1046,7 +1119,7 @@ export default async function Home() {
               {latestProducts.map((product) => (
                 <Link
                   key={product.id}
-                  href={`/products/${encodeURIComponent(product.slug)}`}
+                  href={product.href}
                   className="group border border-gray-200 rounded-lg overflow-hidden hover:shadow-xl transition-all duration-300 bg-white hover:-translate-y-2"
                 >
                   <div className="h-[220px] md:h-[280px] bg-gray-100 relative flex items-center justify-center overflow-hidden">
@@ -1237,4 +1310,4 @@ export default async function Home() {
       <FloatingButtons />
     </main>
   );
-} 
+}

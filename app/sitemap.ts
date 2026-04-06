@@ -6,200 +6,178 @@ import { productHref } from "@/lib/productHref";
 
 const BASE_URL = "https://istudentsportal.com";
 
-function toAbsolute(path: string) {
-  const cleanPath = String(path || "").trim();
-  if (!cleanPath) return BASE_URL;
-  return `${BASE_URL}${cleanPath.startsWith("/") ? cleanPath : `/${cleanPath}`}`;
+function safeStr(x: any) {
+  return String(x ?? "").trim();
+}
+
+function absUrl(path: string) {
+  const clean = safeStr(path);
+  if (!clean) return BASE_URL;
+  if (/^https?:\/\//i.test(clean)) return clean;
+  return `${BASE_URL}${clean.startsWith("/") ? clean : `/${clean}`}`;
 }
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
-  const now = new Date();
+  await dbConnect();
 
-  const staticRoutes: MetadataRoute.Sitemap = [
+  const [blogs, products] = await Promise.all([
+    Blog.find({ isPublished: true, slug: { $exists: true, $ne: "" } })
+      .select("slug updatedAt")
+      .sort({ updatedAt: -1, _id: -1 })
+      .lean(),
+
+    Product.find({
+      isActive: true,
+      slug: { $exists: true, $ne: "" },
+      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+    })
+      .select("slug category updatedAt")
+      .sort({ updatedAt: -1, _id: -1 })
+      .lean(),
+  ]);
+
+  const staticUrls: MetadataRoute.Sitemap = [
     {
-      url: toAbsolute("/"),
-      lastModified: now,
+      url: absUrl("/"),
+      lastModified: new Date(),
       changeFrequency: "daily",
       priority: 1,
     },
     {
-      url: toAbsolute("/products"),
-      lastModified: now,
+      url: absUrl("/products"),
+      lastModified: new Date(),
       changeFrequency: "daily",
       priority: 0.95,
     },
     {
-      url: toAbsolute("/solved-assignments"),
-      lastModified: now,
+      url: absUrl("/solved-assignments"),
+      lastModified: new Date(),
       changeFrequency: "daily",
       priority: 0.95,
     },
     {
-      url: toAbsolute("/handwritten-hardcopy"),
-      lastModified: now,
-      changeFrequency: "daily",
+      url: absUrl("/handwritten-hardcopy"),
+      lastModified: new Date(),
+      changeFrequency: "weekly",
       priority: 0.9,
     },
     {
-      url: toAbsolute("/handwritten-pdfs"),
-      lastModified: now,
-      changeFrequency: "daily",
+      url: absUrl("/handwritten-pdfs"),
+      lastModified: new Date(),
+      changeFrequency: "weekly",
       priority: 0.9,
     },
     {
-      url: toAbsolute("/question-papers"),
-      lastModified: now,
-      changeFrequency: "daily",
+      url: absUrl("/question-papers"),
+      lastModified: new Date(),
+      changeFrequency: "weekly",
       priority: 0.9,
     },
     {
-      url: toAbsolute("/guess-papers"),
-      lastModified: now,
-      changeFrequency: "daily",
+      url: absUrl("/guess-papers"),
+      lastModified: new Date(),
+      changeFrequency: "weekly",
       priority: 0.9,
     },
     {
-      url: toAbsolute("/ebooks"),
-      lastModified: now,
-      changeFrequency: "daily",
+      url: absUrl("/ebooks"),
+      lastModified: new Date(),
+      changeFrequency: "weekly",
       priority: 0.85,
     },
     {
-      url: toAbsolute("/projects"),
-      lastModified: now,
-      changeFrequency: "daily",
+      url: absUrl("/projects"),
+      lastModified: new Date(),
+      changeFrequency: "weekly",
       priority: 0.85,
     },
     {
-      url: toAbsolute("/combo"),
-      lastModified: now,
-      changeFrequency: "daily",
-      priority: 0.85,
-    },
-    {
-      url: toAbsolute("/courses"),
-      lastModified: now,
+      url: absUrl("/combo"),
+      lastModified: new Date(),
       changeFrequency: "weekly",
       priority: 0.8,
     },
     {
-      url: toAbsolute("/blog"),
-      lastModified: now,
+      url: absUrl("/courses"),
+      lastModified: new Date(),
+      changeFrequency: "weekly",
+      priority: 0.8,
+    },
+    {
+      url: absUrl("/blog"),
+      lastModified: new Date(),
       changeFrequency: "daily",
       priority: 0.8,
     },
     {
-      url: toAbsolute("/about"),
-      lastModified: now,
+      url: absUrl("/about"),
+      lastModified: new Date(),
       changeFrequency: "monthly",
       priority: 0.5,
     },
     {
-      url: toAbsolute("/contact"),
-      lastModified: now,
+      url: absUrl("/contact"),
+      lastModified: new Date(),
       changeFrequency: "monthly",
       priority: 0.5,
     },
     {
-      url: toAbsolute("/faq"),
-      lastModified: now,
-      changeFrequency: "weekly",
-      priority: 0.55,
-    },
-    {
-      url: toAbsolute("/offers"),
-      lastModified: now,
-      changeFrequency: "daily",
-      priority: 0.65,
-    },
-    {
-      url: toAbsolute("/handwriting-samples"),
-      lastModified: now,
+      url: absUrl("/faq"),
+      lastModified: new Date(),
       changeFrequency: "monthly",
-      priority: 0.45,
+      priority: 0.5,
     },
     {
-      url: toAbsolute("/privacy"),
-      lastModified: now,
-      changeFrequency: "yearly",
+      url: absUrl("/privacy"),
+      lastModified: new Date(),
+      changeFrequency: "monthly",
       priority: 0.3,
     },
     {
-      url: toAbsolute("/terms"),
-      lastModified: now,
-      changeFrequency: "yearly",
+      url: absUrl("/terms"),
+      lastModified: new Date(),
+      changeFrequency: "monthly",
       priority: 0.3,
     },
     {
-      url: toAbsolute("/refund-policy"),
-      lastModified: now,
-      changeFrequency: "yearly",
+      url: absUrl("/refund-policy"),
+      lastModified: new Date(),
+      changeFrequency: "monthly",
       priority: 0.3,
     },
   ];
 
-  try {
-    await dbConnect();
+  const productUrls: MetadataRoute.Sitemap = (products || [])
+    .map((p: any) => {
+      const slug = safeStr(p?.slug);
+      const category = safeStr(p?.category);
+      if (!slug) return null;
 
-    const [blogs, products] = await Promise.all([
-      Blog.find({
-        isPublished: true,
-        slug: { $exists: true, $ne: "" },
-      })
-        .select("slug updatedAt createdAt")
-        .lean(),
-      Product.find({
-        isActive: true,
-        slug: { $exists: true, $ne: "" },
-        $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
-      })
-        .select("slug category updatedAt createdAt")
-        .lean(),
-    ]);
+      const href = productHref({ slug, category });
+      if (!href || href === "/products") return null;
 
-    const blogUrls: MetadataRoute.Sitemap = (blogs || [])
-      .map((b: any) => {
-        const slug = String(b?.slug || "").trim();
-        if (!slug) return null;
+      return {
+        url: absUrl(href),
+        lastModified: p?.updatedAt ? new Date(p.updatedAt) : new Date(),
+        changeFrequency: "weekly" as const,
+        priority: 0.8,
+      };
+    })
+    .filter(Boolean) as MetadataRoute.Sitemap;
 
-        return {
-          url: toAbsolute(`/blog/${encodeURIComponent(slug)}`),
-          lastModified: b?.updatedAt || b?.createdAt || now,
-          changeFrequency: "weekly" as const,
-          priority: 0.75,
-        };
-      })
-      .filter(Boolean) as MetadataRoute.Sitemap;
+  const blogUrls: MetadataRoute.Sitemap = (blogs || [])
+    .map((b: any) => {
+      const slug = safeStr(b?.slug);
+      if (!slug) return null;
 
-    const productUrlsRaw: MetadataRoute.Sitemap = (products || [])
-      .map((p: any) => {
-        const slug = String(p?.slug || "").trim();
-        if (!slug) return null;
+      return {
+        url: absUrl(`/blog/${slug}`),
+        lastModified: b?.updatedAt ? new Date(b.updatedAt) : new Date(),
+        changeFrequency: "weekly" as const,
+        priority: 0.7,
+      };
+    })
+    .filter(Boolean) as MetadataRoute.Sitemap;
 
-        const href = productHref({
-          slug,
-          category: String(p?.category || "").trim(),
-        });
-
-        return {
-          url: toAbsolute(href),
-          lastModified: p?.updatedAt || p?.createdAt || now,
-          changeFrequency: "daily" as const,
-          priority: 0.85,
-        };
-      })
-      .filter(Boolean) as MetadataRoute.Sitemap;
-
-    const seen = new Set<string>();
-    const productUrls = productUrlsRaw.filter((item) => {
-      if (!item?.url) return false;
-      if (seen.has(item.url)) return false;
-      seen.add(item.url);
-      return true;
-    });
-
-    return [...staticRoutes, ...blogUrls, ...productUrls];
-  } catch {
-    return staticRoutes;
-  }
+  return [...staticUrls, ...productUrls, ...blogUrls];
 }

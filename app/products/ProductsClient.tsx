@@ -10,6 +10,7 @@ import Navbar from "@/components/Navbar";
 import Footer from "@/components/Footer";
 import FloatingButtons from "@/components/FloatingButtons";
 import ProductCard from "@/components/ProductCard";
+import { productHref } from "@/lib/productHref";
 
 import {
   Search,
@@ -25,12 +26,13 @@ import {
   ChevronDown,
 } from "lucide-react";
 
-// --- TYPES ---
 type ApiProductCard = {
+  _id?: string;
   title: string;
   slug: string;
   category?: string;
   courseCodes?: string[];
+  courseTitles?: string[];
   session?: string;
   language?: string;
   price: number;
@@ -38,7 +40,32 @@ type ApiProductCard = {
   images?: string[];
   thumbUrl?: string;
   quickUrl?: string;
+  thumbnailUrl?: string;
   isDigital?: boolean;
+  availability?: string;
+  rawAvailability?: string;
+  canPurchase?: boolean;
+  deliverWithinMinutes?: number;
+  onDemandNote?: string;
+  rawDeliverWithinMinutes?: number;
+  rawOnDemandNote?: string;
+  onDemandTimingSource?: string;
+  onDemandMatchedCourseCode?: string;
+  onDemandMatchedRuleId?: string;
+  onDemandMatchedRuleType?: string;
+  subjectCode?: string;
+  subjectTitle?: string;
+  subjectTitleHi?: string;
+  subjectTitleEn?: string;
+  pdfUrl?: string;
+  isActive?: boolean;
+};
+
+type Meta = {
+  total: number;
+  page: number;
+  totalPages: number;
+  limit: number;
 };
 
 type ApiProductsResponse = {
@@ -57,35 +84,50 @@ type ProductsClientProps = {
   initialLanguageParam?: string;
   initialSortParam?: string;
   initialPageParam?: string;
+  initialProducts?: ApiProductCard[];
+  initialMeta?: Meta | null;
+  initialQueryKey?: string;
 };
 
-// --- HELPERS ---
 function safeStr(x: any) {
-  return String(x || "").trim();
+  return String(x ?? "").trim();
 }
+
 function safeArr<T = any>(x: any): T[] {
   return Array.isArray(x) ? x : [];
 }
+
 function parseCsvParam(v: string) {
   return safeStr(v)
     .split(",")
     .map((x) => x.trim())
     .filter(Boolean);
 }
+
 function uniq<T>(arr: T[]) {
   return Array.from(new Set(arr));
 }
+
 function toUpper(s: string) {
   return safeStr(s).toUpperCase();
 }
+
 function isAlpha1(s: string) {
   return /^[A-Z]$/.test(s);
 }
+
 function isHardcopyCategory(category?: string) {
   return safeStr(category).toLowerCase() === "handwritten hardcopy (delivery)".toLowerCase();
 }
 
-// ✅ Normalize query (search assist)
+function sameStringArray(a: string[], b: string[]) {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i] !== b[i]) return false;
+  }
+  return true;
+}
+
 function normalizeQuery(raw: string) {
   const s = safeStr(raw).toUpperCase();
   const cleaned = s.replace(/[^A-Z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
@@ -93,7 +135,6 @@ function normalizeQuery(raw: string) {
   return { cleaned, compact };
 }
 
-// ✅ Extract subject code variants
 function extractSubjectCodeVariants(raw: string) {
   const { compact } = normalizeQuery(raw);
   const m1 = compact.match(/([A-Z]{2,6})(\d{2,4})/);
@@ -101,7 +142,6 @@ function extractSubjectCodeVariants(raw: string) {
 
   const letters = m1[1];
   const digits = m1[2];
-
   const digitsNoLeading = String(Number(digits));
   const pad3 = digitsNoLeading.padStart(3, "0");
 
@@ -122,7 +162,46 @@ function extractSubjectCodeVariants(raw: string) {
   return { code: `${letters}${pad3}`, variants };
 }
 
-/** ✅ Portal dropdown so it NEVER hides behind products */
+function buildProductsQueryKey(input: {
+  selectedCat: string[];
+  selectedCourse: string[];
+  selectedSession: string[];
+  selectedLang: string[];
+  search: string;
+  sort: SortKey;
+  page: number;
+}) {
+  const params = new URLSearchParams();
+
+  params.set("page", String(Math.max(1, Number(input.page || 1))));
+  params.set("limit", "12");
+  params.set("includeFacets", "0");
+
+  const apiSort =
+    input.sort === "latest"
+      ? "latest"
+      : input.sort === "price_asc"
+      ? "price_asc"
+      : "price_desc";
+
+  params.set("sort", apiSort);
+
+  if (input.selectedCat.length) params.set("category", input.selectedCat.join(","));
+  if (input.selectedCourse.length) params.set("course", input.selectedCourse.join(","));
+  if (input.selectedSession.length) params.set("session", input.selectedSession.join(","));
+  if (input.selectedLang.length) params.set("language", input.selectedLang.join(","));
+
+  if (input.search) {
+    const { cleaned } = normalizeQuery(input.search);
+    const { variants } = extractSubjectCodeVariants(input.search);
+    const extra = variants.slice(0, 6).join(" ");
+    const finalSearch = extra ? `${cleaned} ${extra}` : cleaned;
+    params.set("search", finalSearch);
+  }
+
+  return params.toString();
+}
+
 function PortalDropdown({
   open,
   anchorEl,
@@ -136,13 +215,10 @@ function PortalDropdown({
   children: React.ReactNode;
   onRequestClose: () => void;
 }) {
-  const [mounted, setMounted] = useState(false);
   const [pos, setPos] = useState({ top: 0, left: 0, w: width });
 
-  useEffect(() => setMounted(true), []);
-
   useEffect(() => {
-    if (!open || !anchorEl) return;
+    if (!open || !anchorEl || typeof window === "undefined") return;
 
     const update = () => {
       const r = anchorEl.getBoundingClientRect();
@@ -156,6 +232,7 @@ function PortalDropdown({
     update();
     window.addEventListener("scroll", update, true);
     window.addEventListener("resize", update);
+
     return () => {
       window.removeEventListener("scroll", update, true);
       window.removeEventListener("resize", update);
@@ -164,14 +241,16 @@ function PortalDropdown({
 
   useEffect(() => {
     if (!open) return;
-    const onKey_queries = (e: KeyboardEvent) => {
+
+    const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") onRequestClose();
     };
-    document.addEventListener("keydown", onKey_queries);
-    return () => document.removeEventListener("keydown", onKey_queries);
+
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
   }, [open, onRequestClose]);
 
-  if (!mounted || !open || !anchorEl) return null;
+  if (typeof window === "undefined" || !open || !anchorEl) return null;
 
   return createPortal(
     <div className="fixed inset-0 z-[9999]" onMouseDown={onRequestClose}>
@@ -187,7 +266,6 @@ function PortalDropdown({
   );
 }
 
-/** ✅ Industrial dropdown multi-select with internal search + big-list friendly behavior (Course) */
 function MultiSelectDropdown({
   label,
   items,
@@ -436,7 +514,6 @@ function ProductsGridSkeleton() {
   );
 }
 
-// ✅ MAIN COMPONENT
 export default function ProductsClient({
   initialSearchParam = "",
   initialCategoryParam = "",
@@ -445,11 +522,13 @@ export default function ProductsClient({
   initialLanguageParam = "",
   initialSortParam = "latest",
   initialPageParam = "1",
+  initialProducts = [],
+  initialMeta = null,
+  initialQueryKey = "",
 }: ProductsClientProps) {
   const router = useRouter();
   const sp = useSearchParams();
-
-  const didHydrateSyncRef = useRef(false);
+  const spKey = sp.toString();
 
   const initialUrlSearch = safeStr(initialSearchParam);
   const initialUrlCategory = parseCsvParam(safeStr(initialCategoryParam));
@@ -459,34 +538,28 @@ export default function ProductsClient({
   const initialUrlSort = (safeStr(initialSortParam) as SortKey) || "latest";
   const initialUrlPage = Number(initialPageParam || "1") || 1;
 
-  const urlSearch = safeStr(sp.get("search"));
-  const urlCategory = parseCsvParam(safeStr(sp.get("category")));
-  const urlCourse = parseCsvParam(safeStr(sp.get("course")));
-  const urlSession = parseCsvParam(safeStr(sp.get("session")));
-  const urlLang = parseCsvParam(safeStr(sp.get("language")));
-  const urlSort = (safeStr(sp.get("sort")) as SortKey) || "latest";
-  const urlPage = Number(sp.get("page") || "1") || 1;
-
   const [isFilterOpen, setIsFilterOpen] = useState(false);
 
   const [searchInput, setSearchInput] = useState(initialUrlSearch);
   const [search, setSearch] = useState(initialUrlSearch);
-
   const [selectedCat, setSelectedCat] = useState<string[]>(initialUrlCategory);
   const [selectedCourse, setSelectedCourse] = useState<string[]>(initialUrlCourse);
   const [selectedSession, setSelectedSession] = useState<string[]>(initialUrlSession);
   const [selectedLang, setSelectedLang] = useState<string[]>(initialUrlLang);
-
   const [sort, setSort] = useState<SortKey>(initialUrlSort || "latest");
 
-  const [loading, setLoading] = useState(true);
-  const [items, setItems] = useState<ApiProductCard[]>([]);
-  const [meta, setMeta] = useState({
-    total: 0,
-    page: Math.max(1, initialUrlPage),
-    totalPages: 1,
-    limit: 12,
-  });
+  const [loading, setLoading] = useState(!(Array.isArray(initialProducts) && initialMeta));
+  const [items, setItems] = useState<ApiProductCard[]>(
+    Array.isArray(initialProducts) ? initialProducts : []
+  );
+  const [meta, setMeta] = useState<Meta>(
+    initialMeta || {
+      total: 0,
+      page: Math.max(1, initialUrlPage),
+      totalPages: 1,
+      limit: 12,
+    }
+  );
 
   const [suggestLoading, setSuggestLoading] = useState(false);
   const [suggestions, setSuggestions] = useState<ApiProductCard[]>([]);
@@ -512,6 +585,28 @@ export default function ProductsClient({
   ];
   const defaultLanguageFallback = ["Hindi", "English", "Urdu"];
   const defaultSessionFallback = ["2025-2026", "2024-2025", "2023-2024"];
+
+  const didInitialUrlSyncRef = useRef(false);
+  const skipFirstFetchRef = useRef(!!initialQueryKey && Array.isArray(initialProducts) && !!initialMeta);
+
+  useEffect(() => {
+    const seed = Array.isArray(initialProducts) ? initialProducts : [];
+    for (const p of seed) {
+      const c = safeStr(p.category);
+      if (c) cacheRef.current.categories.add(c);
+
+      for (const cc of safeArr<string>(p.courseCodes)) {
+        const k = toUpper(cc);
+        if (k) cacheRef.current.courses.add(k);
+      }
+
+      const s = safeStr(p.session);
+      if (s) cacheRef.current.sessions.add(s);
+
+      const l = safeStr(p.language);
+      if (l) cacheRef.current.languages.add(l);
+    }
+  }, [initialProducts]);
 
   useEffect(() => {
     if (isFilterOpen) document.body.style.overflow = "hidden";
@@ -539,17 +634,27 @@ export default function ProductsClient({
       syncUrl({ search: next, page: 1 });
     }, 350);
     return () => clearTimeout(t);
-  }, [searchInput]);
+  }, [searchInput, search]);
 
   useEffect(() => {
-    if (!didHydrateSyncRef.current) {
-      didHydrateSyncRef.current = true;
+    const urlParams = new URLSearchParams(spKey);
+
+    const urlSearch = safeStr(urlParams.get("search"));
+    const urlCategory = parseCsvParam(safeStr(urlParams.get("category")));
+    const urlCourse = parseCsvParam(safeStr(urlParams.get("course")));
+    const urlSession = parseCsvParam(safeStr(urlParams.get("session")));
+    const urlLang = parseCsvParam(safeStr(urlParams.get("language")));
+    const urlSort = (safeStr(urlParams.get("sort")) as SortKey) || "latest";
+    const urlPage = Number(urlParams.get("page") || "1") || 1;
+
+    if (!didInitialUrlSyncRef.current) {
+      didInitialUrlSyncRef.current = true;
 
       const sameSearch = urlSearch === initialUrlSearch;
-      const sameCat = JSON.stringify(urlCategory) === JSON.stringify(initialUrlCategory);
-      const sameCourse = JSON.stringify(urlCourse) === JSON.stringify(initialUrlCourse);
-      const sameSession = JSON.stringify(urlSession) === JSON.stringify(initialUrlSession);
-      const sameLang = JSON.stringify(urlLang) === JSON.stringify(initialUrlLang);
+      const sameCat = sameStringArray(urlCategory, initialUrlCategory);
+      const sameCourse = sameStringArray(urlCourse, initialUrlCourse);
+      const sameSession = sameStringArray(urlSession, initialUrlSession);
+      const sameLang = sameStringArray(urlLang, initialUrlLang);
       const sameSort = urlSort === initialUrlSort;
       const samePage = (urlPage || 1) === (initialUrlPage || 1);
 
@@ -558,18 +663,32 @@ export default function ProductsClient({
       }
     }
 
-    setSearchInput(urlSearch);
-    setSearch(urlSearch);
-
-    setSelectedCat(urlCategory);
-    setSelectedCourse(urlCourse);
-    setSelectedSession(urlSession);
-    setSelectedLang(urlLang);
-
-    setSort((urlSort as SortKey) || "latest");
-
-    setMeta((m) => ({ ...m, page: urlPage || 1 }));
-  }, [sp]);
+    if (searchInput !== urlSearch) setSearchInput(urlSearch);
+    if (search !== urlSearch) setSearch(urlSearch);
+    if (!sameStringArray(selectedCat, urlCategory)) setSelectedCat(urlCategory);
+    if (!sameStringArray(selectedCourse, urlCourse)) setSelectedCourse(urlCourse);
+    if (!sameStringArray(selectedSession, urlSession)) setSelectedSession(urlSession);
+    if (!sameStringArray(selectedLang, urlLang)) setSelectedLang(urlLang);
+    if (sort !== urlSort) setSort(urlSort);
+    if (meta.page !== urlPage) setMeta((m) => ({ ...m, page: urlPage || 1 }));
+  }, [
+    spKey,
+    initialUrlSearch,
+    initialUrlCategory,
+    initialUrlCourse,
+    initialUrlSession,
+    initialUrlLang,
+    initialUrlSort,
+    initialUrlPage,
+    searchInput,
+    search,
+    selectedCat,
+    selectedCourse,
+    selectedSession,
+    selectedLang,
+    sort,
+    meta.page,
+  ]);
 
   function syncUrl(partial: {
     search?: string;
@@ -580,7 +699,7 @@ export default function ProductsClient({
     sort?: SortKey;
     page?: number;
   }) {
-    const params = new URLSearchParams(sp.toString());
+    const params = new URLSearchParams(spKey);
 
     const nextSearch = partial.search !== undefined ? partial.search : safeStr(params.get("search"));
     const nextCat = partial.category !== undefined ? partial.category : parseCsvParam(safeStr(params.get("category")));
@@ -641,34 +760,31 @@ export default function ProductsClient({
     (selectedSession.length ? 1 : 0) +
     (selectedLang.length ? 1 : 0);
 
+  const queryKey = useMemo(() => {
+    return buildProductsQueryKey({
+      selectedCat,
+      selectedCourse,
+      selectedSession,
+      selectedLang,
+      search,
+      sort,
+      page: meta.page,
+    });
+  }, [selectedCat, selectedCourse, selectedSession, selectedLang, search, sort, meta.page]);
+
   useEffect(() => {
     let cancelled = false;
+
+    if (skipFirstFetchRef.current && initialQueryKey === queryKey) {
+      skipFirstFetchRef.current = false;
+      setLoading(false);
+      return;
+    }
 
     (async () => {
       setLoading(true);
       try {
-        const params = new URLSearchParams();
-        params.set("page", String(meta.page || 1));
-        params.set("limit", "12");
-        params.set("includeFacets", "0");
-
-        const apiSort = sort === "latest" ? "latest" : sort === "price_asc" ? "price_asc" : "price_desc";
-        params.set("sort", apiSort);
-
-        if (selectedCat.length) params.set("category", selectedCat.join(","));
-        if (selectedCourse.length) params.set("course", selectedCourse.join(","));
-        if (selectedSession.length) params.set("session", selectedSession.join(","));
-        if (selectedLang.length) params.set("language", selectedLang.join(","));
-
-        if (search) {
-          const { cleaned } = normalizeQuery(search);
-          const { variants } = extractSubjectCodeVariants(search);
-          const extra = variants.slice(0, 6).join(" ");
-          const finalSearch = extra ? `${cleaned} ${extra}` : cleaned;
-          params.set("search", finalSearch);
-        }
-
-        const res = await fetch(`/api/products?${params.toString()}`, { cache: "no-store" });
+        const res = await fetch(`/api/products?${queryKey}`, { cache: "no-store" });
         const data: ApiProductsResponse = await res.json();
         if (cancelled) return;
 
@@ -717,15 +833,7 @@ export default function ProductsClient({
     return () => {
       cancelled = true;
     };
-  }, [
-    selectedCat.join(","),
-    selectedCourse.join(","),
-    selectedSession.join(","),
-    selectedLang.join(","),
-    search,
-    sort,
-    meta.page,
-  ]);
+  }, [queryKey, initialQueryKey, selectedCat, selectedCourse, selectedSession, selectedLang]);
 
   useEffect(() => {
     if (!searchInput.trim()) {
@@ -790,7 +898,7 @@ export default function ProductsClient({
       cancelled = true;
       clearTimeout(t);
     };
-  }, [searchInput, selectedCat.join(","), selectedCourse.join(","), selectedSession.join(","), selectedLang.join(",")]);
+  }, [searchInput, selectedCat, selectedCourse, selectedSession, selectedLang]);
 
   const countText = useMemo(() => {
     if (loading) return "Loading…";
@@ -1252,21 +1360,24 @@ export default function ProductsClient({
 
                     {suggestions.length ? (
                       <div className="max-h-[360px] overflow-auto">
-                        {suggestions.map((p) => (
-                          <Link
-                            key={p.slug}
-                            href={`/${(p.category || "products").toString().toLowerCase().includes("solved") ? "solved-assignments" : "products"}/${p.slug}`}
-                            className="block px-4 py-3 hover:bg-slate-50 border-b border-slate-50"
-                            onClick={() => setShowSuggest(false)}
-                          >
-                            <div className="text-sm font-extrabold text-slate-900 line-clamp-1">{p.title}</div>
-                            <div className="mt-1 text-[11px] font-bold text-slate-600">
-                              {safeStr(p.category) ? safeStr(p.category) : "Product"}
-                              {safeStr(p.session) ? ` • ${safeStr(p.session)}` : ""}
-                              {safeStr(p.language) ? ` • ${safeStr(p.language)}` : ""}
-                            </div>
-                          </Link>
-                        ))}
+                        {suggestions.map((p) => {
+                          const href = productHref({ slug: p.slug, category: p.category });
+                          return (
+                            <Link
+                              key={p.slug}
+                              href={href}
+                              className="block px-4 py-3 hover:bg-slate-50 border-b border-slate-50"
+                              onClick={() => setShowSuggest(false)}
+                            >
+                              <div className="text-sm font-extrabold text-slate-900 line-clamp-1">{p.title}</div>
+                              <div className="mt-1 text-[11px] font-bold text-slate-600">
+                                {safeStr(p.category) ? safeStr(p.category) : "Product"}
+                                {safeStr(p.session) ? ` • ${safeStr(p.session)}` : ""}
+                                {safeStr(p.language) ? ` • ${safeStr(p.language)}` : ""}
+                              </div>
+                            </Link>
+                          );
+                        })}
                       </div>
                     ) : (
                       <div className="p-4">

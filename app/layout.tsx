@@ -14,6 +14,44 @@ const outfit = Outfit({
 
 const GA_ID = (process.env.NEXT_PUBLIC_GA_MEASUREMENT_ID || "").trim();
 
+function safeStr(x: unknown) {
+  return String(x ?? "").trim();
+}
+
+function normalizeBaseUrl(input?: string) {
+  const raw = safeStr(input) || "https://istudentsportal.com";
+  const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  const normalized = withProtocol.replace(/\/+$/, "");
+
+  try {
+    const url = new URL(normalized);
+
+    // production preferred host = non-www https
+    if (
+      url.hostname === "www.istudentsportal.com" ||
+      url.hostname === "istudentsportal.com"
+    ) {
+      return "https://istudentsportal.com";
+    }
+
+    // localhost/dev allowed
+    if (
+      url.hostname === "localhost" ||
+      url.hostname === "127.0.0.1"
+    ) {
+      return normalized;
+    }
+
+    return normalized;
+  } catch {
+    return "https://istudentsportal.com";
+  }
+}
+
+const BASE_URL = normalizeBaseUrl(
+  process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL
+);
+
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
@@ -21,33 +59,51 @@ export const viewport: Viewport = {
 };
 
 export const metadata: Metadata = {
-  metadataBase: new URL("https://istudentsportal.com"),
+  metadataBase: new URL(BASE_URL),
+  applicationName: "IGNOU Students Portal",
   title: {
     default: "IGNOU Students Portal - Solved Assignments & Notes",
     template: "%s | IGNOU Students Portal",
   },
   description:
-    "Get IGNOU Solved Assignments, Handwritten Assignments, Guess Papers, and Previous Year Questions. Best quality study material with instant download.",
+    "Get IGNOU solved assignments, handwritten assignments, guess papers, question papers, projects, and notes with fast access and premium quality.",
   keywords: [
     "IGNOU",
-    "Solved Assignments",
-    "Handwritten",
-    "Guess Paper",
-    "IGNOU Help Books",
+    "IGNOU solved assignments",
+    "IGNOU handwritten assignments",
+    "IGNOU guess papers",
+    "IGNOU question papers",
+    "IGNOU notes",
+    "IGNOU projects",
+    "IGNOU study material",
   ],
-  alternates: { canonical: "/" },
+  alternates: {
+    canonical: "/",
+  },
   robots: {
     index: true,
     follow: true,
-    googleBot: { index: true, follow: true, "max-image-preview": "large" },
+    nocache: false,
+    googleBot: {
+      index: true,
+      follow: true,
+      "max-image-preview": "large",
+      "max-snippet": -1,
+      "max-video-preview": -1,
+    },
+  },
+  icons: {
+    icon: "/icon.png",
+    shortcut: "/icon.png",
+    apple: "/icon.png",
   },
   openGraph: {
     type: "website",
-    url: "https://istudentsportal.com",
+    url: BASE_URL,
     siteName: "IGNOU Students Portal",
     title: "IGNOU Students Portal - Solved Assignments & Notes",
     description:
-      "Get IGNOU Solved Assignments, Handwritten Assignments, Guess Papers, and Previous Year Questions. Instant download & premium quality.",
+      "Get IGNOU solved assignments, handwritten assignments, guess papers, question papers, projects, and notes with fast access and premium quality.",
     images: [
       {
         url: "/og.jpg",
@@ -61,7 +117,7 @@ export const metadata: Metadata = {
     card: "summary_large_image",
     title: "IGNOU Students Portal - Solved Assignments & Notes",
     description:
-      "Solved assignments, handwritten notes, guess papers & previous year questions with instant download.",
+      "Solved assignments, handwritten notes, guess papers, question papers, projects and study material for IGNOU students.",
     images: ["/og.jpg"],
   },
 };

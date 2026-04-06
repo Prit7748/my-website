@@ -1,14 +1,11 @@
-// ✅ FILE: app/[category]/[slug]/page.tsx  (Complete Replace)
-// NOTE: fetchProduct() is DB-direct (NO internal API fetch).
-// FIX: availability fields are now passed to ProductDetailsClient + JSON-LD offer availability is dynamic.
-
 import type { Metadata } from "next";
-import { notFound, redirect } from "next/navigation";
+import { notFound, permanentRedirect } from "next/navigation";
 import Script from "next/script";
 import ProductDetailsClient from "@/components/product/ProductDetailsClient";
 
 import dbConnect from "@/lib/db";
 import Product from "@/models/Product";
+import { productHref } from "@/lib/productHref";
 
 type ApiProduct = {
   _id: string;
@@ -42,30 +39,16 @@ type ApiProduct = {
   thumbnailUrl?: string;
   quickUrl?: string;
 
-  // ✅ availability support (IMPORTANT for details page)
   availability?: string;
   effectiveAvailability?: string;
   comingSoonSalesEnabled?: boolean;
 
-  // optional
   videoUrl?: string;
   comboItems?: Array<{ title: string; slug: string; category?: string; price?: number; thumbUrl?: string }>;
 };
 
-function siteUrl() {
-  let base = process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "http://localhost:3000";
-  base = String(base || "").trim().replace(/\/+$/, "");
-
-  if (!/^https?:\/\//i.test(base)) {
-    if (base.startsWith("localhost") || base.startsWith("127.0.0.1")) base = `http://${base}`;
-    else base = `https://${base}`;
-  }
-
-  return base.replace(/\/+$/, "");
-}
-
-function safeText(input: any) {
-  return String(input || "").trim();
+function safeText(input: unknown) {
+  return String(input ?? "").trim();
 }
 
 function stripHtml(html: string) {
@@ -75,6 +58,44 @@ function stripHtml(html: string) {
     .replace(/<\/?[^>]+(>|$)/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+function normalizeBaseUrl(input?: string) {
+  const raw = safeText(input) || "https://istudentsportal.com";
+  const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+  const normalized = withProtocol.replace(/\/+$/, "");
+
+  try {
+    const url = new URL(normalized);
+
+    if (
+      url.hostname === "www.istudentsportal.com" ||
+      url.hostname === "istudentsportal.com"
+    ) {
+      return "https://istudentsportal.com";
+    }
+
+    if (url.hostname === "localhost" || url.hostname === "127.0.0.1") {
+      return normalized;
+    }
+
+    return normalized;
+  } catch {
+    return "https://istudentsportal.com";
+  }
+}
+
+function siteUrl() {
+  return normalizeBaseUrl(process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL);
+}
+
+function absoluteUrl(pathOrUrl?: string) {
+  const value = safeText(pathOrUrl);
+  if (!value) return "";
+  if (/^https?:\/\//i.test(value)) return value;
+
+  const base = siteUrl();
+  return `${base}${value.startsWith("/") ? value : `/${value}`}`;
 }
 
 async function resolveParams<T extends Record<string, any>>(params: any): Promise<T> {
@@ -111,9 +132,20 @@ function normAvail(v?: string) {
   return safeText(v).toLowerCase();
 }
 
+function categorySlugFromHref(href: string, fallback = "products") {
+  const clean = safeText(href);
+  if (!clean.startsWith("/")) return fallback;
+  const parts = clean.split("/").filter(Boolean);
+  return parts[0] || fallback;
+}
+
 async function fetchProduct(slug: string) {
   await dbConnect();
-  const doc: any = await Product.findOne({ slug, deletedAt: null }).lean();
+
+  const doc: any = await Product.findOne({
+    slug,
+    $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+  }).lean();
 
   if (!doc) return { product: null as ApiProduct | null, status: 404 };
 
@@ -149,7 +181,6 @@ async function fetchProduct(slug: string) {
     thumbnailUrl: safeText(doc.thumbnailUrl),
     quickUrl: safeText(doc.quickUrl),
 
-    // ✅ pass availability to client (CRITICAL)
     availability: safeText(doc.availability),
     effectiveAvailability: safeText(doc.effectiveAvailability),
     comingSoonSalesEnabled: Boolean(doc.comingSoonSalesEnabled ?? false),
@@ -160,14 +191,20 @@ async function fetchProduct(slug: string) {
 
 export async function generateMetadata({ params }: { params: any }): Promise<Metadata> {
   const p = await resolveParams<{ category: string; slug: string }>(params);
-  const categorySlug = decodeURIComponent(p?.category || "").trim();
+  const requestedCategorySlug = decodeURIComponent(p?.category || "").trim();
   const slug = decodeURIComponent(p?.slug || "").trim();
+
+  if (!slug) {
+    return { title: "Product Not Found", robots: { index: false, follow: false } };
+  }
 
   const { product } = await fetchProduct(slug);
   if (!product) return { title: "Product Not Found", robots: { index: false, follow: false } };
 
   const base = siteUrl();
-  const canonical = `${base}/${categorySlug}/${product.slug}`;
+  const canonicalPath = productHref({ slug: product.slug, category: product.category });
+  const canonical = `${base}${canonicalPath}`;
+  const canonicalCategorySlug = categorySlugFromHref(canonicalPath, requestedCategorySlug || "products");
 
   const title = safeText(product.title);
   const description = (
@@ -176,10 +213,15 @@ export async function generateMetadata({ params }: { params: any }): Promise<Met
     "IGNOU study material product."
   ).slice(0, 180);
 
-  const ogImage = safeText(product.thumbnailUrl) || safeText(product.quickUrl) || (product.images?.[0] || "");
+  const ogImageRaw =
+    safeText(product.thumbnailUrl) ||
+    safeText(product.quickUrl) ||
+    (Array.isArray(product.images) ? safeText(product.images[0]) : "");
+
+  const ogImage = absoluteUrl(ogImageRaw);
 
   return {
-    title: `${title} | ${categoryLabelFromSlug(categorySlug)}`,
+    title: `${title} | ${categoryLabelFromSlug(canonicalCategorySlug)}`,
     description,
     alternates: { canonical },
     robots: { index: true, follow: true },
@@ -191,39 +233,38 @@ export async function generateMetadata({ params }: { params: any }): Promise<Met
       siteName: "IGNOU Students Portal",
       images: ogImage ? [{ url: ogImage, alt: title }] : [],
     },
-    twitter: { card: "summary_large_image", title, description, images: ogImage ? [ogImage] : [] },
+    twitter: {
+      card: "summary_large_image",
+      title,
+      description,
+      images: ogImage ? [ogImage] : [],
+    },
   };
 }
 
 export default async function Page({ params }: { params: any }) {
   const p = await resolveParams<{ category: string; slug: string }>(params);
-  const categorySlug = decodeURIComponent(p?.category || "").trim();
+  const requestedCategorySlug = decodeURIComponent(p?.category || "").trim();
   const slug = decodeURIComponent(p?.slug || "").trim();
+
+  if (!slug) notFound();
 
   const { product } = await fetchProduct(slug);
   if (!product) notFound();
 
-  const label = safeText(product.category);
+  const canonicalPath = productHref({ slug: product.slug, category: product.category });
+  const expectedCategorySlug = categorySlugFromHref(canonicalPath, requestedCategorySlug || "products");
 
-  const expectedSlugByLabel: Record<string, string> = {
-    "Solved Assignments": "solved-assignments",
-    "Handwritten PDFs": "handwritten-pdfs",
-    "Handwritten Hardcopy (Delivery)": "handwritten-hardcopy",
-    "Question Papers (PYQ)": "question-papers",
-    "Guess Papers": "guess-papers",
-    "eBooks/Notes": "ebooks",
-    "Projects & Synopsis": "projects",
-    Combo: "combo",
-    Products: "products",
-  };
+  if (!expectedCategorySlug || expectedCategorySlug === "products") {
+    notFound();
+  }
 
-  const expectedCategorySlug = expectedSlugByLabel[label] || categorySlug;
-  if (expectedCategorySlug && expectedCategorySlug !== categorySlug) {
-    redirect(`/${expectedCategorySlug}/${product.slug}`);
+  if (requestedCategorySlug !== expectedCategorySlug) {
+    permanentRedirect(canonicalPath);
   }
 
   const base = siteUrl();
-  const productUrl = `${base}/${expectedCategorySlug}/${product.slug}`;
+  const productUrl = `${base}${canonicalPath}`;
   const categoryLabel = categoryLabelFromSlug(expectedCategorySlug);
   const variant = variantFromCategorySlug(expectedCategorySlug);
 
@@ -233,15 +274,19 @@ export default async function Page({ params }: { params: any }) {
     `${categoryLabel} product for IGNOU students.`;
 
   const images = [
-    safeText(product.thumbnailUrl),
-    safeText(product.quickUrl),
-    ...(Array.isArray(product.images) ? product.images : []),
+    absoluteUrl(safeText(product.thumbnailUrl)),
+    absoluteUrl(safeText(product.quickUrl)),
+    ...(Array.isArray(product.images) ? product.images.map((x) => absoluteUrl(safeText(x))) : []),
   ].filter(Boolean);
 
-  // ✅ JSON-LD offer availability (SEO)
-  const rawAvail = normAvail(product.availability);
+  const rawAvail = normAvail(product.effectiveAvailability || product.availability);
   const schemaAvailability =
-    rawAvail === "out_of_stock" || rawAvail === "outofstock" || rawAvail === "out-of-stock"
+    rawAvail === "out_of_stock" ||
+    rawAvail === "outofstock" ||
+    rawAvail === "out-of-stock" ||
+    rawAvail === "want_to_buy" ||
+    rawAvail === "wanttobuy" ||
+    rawAvail === "want-to-buy"
       ? "https://schema.org/OutOfStock"
       : "https://schema.org/InStock";
 
@@ -302,7 +347,11 @@ export default async function Page({ params }: { params: any }) {
         dangerouslySetInnerHTML={{ __html: JSON.stringify(webPageJsonLd) }}
       />
 
-      <ProductDetailsClient initialProduct={product as any} categorySlug={expectedCategorySlug} variant={variant} />
+      <ProductDetailsClient
+        initialProduct={product as any}
+        categorySlug={expectedCategorySlug}
+        variant={variant}
+      />
     </>
   );
-} 
+}

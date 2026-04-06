@@ -29,6 +29,61 @@ function normAvail(v?: string) {
   return safeStr(v).toLowerCase();
 }
 
+function fileNameOf(urlOrPath: string) {
+  const clean = safeStr(urlOrPath).split("?")[0];
+  const parts = clean.split("/");
+  return (parts[parts.length - 1] || "").toLowerCase();
+}
+
+function normalizeImagesToUrls(images: any) {
+  const arr = Array.isArray(images) ? images : [];
+  if (!arr.length) {
+    return { urls: [] as string[], thumbUrl: "", quickUrl: "" };
+  }
+
+  const allStrings = arr.every((x: any) => typeof x === "string");
+  if (allStrings) {
+    const urls = Array.from(
+      new Set(
+        arr
+          .map((s: string) => safeStr(s))
+          .filter(Boolean)
+      )
+    ).sort((a, b) => fileNameOf(a).localeCompare(fileNameOf(b), undefined, { numeric: true }));
+
+    return {
+      urls,
+      thumbUrl: urls[0] || "",
+      quickUrl: urls[1] || urls[0] || "",
+    };
+  }
+
+  const strings: string[] = arr
+    .filter((x: any) => typeof x === "string")
+    .map((s: string) => safeStr(s))
+    .filter(Boolean);
+
+  const objects = arr
+    .filter((x: any) => x && typeof x === "object" && typeof x.url === "string" && x.url.trim())
+    .sort((a: any, b: any) => {
+      const ak = safeStr(a.sortKey || a.filename || fileNameOf(a.url)).toLowerCase();
+      const bk = safeStr(b.sortKey || b.filename || fileNameOf(b.url)).toLowerCase();
+      return ak.localeCompare(bk, undefined, { numeric: true });
+    })
+    .map((x: any) => safeStr(x.url))
+    .filter(Boolean);
+
+  const urls = Array.from(new Set([...strings, ...objects])).sort((a, b) =>
+    fileNameOf(a).localeCompare(b, undefined, { numeric: true })
+  );
+
+  return {
+    urls,
+    thumbUrl: urls[0] || "",
+    quickUrl: urls[1] || urls[0] || "",
+  };
+}
+
 async function getOnDemandSalesEnabled() {
   try {
     const doc: any =
@@ -75,10 +130,55 @@ export async function GET(
       return NextResponse.json({ error: "Invalid slug" }, { status: 400 });
     }
 
-    const p: any = await Product.findOne({
+    const filter: any = {
       slug,
-      $or: [{ isActive: true }, { isActive: { $exists: false } }],
-    }).lean();
+      $and: [
+        { $or: [{ isActive: true }, { isActive: { $exists: false } }] },
+        { $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }] },
+      ],
+    };
+
+    const p: any = await Product.findOne(filter)
+      .select({
+        _id: 1,
+        title: 1,
+        slug: 1,
+        sku: 1,
+        category: 1,
+
+        subjectCode: 1,
+        subjectTitleHi: 1,
+        subjectTitleEn: 1,
+        courseCodes: 1,
+        courseTitles: 1,
+
+        session: 1,
+        language: 1,
+
+        price: 1,
+        oldPrice: 1,
+
+        shortDesc: 1,
+        descriptionHtml: 1,
+        pages: 1,
+
+        availability: 1,
+        deliverWithinMinutes: 1,
+        onDemandNote: 1,
+        importantNote: 1,
+
+        isDigital: 1,
+        pdfUrl: 1,
+        pdfKey: 1,
+
+        images: 1,
+        thumbnailUrl: 1,
+        quickUrl: 1,
+
+        createdAt: 1,
+        updatedAt: 1,
+      })
+      .lean();
 
     if (!p) {
       return NextResponse.json({ error: "Not found", slug }, { status: 404 });
@@ -86,7 +186,8 @@ export async function GET(
 
     const onDemandSalesEnabled = await getOnDemandSalesEnabled();
     const rawAvailability = safeStr(p.availability || "");
-    const resolvedAvail = resolveAvailability(rawAvailability, onDemandSalesEnabled);
+    const effectiveAvailability = resolveAvailability(rawAvailability, onDemandSalesEnabled);
+
     const resolvedTiming = await resolveOnDemandTimingForProduct({
       category: p.category,
       courseCodes: Array.isArray(p.courseCodes) ? p.courseCodes : [],
@@ -94,34 +195,40 @@ export async function GET(
       onDemandNote: p.onDemandNote,
     });
 
+    const { urls, thumbUrl, quickUrl } = normalizeImagesToUrls(p.images);
+
+    const finalThumb = safeStr(p.thumbnailUrl) || thumbUrl;
+    const finalQuick = safeStr(p.quickUrl) || quickUrl;
+
     return NextResponse.json(
       {
         product: {
           _id: String(p._id),
-          title: p.title || "",
-          slug: p.slug || "",
-          sku: p.sku || "",
-          category: p.category || "",
+          title: safeStr(p.title),
+          slug: safeStr(p.slug),
+          sku: safeStr(p.sku),
+          category: safeStr(p.category),
 
-          subjectCode: p.subjectCode || "",
-          subjectTitleHi: p.subjectTitleHi || "",
-          subjectTitleEn: p.subjectTitleEn || "",
+          subjectCode: safeStr(p.subjectCode),
+          subjectTitleHi: safeStr(p.subjectTitleHi),
+          subjectTitleEn: safeStr(p.subjectTitleEn),
           courseCodes: Array.isArray(p.courseCodes) ? p.courseCodes : [],
           courseTitles: Array.isArray(p.courseTitles) ? p.courseTitles : [],
 
-          session: p.session || "",
-          language: p.language || "",
+          session: safeStr(p.session),
+          language: safeStr(p.language),
 
           price: Number(p.price || 0),
           oldPrice: p.oldPrice !== undefined && p.oldPrice !== null ? Number(p.oldPrice) : null,
 
-          shortDesc: p.shortDesc || "",
-          descriptionHtml: p.descriptionHtml || "",
+          shortDesc: safeStr(p.shortDesc),
+          descriptionHtml: safeStr(p.descriptionHtml),
 
           pages: Number(p.pages || 0),
 
-          availability: rawAvailability || "",
-          effectiveAvailability: resolvedAvail,
+          availability: rawAvailability,
+          effectiveAvailability,
+          canPurchase: effectiveAvailability !== "want_to_buy",
           onDemandSalesEnabled,
 
           deliverWithinMinutes: Math.max(
@@ -138,26 +245,37 @@ export async function GET(
           onDemandMatchedRuleId: safeStr(resolvedTiming?.matchedRuleId),
           onDemandMatchedRuleType: safeStr(resolvedTiming?.matchedRuleType),
 
-          importantNote: p.importantNote || "",
+          importantNote: safeStr(p.importantNote),
 
           isDigital: !!p.isDigital,
-          pdfUrl: p.pdfUrl || "",
-          pdfKey: p.pdfKey || "",
+          pdfUrl: safeStr(p.pdfUrl),
+          pdfKey: safeStr(p.pdfKey),
 
-          images: Array.isArray(p.images) ? p.images : [],
-          thumbnailUrl: p.thumbnailUrl || "",
-          quickUrl: p.quickUrl || "",
+          images: urls,
+          thumbUrl: finalThumb,
+          quickUrl: finalQuick,
+          thumbnailUrl: finalThumb,
 
           createdAt: p.createdAt || null,
           updatedAt: p.updatedAt || null,
         },
       },
-      { status: 200 }
+      {
+        status: 200,
+        headers: {
+          "Cache-Control": "no-store",
+        },
+      }
     );
   } catch (e: any) {
     return NextResponse.json(
       { error: "Server error", details: e?.message || "unknown" },
-      { status: 500 }
+      {
+        status: 500,
+        headers: {
+          "Cache-Control": "no-store",
+        },
+      }
     );
   }
-} 
+}

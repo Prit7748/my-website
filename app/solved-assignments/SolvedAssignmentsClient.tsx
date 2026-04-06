@@ -26,6 +26,8 @@ import Pagination from "@/components/solved-assignments/Pagination";
 
 const SOLVED = "Solved Assignments";
 
+type Meta = { total: number; page: number; totalPages: number; limit: number };
+
 function safeSplitComma(v: string | null | undefined) {
   return (v || "")
     .split(",")
@@ -47,6 +49,11 @@ type SolvedAssignmentsClientProps = {
   initialSessionParam?: string;
   initialSearchParam?: string;
   initialPageParam?: string;
+
+  // ✅ SSR-ready props (optional)
+  initialProducts?: any[];
+  initialMeta?: Meta | null;
+  initialQueryKey?: string;
 };
 
 export default function SolvedAssignmentsClient({
@@ -55,6 +62,9 @@ export default function SolvedAssignmentsClient({
   initialSessionParam = "",
   initialSearchParam = "",
   initialPageParam = "1",
+  initialProducts = [],
+  initialMeta = null,
+  initialQueryKey = "",
 }: SolvedAssignmentsClientProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -74,11 +84,11 @@ export default function SolvedAssignmentsClient({
 
   const [isFilterOpen, setIsFilterOpen] = useState(false);
 
-  const [meta, setMeta] = useState({
-    total: 0,
-    page: initialPageNum,
-    totalPages: 1,
-    limit: 24,
+  const [meta, setMeta] = useState<Meta>({
+    total: initialMeta?.total || 0,
+    page: initialMeta?.page || initialPageNum,
+    totalPages: initialMeta?.totalPages || 1,
+    limit: initialMeta?.limit || 24,
   });
 
   const [selectedCat, setSelectedCat] = useState<string[]>(initialCategories);
@@ -206,7 +216,7 @@ export default function SolvedAssignmentsClient({
     }
 
     setMeta((prev) => (prev.page === pageNum ? prev : { ...prev, page: pageNum }));
-  }, [searchParams, router]);
+  }, [searchParams, router, meta.page, search, searchInput, selectedCat, selectedCourse, selectedSession]);
 
   useEffect(() => {
     const t = window.setTimeout(() => {
@@ -416,7 +426,14 @@ export default function SolvedAssignmentsClient({
               </div>
 
               <div className="mt-5">
-                <ProductGrid selectedCat={solvedOnlyCat} onMeta={setMeta} search={search} />
+                <ProductGrid
+                  selectedCat={solvedOnlyCat}
+                  onMeta={setMeta}
+                  search={search}
+                  initialProducts={initialProducts}
+                  initialMeta={initialMeta}
+                  initialQueryKey={initialQueryKey}
+                />
               </div>
 
               <div className="mt-6">
