@@ -1,3 +1,4 @@
+// proxy.ts
 import { NextRequest, NextResponse } from "next/server";
 
 function decodeJwtPayload(token?: string) {
@@ -30,7 +31,7 @@ function isAdminRole(role: string) {
   return role === "master_admin" || role === "co_admin";
 }
 
-export function middleware(req: NextRequest) {
+export function proxy(req: NextRequest) {
   const token = req.cookies.get("token")?.value;
   const pathname = req.nextUrl.pathname;
 
@@ -40,11 +41,7 @@ export function middleware(req: NextRequest) {
   if (isProtected && !token) {
     const url = req.nextUrl.clone();
     url.pathname = "/login";
-
-    const nextPath =
-      pathname + (req.nextUrl.search ? req.nextUrl.search : "");
-
-    url.searchParams.set("next", nextPath);
+    url.searchParams.set("next", pathname + (req.nextUrl.search || ""));
     return NextResponse.redirect(url);
   }
 
@@ -65,10 +62,7 @@ export function middleware(req: NextRequest) {
       url.search = "";
 
       if (!token) {
-        url.searchParams.set(
-          "next",
-          pathname + (req.nextUrl.search ? req.nextUrl.search : "")
-        );
+        url.searchParams.set("next", pathname + (req.nextUrl.search || ""));
       }
 
       return NextResponse.redirect(url);
