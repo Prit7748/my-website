@@ -1,4 +1,3 @@
-// app/api/admin/upload/route.ts
 import { NextResponse } from "next/server";
 import crypto from "crypto";
 import path from "path";
@@ -9,7 +8,17 @@ export const runtime = "nodejs";
 
 const REGION = process.env.AWS_REGION || "ap-south-1";
 const BUCKET_PRIVATE = process.env.AWS_S3_BUCKET_PRIVATE || "";
-const BUCKET_IMAGES = process.env.AWS_S3_BUCKET_IMAGES || "";
+
+// Backward + current compatibility
+const BUCKET_PUBLIC =
+  process.env.AWS_S3_BUCKET_IMAGES ||
+  process.env.AWS_S3_BUCKET_PUBLIC ||
+  "";
+
+const PUBLIC_BASE_URL =
+  process.env.AWS_PUBLIC_BASE_URL ||
+  process.env.AWS_S3_PUBLIC_BASE_URL ||
+  "";
 
 const ACCESS_KEY = process.env.AWS_ACCESS_KEY_ID || "";
 const SECRET_KEY = process.env.AWS_SECRET_ACCESS_KEY || "";
@@ -21,6 +30,18 @@ const s3 = new S3Client({
     secretAccessKey: SECRET_KEY,
   },
 });
+
+const IMAGE_EXTENSIONS = new Set([".jpg", ".jpeg", ".png", ".webp", ".avif"]);
+const VIDEO_EXTENSIONS = new Set([".mp4", ".webm"]);
+
+const HERO_IMAGE_MAX_BYTES = 8 * 1024 * 1024; // 8 MB
+const HERO_VIDEO_MAX_BYTES = 30 * 1024 * 1024; // 30 MB
+const DEFAULT_IMAGE_MAX_BYTES = 15 * 1024 * 1024; // 15 MB
+const DEFAULT_PDF_MAX_BYTES = 100 * 1024 * 1024; // 100 MB
+
+function safeStr(value: unknown) {
+  return String(value ?? "").trim();
+}
 
 function safeExt(name: string) {
   const ext = (path.extname(name || "") || "").toLowerCase();
@@ -34,56 +55,128 @@ function safeBase(name: string) {
       .toLowerCase()
       .replace(/[^a-z0-9-_]+/g, "-")
       .replace(/-+/g, "-")
-      .slice(0, 60) || "file"
+      .replace(/^-+|-+$/g, "")
+      .slice(0, 80) || "file"
   );
 }
 
+function normalizePublicBaseUrl(input: string) {
+  const raw = safeStr(input);
+  if (!raw) return "";
+  return raw.replace(/\/+$/, "");
+}
+
 function publicS3Url(bucket: string, region: string, key: string) {
-  return `https://${bucket}.s3.${region}.amazonaws.com/${encodeURIComponent(key).replace(/%2F/g, "/")}`;
+  const base = normalizePublicBaseUrl(PUBLIC_BASE_URL);
+  if (base) {
+    return `${base}/${encodeURIComponent(key).replace(/%2F/g, "/")}`;
+  }
+
+  return `https://${bucket}.s3.${region}.amazonaws.com/${encodeURIComponent(
+    key
+  ).replace(/%2F/g, "/")}`;
+}
+
+function isHeroSliderDestination(destination: string) {
+  const d = safeStr(destination).toLowerCase();
+  return (
+    d === "hero-slider" ||
+    d === "hero_slides" ||
+    d === "hero-slides" ||
+    d === "site-settings/hero-slider" ||
+    d === "site-settings/hero-slides"
+  );
+}
+
+function getImageContentType(ext: string, fallback: string) {
+  if (fallback && fallback.startsWith("image/")) return fallback;
+  if (ext === ".png") return "image/png";
+  if (ext === ".webp") return "image/webp";
+  if (ext === ".avif") return "image/avif";
+  return "image/jpeg";
+}
+
+function getVideoContentType(ext: string, fallback: string) {
+  if (fallback && fallback.startsWith("video/")) return fallback;
+  if (ext === ".webm") return "video/webm";
+  return "video/mp4";
 }
 
 export async function POST(req: Request) {
   const user = await getAuthUser();
-  if (!user) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
-  if (!hasPermission(user, "products:write")) {
-    return NextResponse.json({ error: "Forbidden (products:write missing)" }, { status: 403 });
+
+  if (!user) {
+    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
 
-  // ✅ Hard fail if creds missing (common mistake)
+  if (!hasPermission(user, "products:write")) {
+    return NextResponse.json(
+      { error: "Forbidden (products:write missing)" },
+      { status: 403 }
+    );
+  }
+
   if (!ACCESS_KEY || !SECRET_KEY) {
     return NextResponse.json(
-      { error: "AWS credentials missing (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)" },
+      {
+        error:
+          "AWS credentials missing (AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY)",
+      },
       { status: 500 }
     );
   }
 
   try {
     const form = await req.formData();
-    const file = form.get("file") as File | null;
-    const kind = String(form.get("kind") || "image"); // "pdf" | "image"
 
-    if (!file) return NextResponse.json({ error: "file is required" }, { status: 400 });
+    const file = form.get("file") as File | null;
+    const kind = safeStr(form.get("kind")).toLowerCase() || "image";
+    const destination = safeStr(form.get("destination"));
+    const folder = safeStr(form.get("folder"));
+    const deviceRaw = safeStr(form.get("device")).toLowerCase();
+
+    if (!file) {
+      return NextResponse.json({ error: "file is required" }, { status: 400 });
+    }
+
+    const ext = safeExt(file.name);
+    const bytes = Buffer.from(await file.arrayBuffer());
 
     const isPdf = kind === "pdf";
-    const ext = safeExt(file.name) || (isPdf ? ".pdf" : ".jpg");
+    const isVideo = kind === "video";
+    const isImage = !isPdf && !isVideo;
 
-    if (isPdf && ext !== ".pdf") {
-      return NextResponse.json({ error: "Only .pdf allowed for PDF upload" }, { status: 400 });
+    if (!ext) {
+      return NextResponse.json(
+        { error: "File extension is missing" },
+        { status: 400 }
+      );
     }
-    if (!isPdf && ![".jpg", ".jpeg", ".png", ".webp"].includes(ext)) {
-      return NextResponse.json({ error: "Only jpg/jpeg/png/webp allowed for images" }, { status: 400 });
-    }
 
-    const bytes = Buffer.from(await file.arrayBuffer());
-    const id = crypto.randomBytes(10).toString("hex");
-    const outName = `${safeBase(file.name)}-${id}${ext}`;
-
-    // ✅ PDF => Private bucket
     if (isPdf) {
-      if (!BUCKET_PRIVATE) {
-        return NextResponse.json({ error: "AWS_S3_BUCKET_PRIVATE missing" }, { status: 500 });
+      if (ext !== ".pdf") {
+        return NextResponse.json(
+          { error: "Only .pdf allowed for PDF upload" },
+          { status: 400 }
+        );
       }
 
+      if (bytes.length > DEFAULT_PDF_MAX_BYTES) {
+        return NextResponse.json(
+          { error: "PDF too large. Max allowed size is 100 MB." },
+          { status: 400 }
+        );
+      }
+
+      if (!BUCKET_PRIVATE) {
+        return NextResponse.json(
+          { error: "AWS_S3_BUCKET_PRIVATE missing" },
+          { status: 500 }
+        );
+      }
+
+      const id = crypto.randomBytes(10).toString("hex");
+      const outName = `${safeBase(file.name)}-${id}${ext}`;
       const key = `uploads/pdfs/${outName}`;
 
       await s3.send(
@@ -95,30 +188,108 @@ export async function POST(req: Request) {
         })
       );
 
-      return NextResponse.json({ ok: true, kind: "pdf", key }, { status: 200 });
+      return NextResponse.json(
+        { ok: true, kind: "pdf", key },
+        { status: 200 }
+      );
     }
 
-    // ✅ Images => Images bucket
-    if (!BUCKET_IMAGES) {
-      return NextResponse.json({ error: "AWS_S3_BUCKET_IMAGES missing" }, { status: 500 });
+    if (!BUCKET_PUBLIC) {
+      return NextResponse.json(
+        {
+          error:
+            "Public images bucket missing. Add AWS_S3_BUCKET_IMAGES or AWS_S3_BUCKET_PUBLIC in env.",
+        },
+        { status: 500 }
+      );
     }
 
-    const key = `uploads/images/${outName}`;
+    if (isVideo) {
+      if (!VIDEO_EXTENSIONS.has(ext)) {
+        return NextResponse.json(
+          { error: "Only .mp4 and .webm allowed for video upload" },
+          { status: 400 }
+        );
+      }
+    } else if (isImage) {
+      if (!IMAGE_EXTENSIONS.has(ext)) {
+        return NextResponse.json(
+          { error: "Only jpg/jpeg/png/webp/avif allowed for image upload" },
+          { status: 400 }
+        );
+      }
+    }
+
+    const heroSliderMode =
+      isHeroSliderDestination(destination) || isHeroSliderDestination(folder);
+
+    if (heroSliderMode) {
+      if (isVideo && bytes.length > HERO_VIDEO_MAX_BYTES) {
+        return NextResponse.json(
+          {
+            error:
+              "Hero slider video too large. Max allowed size is 30 MB. Better site speed ke liye compressed MP4/WebM use karein.",
+          },
+          { status: 400 }
+        );
+      }
+
+      if (isImage && bytes.length > HERO_IMAGE_MAX_BYTES) {
+        return NextResponse.json(
+          {
+            error:
+              "Hero slider image too large. Max allowed size is 8 MB. Better site speed ke liye WebP/AVIF preferred hai.",
+          },
+          { status: 400 }
+        );
+      }
+    } else if (isImage && bytes.length > DEFAULT_IMAGE_MAX_BYTES) {
+      return NextResponse.json(
+        { error: "Image too large. Max allowed size is 15 MB." },
+        { status: 400 }
+      );
+    }
+
+    const id = crypto.randomBytes(10).toString("hex");
+    const outName = `${safeBase(file.name)}-${id}${ext}`;
+
+    let key = "";
+    if (heroSliderMode) {
+      const device = deviceRaw === "mobile" ? "mobile" : "desktop";
+      const mediaType = isVideo ? "videos" : "images";
+      key = `uploads/site-settings/hero-slider/${device}/${mediaType}/${outName}`;
+    } else {
+      key = `uploads/images/${outName}`;
+    }
 
     await s3.send(
       new PutObjectCommand({
-        Bucket: BUCKET_IMAGES,
+        Bucket: BUCKET_PUBLIC,
         Key: key,
         Body: bytes,
-        ContentType: file.type || "image/*",
+        ContentType: isVideo
+          ? getVideoContentType(ext, file.type || "")
+          : getImageContentType(ext, file.type || ""),
       })
     );
 
-    const url = publicS3Url(BUCKET_IMAGES, REGION, key);
+    const url = publicS3Url(BUCKET_PUBLIC, REGION, key);
 
-    return NextResponse.json({ ok: true, kind: "image", url, key }, { status: 200 });
+    return NextResponse.json(
+      {
+        ok: true,
+        kind: isVideo ? "video" : "image",
+        url,
+        src: url,
+        key,
+        bucket: BUCKET_PUBLIC,
+        destination: heroSliderMode ? "hero-slider" : "default",
+      },
+      { status: 200 }
+    );
   } catch (e: any) {
     console.error("UPLOAD_ERROR:", e);
+
     return NextResponse.json(
       {
         error: "Upload failed",

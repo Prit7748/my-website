@@ -1,44 +1,92 @@
-import mongoose, { Schema, models, model } from "mongoose";
+import { Schema, models, model } from "mongoose";
 
 const HeroSlideSchema = new Schema(
   {
-    // desktop | mobile (2 categories as you said)
     device: {
       type: String,
       enum: ["desktop", "mobile"],
       required: true,
+      default: "desktop",
+      trim: true,
       index: true,
     },
 
-    // image | video
     type: {
       type: String,
       enum: ["image", "video"],
       required: true,
+      default: "image",
+      trim: true,
       index: true,
     },
 
-    // URL or public path (/slider1.png, /intro.mp4, https://...)
-    src: { type: String, required: true, trim: true },
+    // Public path or full URL
+    src: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: 2000,
+    },
 
-    // Optional click link
-    link: { type: String, default: "", trim: true },
+    // Optional click URL/path
+    link: {
+      type: String,
+      default: "",
+      trim: true,
+      maxlength: 2000,
+    },
 
-    // For SEO/accessibility (image alt)
-    alt: { type: String, default: "", trim: true },
+    // Accessibility / SEO text
+    alt: {
+      type: String,
+      default: "",
+      trim: true,
+      maxlength: 220,
+    },
 
-    // Publish toggle
-    isActive: { type: Boolean, default: true, index: true },
+    isActive: {
+      type: Boolean,
+      default: true,
+      index: true,
+    },
 
-    // Sort order (ascending)
-    order: { type: Number, default: 1000, index: true },
+    order: {
+      type: Number,
+      default: 1000,
+      min: 0,
+      max: 999999,
+      index: true,
+    },
 
-    // Track updates for cache busting / admin audit
-    lastModifiedAt: { type: Date, default: Date.now },
+    // Per-slide stay duration in seconds
+    durationSeconds: {
+      type: Number,
+      default: 5,
+      min: 1,
+      max: 60,
+      index: true,
+    },
+
+    lastModifiedAt: {
+      type: Date,
+      default: Date.now,
+      index: true,
+    },
   },
-  { timestamps: true }
+  {
+    timestamps: true,
+    versionKey: false,
+  }
 );
 
-HeroSlideSchema.index({ device: 1, isActive: 1, order: 1, createdAt: -1 });
+HeroSlideSchema.index({
+  device: 1,
+  isActive: 1,
+  order: 1,
+  createdAt: -1,
+  _id: 1,
+});
 
-export default models.HeroSlide || model("HeroSlide", HeroSlideSchema);
+const HeroSlide = models.HeroSlide || model("HeroSlide", HeroSlideSchema);
+
+export default HeroSlide;
