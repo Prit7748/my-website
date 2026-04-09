@@ -1,26 +1,25 @@
-// ✅ UPDATE FILE: app/admin/blogs/manage/page.tsx
-// (Only changes: add categories fetch + dropdown + payload categoryId)
-// Aapka file bahut lamba hai, isliye main yaha "COMPLETE REPLACE" de raha hu (safe).
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import {
   ArrowLeft,
-  FileText,
-  PlusCircle,
-  Search,
-  RefreshCw,
-  Trash2,
-  Pencil,
+  Calendar,
   Eye,
+  FileText,
+  FolderKanban,
+  ImagePlus,
+  Link2,
+  Pencil,
+  PlusCircle,
+  RefreshCw,
   Save,
-  X,
+  Search,
   ToggleLeft,
   ToggleRight,
-  Calendar,
-  Link2,
-  FolderKanban,
+  Trash2,
+  Upload,
+  X,
 } from "lucide-react";
 
 type BlogRow = {
@@ -28,21 +27,65 @@ type BlogRow = {
   title: string;
   slug: string;
   excerpt?: string;
+  metaTitle?: string;
+  metaDescription?: string;
   coverUrl?: string;
+  coverAlt?: string;
   tags?: string[];
   authorName?: string;
   isPublished?: boolean;
   publishedAt?: string | null;
   createdAt?: string | null;
   updatedAt?: string | null;
-  categoryId?: string | null; // ✅
+  categoryId?: string | null;
 };
 
-type CatOpt = { _id: string; name: string; slug: string; isActive: boolean; sortOrder: number };
+type CategoryOption = {
+  _id: string;
+  name: string;
+  slug: string;
+  isActive: boolean;
+  sortOrder: number;
+};
 
-function safeStr(x: any) {
-  return String(x ?? "").trim();
+type FormState = {
+  title: string;
+  slug: string;
+  excerpt: string;
+  metaTitle: string;
+  metaDescription: string;
+  coverUrl: string;
+  coverAlt: string;
+  youtubeUrl: string;
+  tagsCsv: string;
+  authorName: string;
+  isPublished: boolean;
+  publishedAt: string;
+  contentHtml: string;
+  categoryId: string;
+};
+
+const INITIAL_FORM: FormState = {
+  title: "",
+  slug: "",
+  excerpt: "",
+  metaTitle: "",
+  metaDescription: "",
+  coverUrl: "",
+  coverAlt: "",
+  youtubeUrl: "",
+  tagsCsv: "",
+  authorName: "IGNOU Students Portal",
+  isPublished: false,
+  publishedAt: "",
+  contentHtml: "",
+  categoryId: "",
+};
+
+function safeStr(value: unknown) {
+  return String(value ?? "").trim();
 }
+
 function slugify(input: string) {
   return safeStr(input)
     .toLowerCase()
@@ -52,143 +95,180 @@ function slugify(input: string) {
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");
 }
-function fmtDate(d?: string | null) {
-  if (!d) return "";
+
+function formatDate(value?: string | null) {
+  if (!value) return "";
   try {
-    return new Intl.DateTimeFormat("en-IN", { year: "numeric", month: "short", day: "2-digit" }).format(new Date(d));
+    return new Intl.DateTimeFormat("en-IN", {
+      year: "numeric",
+      month: "short",
+      day: "2-digit",
+    }).format(new Date(value));
   } catch {
-    return d;
+    return value;
   }
 }
-function joinTags(tags: any) {
-  const arr = Array.isArray(tags) ? tags : [];
-  return arr.filter(Boolean).join(", ");
+
+function joinTags(tags: unknown) {
+  const list = Array.isArray(tags) ? tags : [];
+  return list.filter(Boolean).join(", ");
+}
+
+function countChars(value: string, max: number) {
+  return `${safeStr(value).length}/${max}`;
 }
 
 export default function AdminManageBlogsPage() {
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [uploadingImage, setUploadingImage] = useState(false);
+
   const [items, setItems] = useState<BlogRow[]>([]);
+  const [categories, setCategories] = useState<CategoryOption[]>([]);
   const [error, setError] = useState("");
 
   const [search, setSearch] = useState("");
   const [only, setOnly] = useState<"" | "published" | "draft">("");
 
   const [mode, setMode] = useState<"list" | "create" | "edit">("list");
-  const [editId, setEditId] = useState<string>("");
+  const [editId, setEditId] = useState("");
 
-  // ✅ categories list for dropdown
-  const [cats, setCats] = useState<CatOpt[]>([]);
+  const [form, setForm] = useState<FormState>(INITIAL_FORM);
 
-  const [form, setForm] = useState({
-    title: "",
-    slug: "",
-    excerpt: "",
-    coverUrl: "",
-    youtubeUrl: "",
-    tagsCsv: "",
-    authorName: "IGNOU Students Portal",
-    isPublished: false,
-    publishedAt: "",
-    contentHtml: "",
-    categoryId: "", // ✅
-  });
-
-  async function loadCats() {
+  async function loadCategories() {
     try {
-      const res = await fetch("/api/admin/blog-categories?only=active", { credentials: "include" });
-      const data = await res.json();
-      const list: CatOpt[] = Array.isArray(data?.categories) ? data.categories : [];
-      setCats(list.sort((a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0)));
+      const res = await fetch("/api/admin/blog-categories?only=active", {
+        credentials: "include",
+        cache: "no-store",
+      });
+      const data = await res.json().catch(() => ({}));
+      const list: CategoryOption[] = Array.isArray(data?.categories)
+        ? data.categories
+        : [];
+      setCategories(
+        list.sort((a, b) => Number(a.sortOrder || 0) - Number(b.sortOrder || 0))
+      );
     } catch {
-      setCats([]);
+      setCategories([]);
     }
   }
 
-  async function load() {
+  async function loadBlogs() {
     setLoading(true);
     setError("");
-    try {
-      const q = new URLSearchParams();
-      if (safeStr(search)) q.set("search", safeStr(search));
-      if (only) q.set("only", only);
 
-      const res = await fetch(`/api/admin/blogs?${q.toString()}`, { credentials: "include" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Failed to load blogs");
+    try {
+      const params = new URLSearchParams();
+      if (safeStr(search)) params.set("search", safeStr(search));
+      if (only) params.set("only", only);
+
+      const res = await fetch(`/api/admin/blogs?${params.toString()}`, {
+        credentials: "include",
+        cache: "no-store",
+      });
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        throw new Error(data?.error || "Failed to load blogs");
+      }
+
       setItems(Array.isArray(data?.blogs) ? data.blogs : []);
     } catch (e: any) {
-      setError(e?.message || "Failed to load");
       setItems([]);
+      setError(e?.message || "Failed to load blogs");
     } finally {
       setLoading(false);
     }
   }
 
   useEffect(() => {
-    load();
-    loadCats();
+    loadBlogs();
+    loadCategories();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const filtered = useMemo(() => {
-    const s = safeStr(search).toLowerCase();
-    if (!s) return items;
-    return items.filter((b) => {
-      const t = safeStr(b.title).toLowerCase();
-      const sl = safeStr(b.slug).toLowerCase();
-      const ex = safeStr(b.excerpt).toLowerCase();
-      const tg = Array.isArray(b.tags) ? b.tags.join(" ").toLowerCase() : "";
-      return t.includes(s) || sl.includes(s) || ex.includes(s) || tg.includes(s);
+  const categoryNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    categories.forEach((category) => {
+      map.set(String(category._id), safeStr(category.name));
+    });
+    return map;
+  }, [categories]);
+
+  const filteredItems = useMemo(() => {
+    const q = safeStr(search).toLowerCase();
+    if (!q) return items;
+
+    return items.filter((item) => {
+      const haystack = [
+        safeStr(item.title),
+        safeStr(item.slug),
+        safeStr(item.excerpt),
+        safeStr(item.metaTitle),
+        safeStr(item.metaDescription),
+        Array.isArray(item.tags) ? item.tags.join(" ") : "",
+      ]
+        .join(" ")
+        .toLowerCase();
+
+      return haystack.includes(q);
     });
   }, [items, search]);
 
   function resetForm() {
-    setForm({
-      title: "",
-      slug: "",
-      excerpt: "",
-      coverUrl: "",
-      youtubeUrl: "",
-      tagsCsv: "",
-      authorName: "IGNOU Students Portal",
-      isPublished: false,
-      publishedAt: "",
-      contentHtml: "",
-      categoryId: "",
-    });
+    setForm(INITIAL_FORM);
     setEditId("");
     setMode("list");
     setError("");
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
   }
 
   function startCreate() {
-    resetForm();
+    setForm(INITIAL_FORM);
+    setEditId("");
     setMode("create");
+    setError("");
   }
 
   async function startEdit(id: string) {
-    setError("");
     setBusy(true);
-    try {
-      const res = await fetch(`/api/admin/blogs/${id}`, { credentials: "include" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Failed to load blog");
+    setError("");
 
-      const b = data?.blog || {};
+    try {
+      const res = await fetch(`/api/admin/blogs/${id}`, {
+        credentials: "include",
+        cache: "no-store",
+      });
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        throw new Error(data?.error || "Failed to load blog");
+      }
+
+      const blog = data?.blog || {};
+
       setEditId(id);
       setForm({
-        title: safeStr(b.title),
-        slug: safeStr(b.slug),
-        excerpt: safeStr(b.excerpt),
-        coverUrl: safeStr(b.coverUrl),
-        youtubeUrl: safeStr(b.youtubeUrl),
-        tagsCsv: joinTags(b.tags),
-        authorName: safeStr(b.authorName) || "IGNOU Students Portal",
-        isPublished: Boolean(b.isPublished),
-        publishedAt: b.publishedAt ? new Date(b.publishedAt).toISOString().slice(0, 16) : "",
-        contentHtml: String(b.contentHtml || ""),
-        categoryId: safeStr(b.categoryId || ""),
+        title: safeStr(blog.title),
+        slug: safeStr(blog.slug),
+        excerpt: safeStr(blog.excerpt),
+        metaTitle: safeStr(blog.metaTitle),
+        metaDescription: safeStr(blog.metaDescription),
+        coverUrl: safeStr(blog.coverUrl),
+        coverAlt: safeStr(blog.coverAlt),
+        youtubeUrl: safeStr(blog.youtubeUrl),
+        tagsCsv: joinTags(blog.tags),
+        authorName: safeStr(blog.authorName) || "IGNOU Students Portal",
+        isPublished: Boolean(blog.isPublished),
+        publishedAt: blog.publishedAt
+          ? new Date(blog.publishedAt).toISOString().slice(0, 16)
+          : "",
+        contentHtml: String(blog.contentHtml || ""),
+        categoryId: safeStr(blog.categoryId),
       });
       setMode("edit");
     } catch (e: any) {
@@ -198,37 +278,53 @@ export default function AdminManageBlogsPage() {
     }
   }
 
-  async function submitCreate() {
-    setError("");
-    setBusy(true);
-    try {
-      const payload = {
-        title: safeStr(form.title),
-        slug: slugify(form.slug || form.title),
-        excerpt: safeStr(form.excerpt),
-        coverUrl: safeStr(form.coverUrl),
-        youtubeUrl: safeStr(form.youtubeUrl),
-        tags: safeStr(form.tagsCsv),
-        authorName: safeStr(form.authorName) || "IGNOU Students Portal",
-        isPublished: Boolean(form.isPublished),
-        publishedAt: form.isPublished ? (form.publishedAt ? new Date(form.publishedAt).toISOString() : undefined) : null,
-        contentHtml: String(form.contentHtml || ""),
-        categoryId: safeStr(form.categoryId) || null, // ✅
-      };
+  function buildPayload() {
+    return {
+      title: safeStr(form.title),
+      slug: slugify(form.slug || form.title),
+      excerpt: safeStr(form.excerpt),
+      metaTitle: safeStr(form.metaTitle),
+      metaDescription: safeStr(form.metaDescription),
+      coverUrl: safeStr(form.coverUrl),
+      coverAlt: safeStr(form.coverAlt),
+      youtubeUrl: safeStr(form.youtubeUrl),
+      tags: safeStr(form.tagsCsv),
+      authorName: safeStr(form.authorName) || "IGNOU Students Portal",
+      isPublished: Boolean(form.isPublished),
+      publishedAt: form.isPublished
+        ? form.publishedAt
+          ? new Date(form.publishedAt).toISOString()
+          : undefined
+        : null,
+      contentHtml: String(form.contentHtml || ""),
+      categoryId: safeStr(form.categoryId) || null,
+    };
+  }
 
-      if (!payload.title) throw new Error("Title is required");
+  async function submitCreate() {
+    setBusy(true);
+    setError("");
+
+    try {
+      const payload = buildPayload();
+      if (!payload.title) {
+        throw new Error("Title is required");
+      }
 
       const res = await fetch("/api/admin/blogs", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
         credentials: "include",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Create failed");
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        throw new Error(data?.error || "Create failed");
+      }
 
       resetForm();
-      await load();
+      await loadBlogs();
     } catch (e: any) {
       setError(e?.message || "Create failed");
     } finally {
@@ -237,39 +333,31 @@ export default function AdminManageBlogsPage() {
   }
 
   async function submitEdit() {
-    setError("");
     if (!editId) return;
+
     setBusy(true);
+    setError("");
+
     try {
-      const payload: any = {
-        title: safeStr(form.title),
-        slug: slugify(form.slug || form.title),
-        excerpt: safeStr(form.excerpt),
-        coverUrl: safeStr(form.coverUrl),
-        youtubeUrl: safeStr(form.youtubeUrl),
-        tags: safeStr(form.tagsCsv),
-        authorName: safeStr(form.authorName) || "IGNOU Students Portal",
-        contentHtml: String(form.contentHtml || ""),
-        isPublished: Boolean(form.isPublished),
-        categoryId: safeStr(form.categoryId) || null, // ✅
-      };
-
-      if (payload.isPublished) payload.publishedAt = form.publishedAt ? new Date(form.publishedAt).toISOString() : undefined;
-      else payload.publishedAt = null;
-
-      if (!payload.title) throw new Error("Title is required");
+      const payload = buildPayload();
+      if (!payload.title) {
+        throw new Error("Title is required");
+      }
 
       const res = await fetch(`/api/admin/blogs/${editId}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
         credentials: "include",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Update failed");
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        throw new Error(data?.error || "Update failed");
+      }
 
       resetForm();
-      await load();
+      await loadBlogs();
     } catch (e: any) {
       setError(e?.message || "Update failed");
     } finally {
@@ -278,18 +366,23 @@ export default function AdminManageBlogsPage() {
   }
 
   async function togglePublish(row: BlogRow) {
-    setError("");
     setBusy(true);
+    setError("");
+
     try {
       const res = await fetch(`/api/admin/blogs/${row._id}`, {
         method: "PATCH",
-        headers: { "Content-Type": "application/json" },
         credentials: "include",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ isPublished: !row.isPublished }),
       });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Publish toggle failed");
-      await load();
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        throw new Error(data?.error || "Publish toggle failed");
+      }
+
+      await loadBlogs();
     } catch (e: any) {
       setError(e?.message || "Publish toggle failed");
     } finally {
@@ -297,16 +390,25 @@ export default function AdminManageBlogsPage() {
     }
   }
 
-  async function remove(row: BlogRow) {
+  async function removeBlog(row: BlogRow) {
     const ok = confirm(`Delete blog "${row.title}"?`);
     if (!ok) return;
-    setError("");
+
     setBusy(true);
+    setError("");
+
     try {
-      const res = await fetch(`/api/admin/blogs/${row._id}`, { method: "DELETE", credentials: "include" });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data?.error || "Delete failed");
-      await load();
+      const res = await fetch(`/api/admin/blogs/${row._id}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        throw new Error(data?.error || "Delete failed");
+      }
+
+      await loadBlogs();
     } catch (e: any) {
       setError(e?.message || "Delete failed");
     } finally {
@@ -314,40 +416,81 @@ export default function AdminManageBlogsPage() {
     }
   }
 
-  const catNameById = useMemo(() => {
-    const map = new Map<string, string>();
-    cats.forEach((c) => map.set(String(c._id), c.name));
-    return map;
-  }, [cats]);
+  async function handleImageUpload(file: File) {
+    setUploadingImage(true);
+    setError("");
+
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      formData.append("kind", "image");
+      formData.append("destination", "blogs");
+
+      const res = await fetch("/api/admin/upload", {
+        method: "POST",
+        credentials: "include",
+        body: formData,
+      });
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        throw new Error(data?.error || "Image upload failed");
+      }
+
+      const imageUrl = safeStr(data?.url || data?.src);
+      if (!imageUrl) {
+        throw new Error("Uploaded image URL not returned");
+      }
+
+      setForm((prev) => ({
+        ...prev,
+        coverUrl: imageUrl,
+        coverAlt: prev.coverAlt || safeStr(prev.title),
+      }));
+    } catch (e: any) {
+      setError(e?.message || "Image upload failed");
+    } finally {
+      setUploadingImage(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    }
+  }
+
+  const previewSlug = slugify(form.slug || form.title);
+  const previewUrl = `/blog/${previewSlug}`;
 
   return (
     <main className="min-h-screen bg-gray-100 text-slate-900">
-      <div className="max-w-6xl mx-auto px-4 py-10">
-        <div className="rounded-3xl bg-white border border-gray-200 p-6 shadow-sm">
-          <div className="flex items-start justify-between gap-4 flex-wrap">
+      <div className="mx-auto max-w-7xl px-4 py-10">
+        <div className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+          <div className="flex flex-wrap items-start justify-between gap-4">
             <div>
-              <div className="text-2xl font-extrabold flex items-center gap-2">
+              <div className="flex items-center gap-2 text-2xl font-extrabold">
                 <FileText className="text-slate-700" />
                 Manage Blogs
               </div>
-              <div className="text-sm text-slate-600 mt-1">Create / edit / publish blog posts (admin)</div>
+              <div className="mt-1 text-sm text-slate-600">
+                Create, edit, publish, and optimize blog posts safely.
+              </div>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
               <Link
                 href="/admin/blogs/categories"
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-semibold shadow-sm"
+                className="inline-flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2 font-semibold shadow-sm transition hover:bg-gray-50"
               >
-                <FolderKanban size={18} /> Categories
+                <FolderKanban size={18} />
+                Categories
               </Link>
 
               <button
                 onClick={() => {
-                  load();
-                  loadCats();
+                  loadBlogs();
+                  loadCategories();
                 }}
-                disabled={loading || busy}
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-semibold shadow-sm disabled:opacity-50"
+                disabled={loading || busy || uploadingImage}
+                className="inline-flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2 font-semibold shadow-sm transition hover:bg-gray-50 disabled:opacity-50"
               >
                 <RefreshCw size={18} />
                 Refresh
@@ -355,8 +498,8 @@ export default function AdminManageBlogsPage() {
 
               <button
                 onClick={startCreate}
-                disabled={busy}
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-950 text-white transition font-bold shadow-sm disabled:opacity-50"
+                disabled={busy || uploadingImage}
+                className="inline-flex items-center gap-2 rounded-xl bg-slate-900 px-4 py-2 font-bold text-white shadow-sm transition hover:bg-slate-950 disabled:opacity-50"
               >
                 <PlusCircle size={18} />
                 New Blog
@@ -364,7 +507,7 @@ export default function AdminManageBlogsPage() {
 
               <Link
                 href="/admin/blogs"
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-semibold shadow-sm"
+                className="inline-flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2 font-semibold shadow-sm transition hover:bg-gray-50"
               >
                 <ArrowLeft size={18} />
                 Back
@@ -373,27 +516,29 @@ export default function AdminManageBlogsPage() {
           </div>
 
           {error ? (
-            <div className="mt-4 rounded-2xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">{error}</div>
+            <div className="mt-4 rounded-2xl border border-red-200 bg-red-50 p-3 text-sm text-red-700">
+              {error}
+            </div>
           ) : null}
 
-          <div className="mt-6 grid grid-cols-1 lg:grid-cols-12 gap-5">
+          <div className="mt-6 grid grid-cols-1 gap-5 lg:grid-cols-12">
             <div className="lg:col-span-7">
               <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4">
-                <div className="flex flex-col md:flex-row gap-3 md:items-center md:justify-between">
-                  <div className="flex items-center gap-2 w-full md:w-[60%]">
+                <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                  <div className="flex w-full items-center gap-2 md:w-[60%]">
                     <Search className="text-slate-600" size={18} />
                     <input
                       value={search}
                       onChange={(e) => setSearch(e.target.value)}
-                      placeholder="Search title, slug, tags..."
-                      className="w-full rounded-xl border border-gray-300 px-3 py-2 bg-white"
+                      placeholder="Search title, slug, excerpt, meta..."
+                      className="w-full rounded-xl border border-gray-300 bg-white px-3 py-2"
                     />
                   </div>
 
                   <select
                     value={only}
-                    onChange={(e) => setOnly(e.target.value as any)}
-                    className="rounded-xl border border-gray-300 px-3 py-2 bg-white font-semibold"
+                    onChange={(e) => setOnly(e.target.value as "" | "published" | "draft")}
+                    className="rounded-xl border border-gray-300 bg-white px-3 py-2 font-semibold"
                   >
                     <option value="">All</option>
                     <option value="published">Published</option>
@@ -401,93 +546,126 @@ export default function AdminManageBlogsPage() {
                   </select>
 
                   <button
-                    onClick={load}
-                    disabled={loading || busy}
-                    className="rounded-xl border border-gray-300 px-3 py-2 bg-white font-semibold hover:bg-gray-50 disabled:opacity-50"
+                    onClick={loadBlogs}
+                    disabled={loading || busy || uploadingImage}
+                    className="rounded-xl border border-gray-300 bg-white px-3 py-2 font-semibold hover:bg-gray-50 disabled:opacity-50"
                   >
                     Apply
                   </button>
                 </div>
               </div>
 
-              <div className="mt-4 rounded-2xl border border-gray-200 overflow-hidden">
-                <div className="bg-white px-4 py-3 font-extrabold flex items-center justify-between">
+              <div className="mt-4 overflow-hidden rounded-2xl border border-gray-200">
+                <div className="flex items-center justify-between bg-white px-4 py-3 font-extrabold">
                   <span>Blogs</span>
-                  <span className="text-xs text-slate-500 font-semibold">{filtered.length} items</span>
+                  <span className="text-xs font-semibold text-slate-500">
+                    {filteredItems.length} items
+                  </span>
                 </div>
 
                 {loading ? (
-                  <div className="p-4 text-sm text-slate-600 bg-white">Loading...</div>
-                ) : filtered.length ? (
+                  <div className="bg-white p-4 text-sm text-slate-600">Loading...</div>
+                ) : filteredItems.length ? (
                   <div className="divide-y bg-white">
-                    {filtered.map((b) => (
-                      <div key={b._id} className="p-4 flex items-start justify-between gap-4">
+                    {filteredItems.map((blog) => (
+                      <div
+                        key={blog._id}
+                        className="flex items-start justify-between gap-4 p-4"
+                      >
                         <div className="min-w-0">
-                          <div className="font-extrabold text-slate-900 truncate">{b.title}</div>
-                          <div className="text-xs text-slate-600 mt-1 flex flex-wrap items-center gap-2">
+                          <div className="truncate font-extrabold text-slate-900">
+                            {blog.title}
+                          </div>
+
+                          <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-600">
                             <span className="inline-flex items-center gap-1">
-                              <Link2 size={12} /> /blog/{b.slug}
+                              <Link2 size={12} />
+                              /blog/{blog.slug}
                             </span>
+
                             <span
-                              className={`inline-flex px-2 py-1 rounded-lg font-semibold ${
-                                b.isPublished ? "bg-green-100 text-green-700" : "bg-gray-200 text-gray-700"
+                              className={`inline-flex rounded-lg px-2 py-1 font-semibold ${
+                                blog.isPublished
+                                  ? "bg-green-100 text-green-700"
+                                  : "bg-gray-200 text-gray-700"
                               }`}
                             >
-                              {b.isPublished ? "Published" : "Draft"}
+                              {blog.isPublished ? "Published" : "Draft"}
                             </span>
+
                             <span className="inline-flex items-center gap-1">
-                              <Calendar size={12} /> {b.isPublished ? fmtDate(b.publishedAt) : fmtDate(b.updatedAt)}
+                              <Calendar size={12} />
+                              {blog.isPublished
+                                ? formatDate(blog.publishedAt)
+                                : formatDate(blog.updatedAt)}
                             </span>
-                            {b.categoryId ? (
-                              <span className="inline-flex px-2 py-1 rounded-lg font-semibold bg-blue-50 text-blue-700">
-                                {catNameById.get(String(b.categoryId)) || "Category"}
+
+                            {blog.categoryId ? (
+                              <span className="inline-flex rounded-lg bg-blue-50 px-2 py-1 font-semibold text-blue-700">
+                                {categoryNameById.get(String(blog.categoryId)) || "Category"}
                               </span>
                             ) : null}
                           </div>
 
-                          {safeStr(b.excerpt) ? (
-                            <div className="text-xs text-slate-600 mt-2 line-clamp-2">{safeStr(b.excerpt)}</div>
+                          {safeStr(blog.excerpt) ? (
+                            <div className="mt-2 line-clamp-2 text-xs text-slate-600">
+                              {safeStr(blog.excerpt)}
+                            </div>
                           ) : null}
-                          {Array.isArray(b.tags) && b.tags.length ? (
-                            <div className="mt-2 text-[11px] text-slate-500 font-semibold line-clamp-1">
-                              Tags: {b.tags.join(", ")}
+
+                          {safeStr(blog.metaTitle) || safeStr(blog.metaDescription) ? (
+                            <div className="mt-2 line-clamp-2 text-[11px] text-slate-500">
+                              SEO: {safeStr(blog.metaTitle) || blog.title}
+                              {safeStr(blog.metaDescription)
+                                ? ` • ${safeStr(blog.metaDescription)}`
+                                : ""}
+                            </div>
+                          ) : null}
+
+                          {Array.isArray(blog.tags) && blog.tags.length ? (
+                            <div className="mt-2 line-clamp-1 text-[11px] font-semibold text-slate-500">
+                              Tags: {blog.tags.join(", ")}
                             </div>
                           ) : null}
                         </div>
 
-                        <div className="flex items-center gap-2 shrink-0">
+                        <div className="flex shrink-0 items-center gap-2">
                           <a
-                            href={`/blog/${b.slug}`}
+                            href={`/blog/${blog.slug}`}
                             target="_blank"
                             rel="noreferrer"
-                            className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-semibold shadow-sm"
+                            className="inline-flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 font-semibold shadow-sm transition hover:bg-gray-50"
                             title="Preview"
                           >
                             <Eye size={16} />
                           </a>
 
                           <button
-                            onClick={() => togglePublish(b)}
-                            disabled={busy}
-                            className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-semibold shadow-sm disabled:opacity-50"
+                            onClick={() => togglePublish(blog)}
+                            disabled={busy || uploadingImage}
+                            className="inline-flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 font-semibold shadow-sm transition hover:bg-gray-50 disabled:opacity-50"
                             title="Toggle publish"
                           >
-                            {b.isPublished ? <ToggleRight size={18} /> : <ToggleLeft size={18} />}
+                            {blog.isPublished ? (
+                              <ToggleRight size={18} />
+                            ) : (
+                              <ToggleLeft size={18} />
+                            )}
                           </button>
 
                           <button
-                            onClick={() => startEdit(b._id)}
-                            disabled={busy}
-                            className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-semibold shadow-sm disabled:opacity-50"
+                            onClick={() => startEdit(blog._id)}
+                            disabled={busy || uploadingImage}
+                            className="inline-flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 font-semibold shadow-sm transition hover:bg-gray-50 disabled:opacity-50"
                             title="Edit"
                           >
                             <Pencil size={16} />
                           </button>
 
                           <button
-                            onClick={() => remove(b)}
-                            disabled={busy}
-                            className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-white hover:bg-red-50 border border-gray-200 transition font-semibold shadow-sm disabled:opacity-50"
+                            onClick={() => removeBlog(blog)}
+                            disabled={busy || uploadingImage}
+                            className="inline-flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 font-semibold shadow-sm transition hover:bg-red-50 disabled:opacity-50"
                             title="Delete"
                           >
                             <Trash2 size={16} />
@@ -497,19 +675,28 @@ export default function AdminManageBlogsPage() {
                     ))}
                   </div>
                 ) : (
-                  <div className="p-4 text-sm text-slate-600 bg-white">No blogs found.</div>
+                  <div className="bg-white p-4 text-sm text-slate-600">
+                    No blogs found.
+                  </div>
                 )}
               </div>
             </div>
 
             <div className="lg:col-span-5">
               <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
-                <div className="font-extrabold text-lg flex items-center justify-between">
-                  <span>{mode === "edit" ? "Edit Blog" : mode === "create" ? "Create Blog" : "Blog Form"}</span>
+                <div className="flex items-center justify-between text-lg font-extrabold">
+                  <span>
+                    {mode === "edit"
+                      ? "Edit Blog"
+                      : mode === "create"
+                      ? "Create Blog"
+                      : "Blog Form"}
+                  </span>
+
                   {mode !== "list" ? (
                     <button
                       onClick={resetForm}
-                      className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-semibold shadow-sm"
+                      className="inline-flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 font-semibold shadow-sm transition hover:bg-gray-50"
                     >
                       <X size={18} />
                       Cancel
@@ -518,20 +705,24 @@ export default function AdminManageBlogsPage() {
                 </div>
 
                 {mode === "list" ? (
-                  <div className="mt-3 text-sm text-slate-600">Click <b>New Blog</b> or <b>Edit</b> to start.</div>
+                  <div className="mt-3 text-sm text-slate-600">
+                    Click <b>New Blog</b> or <b>Edit</b> to start.
+                  </div>
                 ) : (
-                  <div className="mt-4 grid grid-cols-1 gap-3">
+                  <div className="mt-4 grid grid-cols-1 gap-4">
                     <label className="text-sm font-semibold">
                       Category (optional)
                       <select
                         value={form.categoryId}
-                        onChange={(e) => setForm((s) => ({ ...s, categoryId: e.target.value }))}
-                        className="mt-1 w-full rounded-xl border border-gray-300 px-3 py-2 bg-white font-semibold"
+                        onChange={(e) =>
+                          setForm((prev) => ({ ...prev, categoryId: e.target.value }))
+                        }
+                        className="mt-1 w-full rounded-xl border border-gray-300 bg-white px-3 py-2 font-semibold"
                       >
                         <option value="">— None —</option>
-                        {cats.map((c) => (
-                          <option key={c._id} value={c._id}>
-                            {c.name}
+                        {categories.map((category) => (
+                          <option key={category._id} value={category._id}>
+                            {category.name}
                           </option>
                         ))}
                       </select>
@@ -542,13 +733,17 @@ export default function AdminManageBlogsPage() {
                       <input
                         value={form.title}
                         onChange={(e) =>
-                          setForm((s) => {
+                          setForm((prev) => {
                             const title = e.target.value;
-                            const autoSlug = slugify(title);
-                            return { ...s, title, slug: s.slug ? s.slug : autoSlug };
+                            return {
+                              ...prev,
+                              title,
+                              slug: prev.slug ? prev.slug : slugify(title),
+                              coverAlt: prev.coverAlt ? prev.coverAlt : title,
+                            };
                           })
                         }
-                        className="mt-1 w-full rounded-xl border border-gray-300 px-3 py-2 bg-white"
+                        className="mt-1 w-full rounded-xl border border-gray-300 bg-white px-3 py-2"
                       />
                     </label>
 
@@ -556,38 +751,158 @@ export default function AdminManageBlogsPage() {
                       Slug (URL)
                       <input
                         value={form.slug}
-                        onChange={(e) => setForm((s) => ({ ...s, slug: e.target.value }))}
-                        className="mt-1 w-full rounded-xl border border-gray-300 px-3 py-2 bg-white"
+                        onChange={(e) =>
+                          setForm((prev) => ({ ...prev, slug: e.target.value }))
+                        }
+                        className="mt-1 w-full rounded-xl border border-gray-300 bg-white px-3 py-2"
                       />
                       <div className="mt-1 text-xs text-slate-500">
-                        Preview URL: <span className="font-bold">/blog/{slugify(form.slug || form.title)}</span>
+                        Preview URL:{" "}
+                        <span className="font-bold">{previewUrl}</span>
                       </div>
                     </label>
 
                     <label className="text-sm font-semibold">
-                      Excerpt (SEO summary)
+                      Excerpt / Short Summary
                       <textarea
                         value={form.excerpt}
-                        onChange={(e) => setForm((s) => ({ ...s, excerpt: e.target.value }))}
-                        className="mt-1 w-full rounded-xl border border-gray-300 px-3 py-2 bg-white min-h-[90px]"
+                        onChange={(e) =>
+                          setForm((prev) => ({ ...prev, excerpt: e.target.value }))
+                        }
+                        className="mt-1 min-h-[90px] w-full rounded-xl border border-gray-300 bg-white px-3 py-2"
                       />
+                      <div className="mt-1 flex items-center justify-between text-xs text-slate-500">
+                        <span>
+                          On-page summary. Empty chhodoge to content se auto summary ban sakti hai.
+                        </span>
+                        <span>{countChars(form.excerpt, 220)}</span>
+                      </div>
                     </label>
 
-                    <label className="text-sm font-semibold">
-                      Cover Image URL
+                    <div className="rounded-2xl border border-blue-100 bg-blue-50 p-4">
+                      <div className="text-sm font-extrabold text-slate-900">
+                        SEO Fields
+                      </div>
+                      <div className="mt-1 text-xs text-slate-600">
+                        Meta Title aur Meta Description optional hain. Empty rehne par
+                        Title aur Excerpt/content fallback use hoga.
+                      </div>
+
+                      <div className="mt-3 grid grid-cols-1 gap-4">
+                        <label className="text-sm font-semibold">
+                          Meta Title (optional)
+                          <input
+                            value={form.metaTitle}
+                            onChange={(e) =>
+                              setForm((prev) => ({
+                                ...prev,
+                                metaTitle: e.target.value,
+                              }))
+                            }
+                            className="mt-1 w-full rounded-xl border border-gray-300 bg-white px-3 py-2"
+                          />
+                          <div className="mt-1 flex items-center justify-between text-xs text-slate-500">
+                            <span>Recommended concise SEO title.</span>
+                            <span>{countChars(form.metaTitle, 70)}</span>
+                          </div>
+                        </label>
+
+                        <label className="text-sm font-semibold">
+                          Meta Description (optional)
+                          <textarea
+                            value={form.metaDescription}
+                            onChange={(e) =>
+                              setForm((prev) => ({
+                                ...prev,
+                                metaDescription: e.target.value,
+                              }))
+                            }
+                            className="mt-1 min-h-[90px] w-full rounded-xl border border-gray-300 bg-white px-3 py-2"
+                          />
+                          <div className="mt-1 flex items-center justify-between text-xs text-slate-500">
+                            <span>Recommended search snippet summary.</span>
+                            <span>{countChars(form.metaDescription, 170)}</span>
+                          </div>
+                        </label>
+                      </div>
+                    </div>
+
+                    <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <div className="text-sm font-extrabold text-slate-900">
+                            Cover Image
+                          </div>
+                          <div className="text-xs text-slate-600">
+                            URL paste karo ya direct image upload karo.
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => fileInputRef.current?.click()}
+                            disabled={busy || uploadingImage}
+                            className="inline-flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-semibold shadow-sm transition hover:bg-gray-50 disabled:opacity-50"
+                          >
+                            {uploadingImage ? <Upload size={16} /> : <ImagePlus size={16} />}
+                            {uploadingImage ? "Uploading..." : "Upload Image"}
+                          </button>
+                        </div>
+                      </div>
+
                       <input
-                        value={form.coverUrl}
-                        onChange={(e) => setForm((s) => ({ ...s, coverUrl: e.target.value }))}
-                        className="mt-1 w-full rounded-xl border border-gray-300 px-3 py-2 bg-white"
+                        ref={fileInputRef}
+                        type="file"
+                        accept="image/png,image/jpeg,image/jpg,image/webp,image/avif"
+                        className="hidden"
+                        onChange={(e) => {
+                          const file = e.target.files?.[0];
+                          if (file) handleImageUpload(file);
+                        }}
                       />
-                    </label>
+
+                      <label className="mt-3 block text-sm font-semibold">
+                        Cover Image URL
+                        <input
+                          value={form.coverUrl}
+                          onChange={(e) =>
+                            setForm((prev) => ({ ...prev, coverUrl: e.target.value }))
+                          }
+                          className="mt-1 w-full rounded-xl border border-gray-300 bg-white px-3 py-2"
+                        />
+                      </label>
+
+                      <label className="mt-3 block text-sm font-semibold">
+                        Cover Alt Text (optional)
+                        <input
+                          value={form.coverAlt}
+                          onChange={(e) =>
+                            setForm((prev) => ({ ...prev, coverAlt: e.target.value }))
+                          }
+                          className="mt-1 w-full rounded-xl border border-gray-300 bg-white px-3 py-2"
+                        />
+                      </label>
+
+                      {safeStr(form.coverUrl) ? (
+                        <div className="mt-3 overflow-hidden rounded-2xl border border-gray-200 bg-white">
+                          <img
+                            src={form.coverUrl}
+                            alt={safeStr(form.coverAlt) || safeStr(form.title) || "Blog cover"}
+                            className="h-48 w-full object-cover"
+                          />
+                        </div>
+                      ) : null}
+                    </div>
 
                     <label className="text-sm font-semibold">
                       YouTube URL (optional)
                       <input
                         value={form.youtubeUrl}
-                        onChange={(e) => setForm((s) => ({ ...s, youtubeUrl: e.target.value }))}
-                        className="mt-1 w-full rounded-xl border border-gray-300 px-3 py-2 bg-white"
+                        onChange={(e) =>
+                          setForm((prev) => ({ ...prev, youtubeUrl: e.target.value }))
+                        }
+                        className="mt-1 w-full rounded-xl border border-gray-300 bg-white px-3 py-2"
                       />
                     </label>
 
@@ -595,8 +910,10 @@ export default function AdminManageBlogsPage() {
                       Tags (comma separated)
                       <input
                         value={form.tagsCsv}
-                        onChange={(e) => setForm((s) => ({ ...s, tagsCsv: e.target.value }))}
-                        className="mt-1 w-full rounded-xl border border-gray-300 px-3 py-2 bg-white"
+                        onChange={(e) =>
+                          setForm((prev) => ({ ...prev, tagsCsv: e.target.value }))
+                        }
+                        className="mt-1 w-full rounded-xl border border-gray-300 bg-white px-3 py-2"
                       />
                     </label>
 
@@ -604,35 +921,54 @@ export default function AdminManageBlogsPage() {
                       Author Name
                       <input
                         value={form.authorName}
-                        onChange={(e) => setForm((s) => ({ ...s, authorName: e.target.value }))}
-                        className="mt-1 w-full rounded-xl border border-gray-300 px-3 py-2 bg-white"
+                        onChange={(e) =>
+                          setForm((prev) => ({ ...prev, authorName: e.target.value }))
+                        }
+                        className="mt-1 w-full rounded-xl border border-gray-300 bg-white px-3 py-2"
                       />
                     </label>
 
                     <div className="rounded-2xl border border-gray-200 bg-gray-50 p-4">
                       <div className="flex items-center justify-between">
                         <div>
-                          <div className="font-extrabold text-sm">Publish</div>
-                          <div className="text-xs text-slate-600">Draft or Published</div>
+                          <div className="text-sm font-extrabold">Publish</div>
+                          <div className="text-xs text-slate-600">
+                            Draft or Published
+                          </div>
                         </div>
+
                         <button
                           type="button"
-                          onClick={() => setForm((s) => ({ ...s, isPublished: !s.isPublished }))}
-                          className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-semibold shadow-sm"
+                          onClick={() =>
+                            setForm((prev) => ({
+                              ...prev,
+                              isPublished: !prev.isPublished,
+                            }))
+                          }
+                          className="inline-flex items-center gap-2 rounded-xl border border-gray-200 bg-white px-3 py-2 font-semibold shadow-sm transition hover:bg-gray-50"
                         >
-                          {form.isPublished ? <ToggleRight size={18} /> : <ToggleLeft size={18} />}
+                          {form.isPublished ? (
+                            <ToggleRight size={18} />
+                          ) : (
+                            <ToggleLeft size={18} />
+                          )}
                           {form.isPublished ? "Published" : "Draft"}
                         </button>
                       </div>
 
                       {form.isPublished ? (
-                        <label className="text-sm font-semibold block mt-3">
+                        <label className="mt-3 block text-sm font-semibold">
                           Published Date/Time (optional)
                           <input
                             type="datetime-local"
                             value={form.publishedAt}
-                            onChange={(e) => setForm((s) => ({ ...s, publishedAt: e.target.value }))}
-                            className="mt-1 w-full rounded-xl border border-gray-300 px-3 py-2 bg-white"
+                            onChange={(e) =>
+                              setForm((prev) => ({
+                                ...prev,
+                                publishedAt: e.target.value,
+                              }))
+                            }
+                            className="mt-1 w-full rounded-xl border border-gray-300 bg-white px-3 py-2"
                           />
                         </label>
                       ) : null}
@@ -642,27 +978,31 @@ export default function AdminManageBlogsPage() {
                       Content HTML
                       <textarea
                         value={form.contentHtml}
-                        onChange={(e) => setForm((s) => ({ ...s, contentHtml: e.target.value }))}
-                        className="mt-1 w-full rounded-xl border border-gray-300 px-3 py-2 bg-white min-h-[220px] font-mono text-[12px]"
+                        onChange={(e) =>
+                          setForm((prev) => ({ ...prev, contentHtml: e.target.value }))
+                        }
+                        className="mt-1 min-h-[240px] w-full rounded-xl border border-gray-300 bg-white px-3 py-2 font-mono text-[12px]"
                       />
-                      <div className="mt-1 text-xs text-slate-500">HTML paste karo (markdown nahi).</div>
+                      <div className="mt-1 text-xs text-slate-500">
+                        Clean semantic HTML use karo. Headings, paragraphs, lists, tables SEO ke liye useful hote hain.
+                      </div>
                     </label>
 
                     <div className="flex gap-2">
                       <button
                         onClick={mode === "edit" ? submitEdit : submitCreate}
-                        disabled={busy}
-                        className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-950 text-white transition font-bold shadow-sm disabled:opacity-50"
+                        disabled={busy || uploadingImage}
+                        className="inline-flex flex-1 items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-2 font-bold text-white shadow-sm transition hover:bg-slate-950 disabled:opacity-50"
                       >
                         <Save size={18} />
                         {mode === "edit" ? "Save Changes" : "Create Blog"}
                       </button>
 
                       <a
-                        href={`/blog/${slugify(form.slug || form.title)}`}
+                        href={previewUrl}
                         target="_blank"
                         rel="noreferrer"
-                        className="inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-bold shadow-sm"
+                        className="inline-flex items-center justify-center gap-2 rounded-xl border border-gray-200 bg-white px-4 py-2 font-bold shadow-sm transition hover:bg-gray-50"
                         title="Preview"
                       >
                         <Eye size={18} />
@@ -673,10 +1013,13 @@ export default function AdminManageBlogsPage() {
               </div>
 
               <div className="mt-4 rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
-                <div className="font-extrabold text-sm">Quick</div>
-                <ul className="mt-2 text-xs text-slate-600 space-y-1 list-disc pl-5">
-                  <li>Categories manage: /admin/blogs/categories</li>
-                  <li>Blog create/edit me category select karo</li>
+                <div className="text-sm font-extrabold">Notes</div>
+                <ul className="mt-2 list-disc space-y-1 pl-5 text-xs text-slate-600">
+                  <li>Title = page heading.</li>
+                  <li>Excerpt = short summary / fallback snippet.</li>
+                  <li>Meta Title & Meta Description = optional SEO override.</li>
+                  <li>Image URL aur direct image upload dono support hain.</li>
+                  <li>Content HTML abhi intentionally retained hai for safe compatibility.</li>
                 </ul>
               </div>
             </div>

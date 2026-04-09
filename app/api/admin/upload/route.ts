@@ -9,7 +9,6 @@ export const runtime = "nodejs";
 const REGION = process.env.AWS_REGION || "ap-south-1";
 const BUCKET_PRIVATE = process.env.AWS_S3_BUCKET_PRIVATE || "";
 
-// Backward + current compatibility
 const BUCKET_PUBLIC =
   process.env.AWS_S3_BUCKET_IMAGES ||
   process.env.AWS_S3_BUCKET_PUBLIC ||
@@ -36,6 +35,7 @@ const VIDEO_EXTENSIONS = new Set([".mp4", ".webm"]);
 
 const HERO_IMAGE_MAX_BYTES = 8 * 1024 * 1024; // 8 MB
 const HERO_VIDEO_MAX_BYTES = 30 * 1024 * 1024; // 30 MB
+const BLOG_IMAGE_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
 const DEFAULT_IMAGE_MAX_BYTES = 15 * 1024 * 1024; // 15 MB
 const DEFAULT_PDF_MAX_BYTES = 100 * 1024 * 1024; // 100 MB
 
@@ -62,8 +62,7 @@ function safeBase(name: string) {
 
 function normalizePublicBaseUrl(input: string) {
   const raw = safeStr(input);
-  if (!raw) return "";
-  return raw.replace(/\/+$/, "");
+  return raw ? raw.replace(/\/+$/, "") : "";
 }
 
 function publicS3Url(bucket: string, region: string, key: string) {
@@ -77,14 +76,29 @@ function publicS3Url(bucket: string, region: string, key: string) {
   ).replace(/%2F/g, "/")}`;
 }
 
+function normalizeDestination(input: string) {
+  return safeStr(input).toLowerCase().replace(/\\/g, "/");
+}
+
 function isHeroSliderDestination(destination: string) {
-  const d = safeStr(destination).toLowerCase();
+  const d = normalizeDestination(destination);
   return (
     d === "hero-slider" ||
     d === "hero_slides" ||
     d === "hero-slides" ||
     d === "site-settings/hero-slider" ||
     d === "site-settings/hero-slides"
+  );
+}
+
+function isBlogDestination(destination: string) {
+  const d = normalizeDestination(destination);
+  return (
+    d === "blog" ||
+    d === "blogs" ||
+    d === "blog-cover" ||
+    d === "blog-covers" ||
+    d === "uploads/images/blogs"
   );
 }
 
@@ -102,6 +116,54 @@ function getVideoContentType(ext: string, fallback: string) {
   return "video/mp4";
 }
 
+function buildPublicKey(params: {
+  outName: string;
+  destination: string;
+  folder: string;
+  device: string;
+  isVideo: boolean;
+}) {
+  const { outName, destination, folder, device, isVideo } = params;
+
+  const destinationValue = normalizeDestination(destination);
+  const folderValue = normalizeDestination(folder);
+
+  const heroSliderMode =
+    isHeroSliderDestination(destinationValue) ||
+    isHeroSliderDestination(folderValue);
+
+  const blogMode =
+    isBlogDestination(destinationValue) || isBlogDestination(folderValue);
+
+  if (heroSliderMode) {
+    const normalizedDevice = device === "mobile" ? "mobile" : "desktop";
+    const mediaType = isVideo ? "videos" : "images";
+
+    return {
+      key: `uploads/site-settings/hero-slider/${normalizedDevice}/${mediaType}/${outName}`,
+      destinationLabel: "hero-slider",
+      heroSliderMode: true,
+      blogMode: false,
+    };
+  }
+
+  if (blogMode) {
+    return {
+      key: `uploads/images/blogs/${outName}`,
+      destinationLabel: "blogs",
+      heroSliderMode: false,
+      blogMode: true,
+    };
+  }
+
+  return {
+    key: `uploads/images/${outName}`,
+    destinationLabel: "default",
+    heroSliderMode: false,
+    blogMode: false,
+  };
+}
+
 export async function POST(req: Request) {
   const user = await getAuthUser();
 
@@ -109,6 +171,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
 
+  // Intentionally unchanged to avoid breaking old flows that already use this route.
   if (!hasPermission(user, "products:write")) {
     return NextResponse.json(
       { error: "Forbidden (products:write missing)" },
@@ -220,10 +283,18 @@ export async function POST(req: Request) {
       }
     }
 
-    const heroSliderMode =
-      isHeroSliderDestination(destination) || isHeroSliderDestination(folder);
+    const id = crypto.randomBytes(10).toString("hex");
+    const outName = `${safeBase(file.name)}-${id}${ext}`;
 
-    if (heroSliderMode) {
+    const publicTarget = buildPublicKey({
+      outName,
+      destination,
+      folder,
+      device: deviceRaw,
+      isVideo,
+    });
+
+    if (publicTarget.heroSliderMode) {
       if (isVideo && bytes.length > HERO_VIDEO_MAX_BYTES) {
         return NextResponse.json(
           {
@@ -243,6 +314,23 @@ export async function POST(req: Request) {
           { status: 400 }
         );
       }
+    } else if (publicTarget.blogMode) {
+      if (!isImage) {
+        return NextResponse.json(
+          { error: "Blog upload currently supports image files only." },
+          { status: 400 }
+        );
+      }
+
+      if (bytes.length > BLOG_IMAGE_MAX_BYTES) {
+        return NextResponse.json(
+          {
+            error:
+              "Blog image too large. Max allowed size is 10 MB. Better SEO and speed ke liye compressed WebP/AVIF preferred hai.",
+          },
+          { status: 400 }
+        );
+      }
     } else if (isImage && bytes.length > DEFAULT_IMAGE_MAX_BYTES) {
       return NextResponse.json(
         { error: "Image too large. Max allowed size is 15 MB." },
@@ -250,30 +338,19 @@ export async function POST(req: Request) {
       );
     }
 
-    const id = crypto.randomBytes(10).toString("hex");
-    const outName = `${safeBase(file.name)}-${id}${ext}`;
-
-    let key = "";
-    if (heroSliderMode) {
-      const device = deviceRaw === "mobile" ? "mobile" : "desktop";
-      const mediaType = isVideo ? "videos" : "images";
-      key = `uploads/site-settings/hero-slider/${device}/${mediaType}/${outName}`;
-    } else {
-      key = `uploads/images/${outName}`;
-    }
-
     await s3.send(
       new PutObjectCommand({
         Bucket: BUCKET_PUBLIC,
-        Key: key,
+        Key: publicTarget.key,
         Body: bytes,
         ContentType: isVideo
           ? getVideoContentType(ext, file.type || "")
           : getImageContentType(ext, file.type || ""),
+        CacheControl: "public, max-age=31536000, immutable",
       })
     );
 
-    const url = publicS3Url(BUCKET_PUBLIC, REGION, key);
+    const url = publicS3Url(BUCKET_PUBLIC, REGION, publicTarget.key);
 
     return NextResponse.json(
       {
@@ -281,9 +358,9 @@ export async function POST(req: Request) {
         kind: isVideo ? "video" : "image",
         url,
         src: url,
-        key,
+        key: publicTarget.key,
         bucket: BUCKET_PUBLIC,
-        destination: heroSliderMode ? "hero-slider" : "default",
+        destination: publicTarget.destinationLabel,
       },
       { status: 200 }
     );

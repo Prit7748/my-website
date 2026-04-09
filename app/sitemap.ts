@@ -6,8 +6,8 @@ import { productHref } from "@/lib/productHref";
 
 const BASE_URL = "https://istudentsportal.com";
 
-function safeStr(x: any) {
-  return String(x ?? "").trim();
+function safeStr(value: unknown) {
+  return String(value ?? "").trim();
 }
 
 function absUrl(path: string) {
@@ -17,13 +17,38 @@ function absUrl(path: string) {
   return `${BASE_URL}${clean.startsWith("/") ? clean : `/${clean}`}`;
 }
 
+function toDate(value: unknown, fallback = new Date()) {
+  const date = value ? new Date(String(value)) : null;
+  return date && !Number.isNaN(date.getTime()) ? date : fallback;
+}
+
+function latestDate(values: unknown[], fallback = new Date()) {
+  let best: Date | null = null;
+
+  for (const value of values) {
+    const date = value ? new Date(String(value)) : null;
+    if (!date || Number.isNaN(date.getTime())) continue;
+    if (!best || date.getTime() > best.getTime()) {
+      best = date;
+    }
+  }
+
+  return best || fallback;
+}
+
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   await dbConnect();
 
+  const now = new Date();
+
   const [blogs, products] = await Promise.all([
-    Blog.find({ isPublished: true, slug: { $exists: true, $ne: "" } })
-      .select("slug updatedAt")
-      .sort({ updatedAt: -1, _id: -1 })
+    Blog.find({
+      isPublished: true,
+      slug: { $exists: true, $ne: "" },
+      $or: [{ publishedAt: null }, { publishedAt: { $lte: now } }],
+    })
+      .select("slug publishedAt updatedAt createdAt")
+      .sort({ publishedAt: -1, updatedAt: -1, _id: -1 })
       .lean(),
 
     Product.find({
@@ -36,121 +61,135 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
       .lean(),
   ]);
 
+  const latestBlogDate = latestDate(
+    (blogs || []).flatMap((blog: any) => [
+      blog?.updatedAt,
+      blog?.publishedAt,
+      blog?.createdAt,
+    ]),
+    now
+  );
+
+  const latestProductDate = latestDate(
+    (products || []).map((product: any) => product?.updatedAt),
+    now
+  );
+
   const staticUrls: MetadataRoute.Sitemap = [
     {
       url: absUrl("/"),
-      lastModified: new Date(),
+      lastModified: now,
       changeFrequency: "daily",
       priority: 1,
     },
     {
       url: absUrl("/products"),
-      lastModified: new Date(),
+      lastModified: latestProductDate,
       changeFrequency: "daily",
       priority: 0.95,
     },
     {
       url: absUrl("/solved-assignments"),
-      lastModified: new Date(),
+      lastModified: latestProductDate,
       changeFrequency: "daily",
       priority: 0.95,
     },
     {
       url: absUrl("/handwritten-hardcopy"),
-      lastModified: new Date(),
+      lastModified: latestProductDate,
       changeFrequency: "weekly",
       priority: 0.9,
     },
     {
       url: absUrl("/handwritten-pdfs"),
-      lastModified: new Date(),
+      lastModified: latestProductDate,
       changeFrequency: "weekly",
       priority: 0.9,
     },
     {
       url: absUrl("/question-papers"),
-      lastModified: new Date(),
+      lastModified: latestProductDate,
       changeFrequency: "weekly",
       priority: 0.9,
     },
     {
       url: absUrl("/guess-papers"),
-      lastModified: new Date(),
+      lastModified: latestProductDate,
       changeFrequency: "weekly",
       priority: 0.9,
     },
     {
       url: absUrl("/ebooks"),
-      lastModified: new Date(),
+      lastModified: latestProductDate,
       changeFrequency: "weekly",
       priority: 0.85,
     },
     {
       url: absUrl("/projects"),
-      lastModified: new Date(),
+      lastModified: now,
       changeFrequency: "weekly",
       priority: 0.85,
     },
     {
       url: absUrl("/combo"),
-      lastModified: new Date(),
+      lastModified: latestProductDate,
       changeFrequency: "weekly",
       priority: 0.8,
     },
     {
       url: absUrl("/courses"),
-      lastModified: new Date(),
+      lastModified: now,
       changeFrequency: "weekly",
       priority: 0.8,
     },
     {
       url: absUrl("/blog"),
-      lastModified: new Date(),
+      lastModified: latestBlogDate,
       changeFrequency: "daily",
       priority: 0.8,
     },
     {
       url: absUrl("/about"),
-      lastModified: new Date(),
+      lastModified: now,
       changeFrequency: "monthly",
       priority: 0.5,
     },
     {
       url: absUrl("/contact"),
-      lastModified: new Date(),
+      lastModified: now,
       changeFrequency: "monthly",
       priority: 0.5,
     },
     {
       url: absUrl("/faq"),
-      lastModified: new Date(),
+      lastModified: now,
       changeFrequency: "monthly",
       priority: 0.5,
     },
     {
       url: absUrl("/privacy"),
-      lastModified: new Date(),
+      lastModified: now,
       changeFrequency: "monthly",
       priority: 0.3,
     },
     {
       url: absUrl("/terms"),
-      lastModified: new Date(),
+      lastModified: now,
       changeFrequency: "monthly",
       priority: 0.3,
     },
     {
       url: absUrl("/refund-policy"),
-      lastModified: new Date(),
+      lastModified: now,
       changeFrequency: "monthly",
       priority: 0.3,
     },
   ];
 
   const productUrls: MetadataRoute.Sitemap = (products || [])
-    .map((p: any) => {
-      const slug = safeStr(p?.slug);
-      const category = safeStr(p?.category);
+    .map((product: any) => {
+      const slug = safeStr(product?.slug);
+      const category = safeStr(product?.category);
       if (!slug) return null;
 
       const href = productHref({ slug, category });
@@ -158,7 +197,7 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
 
       return {
         url: absUrl(href),
-        lastModified: p?.updatedAt ? new Date(p.updatedAt) : new Date(),
+        lastModified: toDate(product?.updatedAt, now),
         changeFrequency: "weekly" as const,
         priority: 0.8,
       };
@@ -166,13 +205,13 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     .filter(Boolean) as MetadataRoute.Sitemap;
 
   const blogUrls: MetadataRoute.Sitemap = (blogs || [])
-    .map((b: any) => {
-      const slug = safeStr(b?.slug);
+    .map((blog: any) => {
+      const slug = safeStr(blog?.slug);
       if (!slug) return null;
 
       return {
         url: absUrl(`/blog/${slug}`),
-        lastModified: b?.updatedAt ? new Date(b.updatedAt) : new Date(),
+        lastModified: toDate(blog?.updatedAt || blog?.publishedAt || blog?.createdAt, now),
         changeFrequency: "weekly" as const,
         priority: 0.7,
       };

@@ -26,7 +26,7 @@ function money(n: number) {
 
 const SITE_NAME = safeStr(process.env.NEXT_PUBLIC_SITE_NAME || "Website");
 const APP_BASE_URL = safeStr(
-  process.env.APP_BASE_URL || "http://localhost:3000"
+  process.env.APP_BASE_URL || "https://istudentsportal.com"
 ).replace(/\/+$/, "");
 
 const SMTP_HOST = safeStr(process.env.SMTP_HOST);

@@ -45,7 +45,7 @@ type ApiProduct = {
 };
 
 function siteUrl() {
-  let base = process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "http://localhost:3000";
+  let base = process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL || "https://istudentsportal.com";
   base = String(base || "").trim().replace(/\/+$/, "");
   // auto-fix scheme if missing
   if (!/^https?:\/\//i.test(base)) {

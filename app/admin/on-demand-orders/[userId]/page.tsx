@@ -82,10 +82,18 @@ type UploadRow = {
   skuNormalized?: string;
   productMatched?: boolean;
   productSku?: string;
+  productId?: string;
+  productSlug?: string;
+  existingFileId?: string;
+  existingFolderId?: string;
+  existingDuplicatesCount?: number;
+  replacedDuplicatesCount?: number;
+  detectedPages?: number;
 };
 
 type UploadResponse = {
   ok?: boolean;
+  mode?: string;
   summary?: {
     total?: number;
     uploaded?: number;
@@ -97,12 +105,27 @@ type UploadResponse = {
   };
   results?: UploadRow[];
   error?: string;
+  upload?: {
+    method?: string;
+    url?: string;
+    contentType?: string;
+    bucket?: string;
+    key?: string;
+    sizeBytes?: number;
+    expiresIn?: number;
+  };
+  parentPath?: string;
+  conflictMode?: string;
+  productSku?: string;
+  fileName?: string;
 };
 
 type FolderShortcut = {
   name: string;
   path: string;
 } | null;
+
+type UploadStage = "idle" | "preparing" | "uploading" | "finalizing";
 
 const SHORTCUTS_STORAGE_KEY = "on_demand_upload_folder_shortcuts_v1";
 
@@ -198,6 +221,73 @@ function writeShortcutsToStorage(shortcut1: FolderShortcut, shortcut2: FolderSho
   );
 }
 
+async function parseJsonSafe<T>(res: Response): Promise<T> {
+  return (await res.json().catch(() => ({}))) as T;
+}
+
+function extractUploadError(payload: UploadResponse | Record<string, any>, fallback = "Upload failed") {
+  return (
+    safeStr((payload as any)?.error) ||
+    safeStr((payload as any)?.results?.[0]?.reason) ||
+    fallback
+  );
+}
+
+function formatFileSize(bytes?: number) {
+  const value = Number(bytes || 0);
+  if (!Number.isFinite(value) || value <= 0) return "-";
+
+  if (value < 1024) return `${value} B`;
+  if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KB`;
+  if (value < 1024 * 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(2)} MB`;
+
+  return `${(value / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function uploadFileToPresignedUrl(args: {
+  url: string;
+  file: File;
+  contentType: string;
+  onProgress?: (percent: number) => void;
+}) {
+  const { url, file, contentType, onProgress } = args;
+
+  return new Promise<void>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", url);
+
+    if (contentType) {
+      xhr.setRequestHeader("Content-Type", contentType);
+    }
+
+    xhr.upload.onprogress = (event) => {
+      if (!event.lengthComputable) return;
+      const percent = Math.max(0, Math.min(100, Math.round((event.loaded / event.total) * 100)));
+      onProgress?.(percent);
+    };
+
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        onProgress?.(100);
+        resolve();
+        return;
+      }
+
+      reject(new Error(`Direct upload failed (${xhr.status})`));
+    };
+
+    xhr.onerror = () => {
+      reject(new Error("Direct upload network error"));
+    };
+
+    xhr.onabort = () => {
+      reject(new Error("Direct upload aborted"));
+    };
+
+    xhr.send(file);
+  });
+}
+
 export default function AdminOnDemandOrderDetailPage() {
   const params = useParams<{ userId: string }>();
   const userId = String(params?.userId || "");
@@ -216,10 +306,19 @@ export default function AdminOnDemandOrderDetailPage() {
 
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [uploadStage, setUploadStage] = useState<UploadStage>("idle");
+  const [uploadProgress, setUploadProgress] = useState(0);
   const [conflictMode, setConflictMode] = useState<"ignore" | "replace">("replace");
 
   const [shortcut1, setShortcut1] = useState<FolderShortcut>(null);
   const [shortcut2, setShortcut2] = useState<FolderShortcut>(null);
+
+  function resetUploadState() {
+    setUploadFile(null);
+    setUploading(false);
+    setUploadStage("idle");
+    setUploadProgress(0);
+  }
 
   async function load() {
     if (!userId) return;
@@ -316,7 +415,7 @@ export default function AdminOnDemandOrderDetailPage() {
 
   async function openUploadModal(item: ItemRow) {
     setSelectedItem(item);
-    setUploadFile(null);
+    resetUploadState();
     setConflictMode("replace");
     setCurrentPath("root");
     setFolders([]);
@@ -363,7 +462,7 @@ export default function AdminOnDemandOrderDetailPage() {
       if (selectedItem?.lineId === lineId) {
         setSelectedItem(null);
         setUploadOpen(false);
-        setUploadFile(null);
+        resetUploadState();
       }
 
       await load();
@@ -397,48 +496,121 @@ export default function AdminOnDemandOrderDetailPage() {
       return;
     }
 
-    setUploading(true);
-    try {
-      const form = new FormData();
-      form.append("parentPath", currentPath || "root");
-      form.append("conflictMode", conflictMode);
-      form.append("productSku", safeStr(selectedItem.sku));
-      form.append("files", uploadFile);
+    if (!/\.pdf$/i.test(uploadFile.name)) {
+      alert("Sirf PDF file allowed hai.");
+      return;
+    }
 
-      const res = await fetch("/api/admin/on-demand-orders/upload", {
+    setUploading(true);
+    setUploadStage("preparing");
+    setUploadProgress(0);
+
+    try {
+      const prepareRes = await fetch("/api/admin/on-demand-orders/upload", {
         method: "POST",
         credentials: "include",
-        body: form,
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          action: "create-presigned-upload",
+          parentPath: currentPath || "root",
+          conflictMode,
+          productSku: safeStr(selectedItem.sku),
+          fileName: uploadFile.name,
+          fileType: uploadFile.type || "application/pdf",
+          sizeBytes: uploadFile.size,
+        }),
       });
 
-      const json: UploadResponse = await res.json().catch(() => ({}));
+      const prepareJson = await parseJsonSafe<UploadResponse>(prepareRes);
 
-      if (!res.ok || !json?.ok) {
-        alert((json as any)?.error || "Upload failed");
+      if (!prepareRes.ok || !prepareJson?.ok) {
+        alert(extractUploadError(prepareJson, "Upload prepare failed"));
         return;
       }
 
-      const firstRow = Array.isArray(json?.results) ? json.results[0] : null;
+      if (prepareJson?.mode === "direct-upload-skipped") {
+        await load();
+        await loadFolders(currentPath || "root");
+        setUploadOpen(false);
+        setSelectedItem(null);
+        resetUploadState();
+
+        const row = Array.isArray(prepareJson?.results) ? prepareJson.results[0] : null;
+        alert(row?.reason || "Same SKU ki PDF already exist karti hai. Upload ignore ho gaya.");
+        return;
+      }
+
+      const uploadMeta = prepareJson?.upload;
+      if (!uploadMeta?.url || !uploadMeta?.bucket || !uploadMeta?.key) {
+        alert("Upload URL generate nahi ho paaya.");
+        return;
+      }
+
+      setUploadStage("uploading");
+      setUploadProgress(1);
+
+      await uploadFileToPresignedUrl({
+        url: uploadMeta.url,
+        file: uploadFile,
+        contentType: safeStr(uploadMeta.contentType || uploadFile.type || "application/pdf"),
+        onProgress: (percent) => {
+          setUploadProgress(Math.max(1, Math.min(percent, 98)));
+        },
+      });
+
+      setUploadStage("finalizing");
+      setUploadProgress(99);
+
+      const finalizeRes = await fetch("/api/admin/on-demand-orders/upload", {
+        method: "POST",
+        credentials: "include",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          action: "finalize-direct-upload",
+          parentPath: currentPath || "root",
+          conflictMode,
+          productSku: safeStr(selectedItem.sku),
+          s3Bucket: uploadMeta.bucket,
+          s3Key: uploadMeta.key,
+          sizeBytes: uploadFile.size,
+        }),
+      });
+
+      const finalizeJson = await parseJsonSafe<UploadResponse>(finalizeRes);
+
+      if (!finalizeRes.ok || !finalizeJson?.ok) {
+        alert(extractUploadError(finalizeJson, "Upload finalization failed"));
+        return;
+      }
+
+      const firstRow = Array.isArray(finalizeJson?.results) ? finalizeJson.results[0] : null;
       const matched = Boolean(
-        firstRow?.productMatched || Number(json?.summary?.matchedProducts || 0) > 0
+        firstRow?.productMatched || Number(finalizeJson?.summary?.matchedProducts || 0) > 0
       );
+
+      setUploadProgress(100);
 
       await load();
       await loadFolders(currentPath || "root");
 
       setUploadOpen(false);
       setSelectedItem(null);
-      setUploadFile(null);
+      resetUploadState();
 
       if (matched) {
         alert("PDF successfully upload ho gayi. Product link ho gaya aur on-demand list refresh bhi ho gayi.");
       } else {
         alert("PDF upload ho gayi, lekin product auto-match confirm nahi hua. SKU ek baar check kar lo.");
       }
-    } catch {
-      alert("Upload failed");
+    } catch (err: any) {
+      alert(safeStr(err?.message || "Upload failed"));
     } finally {
       setUploading(false);
+      setUploadStage((prev) => (prev === "idle" ? prev : "idle"));
     }
   }
 
@@ -458,6 +630,13 @@ export default function AdminOnDemandOrderDetailPage() {
     if (days <= 180) return "Regular User";
     return "Old Customer";
   }, [data]);
+
+  const uploadStageLabel = useMemo(() => {
+    if (uploadStage === "preparing") return "Preparing direct upload...";
+    if (uploadStage === "uploading") return "Uploading directly to secure storage...";
+    if (uploadStage === "finalizing") return "Finalizing and linking product...";
+    return "";
+  }, [uploadStage]);
 
   return (
     <main className="min-h-screen bg-gray-100 text-slate-900">
@@ -564,9 +743,7 @@ export default function AdminOnDemandOrderDetailPage() {
                       <div className="mt-3 text-4xl font-extrabold text-white">
                         {Number(data.user.daysOld || 0)}
                       </div>
-                      <div className="mt-1 text-sm font-bold text-blue-100">
-                        days
-                      </div>
+                      <div className="mt-1 text-sm font-bold text-blue-100">days</div>
                     </div>
                   </div>
                 </div>
@@ -613,10 +790,11 @@ export default function AdminOnDemandOrderDetailPage() {
                         const deleting = deletingLineId === safeStr(item.lineId);
 
                         return (
-                          <tr key={safeStr(item.lineId) || `${item.productId}-${idx}`} className="border-t border-gray-200 align-top">
-                            <td className="px-5 py-5 text-lg font-bold text-slate-800">
-                              {idx + 1}
-                            </td>
+                          <tr
+                            key={safeStr(item.lineId) || `${item.productId}-${idx}`}
+                            className="border-t border-gray-200 align-top"
+                          >
+                            <td className="px-5 py-5 text-lg font-bold text-slate-800">{idx + 1}</td>
 
                             <td className="px-5 py-5 min-w-[180px]">
                               <div className="text-[14px] font-extrabold text-slate-900 break-all">
@@ -628,9 +806,7 @@ export default function AdminOnDemandOrderDetailPage() {
                               <div className="text-[16px] font-extrabold text-slate-900">
                                 {item.title}
                               </div>
-                              <div className="mt-1 text-sm text-slate-500">
-                                {item.category}
-                              </div>
+                              <div className="mt-1 text-sm text-slate-500">{item.category}</div>
                             </td>
 
                             <td className="px-5 py-5 text-[15px] font-mono font-bold text-rose-600 min-w-[180px]">
@@ -704,7 +880,7 @@ export default function AdminOnDemandOrderDetailPage() {
               if (!uploading) {
                 setUploadOpen(false);
                 setSelectedItem(null);
-                setUploadFile(null);
+                resetUploadState();
               }
             }}
           />
@@ -715,7 +891,7 @@ export default function AdminOnDemandOrderDetailPage() {
                   On-Demand PDF Upload
                 </div>
                 <div className="text-sm text-slate-600 mt-1">
-                  Yahan se direct folder select karke PDF upload karo. Kisi extra vault security access ki zarurat nahi hai.
+                  Ab PDF browser se direct secure storage me upload hogi. Isse large PDF uploads zyada stable rahengi.
                 </div>
               </div>
 
@@ -725,9 +901,9 @@ export default function AdminOnDemandOrderDetailPage() {
                 onClick={() => {
                   setUploadOpen(false);
                   setSelectedItem(null);
-                  setUploadFile(null);
+                  resetUploadState();
                 }}
-                className="h-11 w-11 rounded-2xl border border-gray-200 bg-gray-50 hover:bg-white flex items-center justify-center"
+                className="h-11 w-11 rounded-2xl border border-gray-200 bg-gray-50 hover:bg-white flex items-center justify-center disabled:opacity-60"
               >
                 <X size={18} />
               </button>
@@ -735,9 +911,7 @@ export default function AdminOnDemandOrderDetailPage() {
 
             <div className="p-5 overflow-y-auto">
               <div className="rounded-3xl border border-amber-200 bg-amber-50 p-4">
-                <div className="text-sm font-extrabold text-amber-900">
-                  Selected Product
-                </div>
+                <div className="text-sm font-extrabold text-amber-900">Selected Product</div>
                 <div className="mt-2 text-lg font-extrabold text-slate-900">
                   {selectedItem.title}
                 </div>
@@ -924,11 +1098,9 @@ export default function AdminOnDemandOrderDetailPage() {
                 </div>
 
                 <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm">
-                  <div className="text-lg font-extrabold text-slate-900">
-                    Upload PDF
-                  </div>
+                  <div className="text-lg font-extrabold text-slate-900">Upload PDF</div>
                   <div className="mt-2 text-sm font-semibold text-slate-600 leading-6">
-                    Is upload flow me download ya folder download ka koi option nahi hai. Ye sirf on-demand delivery ke liye hai.
+                    Ye flow ab secure direct upload use karta hai. Large PDF uploads ke liye ye purane server-routed upload se zyada stable hai.
                   </div>
 
                   <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
@@ -965,6 +1137,7 @@ export default function AdminOnDemandOrderDetailPage() {
                       className="hidden"
                       onChange={(e) => {
                         const file = e.target.files?.[0] || null;
+                        resetUploadState();
                         setUploadFile(file);
                       }}
                     />
@@ -983,7 +1156,29 @@ export default function AdminOnDemandOrderDetailPage() {
                           <div className="mt-1 text-xs font-semibold text-slate-600 break-all">
                             Final File Name: {safeStr(selectedItem.sku) || "SKU"}.pdf
                           </div>
+                          <div className="mt-1 text-xs font-semibold text-slate-600">
+                            File Size: {formatFileSize(uploadFile.size)}
+                          </div>
                         </div>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {uploading || uploadProgress > 0 ? (
+                    <div className="mt-4 rounded-2xl border border-blue-200 bg-blue-50 p-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-sm font-extrabold text-blue-900">
+                          {uploadStageLabel || "Processing upload..."}
+                        </div>
+                        <div className="text-sm font-extrabold text-blue-900">
+                          {uploadProgress}%
+                        </div>
+                      </div>
+                      <div className="mt-3 h-3 w-full overflow-hidden rounded-full bg-blue-100">
+                        <div
+                          className="h-full rounded-full bg-blue-600 transition-all duration-300"
+                          style={{ width: `${Math.max(0, Math.min(uploadProgress, 100))}%` }}
+                        />
                       </div>
                     </div>
                   ) : null}
@@ -996,6 +1191,7 @@ export default function AdminOnDemandOrderDetailPage() {
                       value={conflictMode}
                       onChange={(e) => setConflictMode(e.target.value as "ignore" | "replace")}
                       className="w-full mt-2 px-4 py-3 rounded-2xl border border-gray-200 bg-white outline-none"
+                      disabled={uploading}
                     >
                       <option value="replace">Replace old PDF with new PDF</option>
                       <option value="ignore">Ignore if same SKU already exists</option>
@@ -1005,7 +1201,7 @@ export default function AdminOnDemandOrderDetailPage() {
                   <button
                     type="button"
                     onClick={handleDirectVaultUpload}
-                    disabled={uploading}
+                    disabled={uploading || !uploadFile}
                     className="w-full mt-5 inline-flex items-center justify-center gap-2 px-5 py-4 rounded-2xl bg-slate-900 hover:bg-slate-950 text-white transition font-extrabold shadow-sm disabled:opacity-60"
                   >
                     {uploading ? (
@@ -1013,7 +1209,13 @@ export default function AdminOnDemandOrderDetailPage() {
                     ) : (
                       <CheckCircle2 size={18} />
                     )}
-                    {uploading ? "Uploading..." : "Upload PDF"}
+                    {uploading
+                      ? uploadStage === "preparing"
+                        ? "Preparing..."
+                        : uploadStage === "uploading"
+                        ? "Uploading..."
+                        : "Finalizing..."
+                      : "Upload PDF"}
                   </button>
                 </div>
               </div>

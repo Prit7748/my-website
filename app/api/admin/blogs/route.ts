@@ -1,4 +1,3 @@
-// ✅ UPDATE FILE: app/api/admin/blogs/route.ts
 import { NextRequest, NextResponse } from "next/server";
 import dbConnect from "../../../../lib/db";
 import Blog from "../../../../models/Blog";
@@ -9,9 +8,14 @@ import sanitizeHtml from "sanitize-html";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function safeStr(x: any) {
-  return String(x ?? "").trim();
+function safeStr(value: unknown) {
+  return String(value ?? "").trim();
 }
+
+function escapeRegex(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
 function slugify(input: string) {
   return safeStr(input)
     .toLowerCase()
@@ -21,55 +25,138 @@ function slugify(input: string) {
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");
 }
-function parseTags(input: any) {
-  if (Array.isArray(input)) return input.map((t) => safeStr(t)).filter(Boolean).slice(0, 25);
-  const s = safeStr(input);
-  if (!s) return [];
-  return s.split(",").map((x) => safeStr(x)).filter(Boolean).slice(0, 25);
+
+function parseTags(input: unknown) {
+  if (Array.isArray(input)) {
+    return input.map((item) => safeStr(item)).filter(Boolean).slice(0, 25);
+  }
+
+  const raw = safeStr(input);
+  if (!raw) return [];
+
+  return raw
+    .split(",")
+    .map((item) => safeStr(item))
+    .filter(Boolean)
+    .slice(0, 25);
 }
 
 function stripHtmlToText(html: string) {
-  const x = safeStr(html)
+  return safeStr(html)
     .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, " ")
     .replace(/<style[\s\S]*?>[\s\S]*?<\/style>/gi, " ")
     .replace(/<\/?[^>]+(>|$)/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  return x;
 }
 
-function normalizeContentHtml(input: any) {
-  let s = String(input ?? "").trim();
-  if (!s) return "";
+function isExternalHref(href: string) {
+  const raw = safeStr(href);
+  if (!raw) return false;
+  if (raw.startsWith("/") || raw.startsWith("#")) return false;
 
-  const fence = s.match(/^```(?:html|HTML)?\s*([\s\S]*?)\s*```$/);
-  if (fence?.[1]) s = fence[1].trim();
+  try {
+    const linkUrl = new URL(raw);
+    const siteBase =
+      process.env.NEXT_PUBLIC_SITE_URL ||
+      process.env.SITE_URL ||
+      "https://istudentsportal.com";
 
-  const clean = sanitizeHtml(s, {
+    const siteUrl = new URL(siteBase);
+    return linkUrl.hostname !== siteUrl.hostname;
+  } catch {
+    return false;
+  }
+}
+
+function normalizeContentHtml(input: unknown) {
+  let html = String(input ?? "").trim();
+  if (!html) return "";
+
+  const fenced = html.match(/^```(?:html|HTML)?\s*([\s\S]*?)\s*```$/);
+  if (fenced?.[1]) {
+    html = fenced[1].trim();
+  }
+
+  const clean = sanitizeHtml(html, {
     allowedTags: [
-      "h1","h2","h3","h4","h5","h6",
-      "p","br","hr","ul","ol","li",
-      "b","strong","i","em","u","s",
-      "blockquote","a","img","code","pre",
-      "table","thead","tbody","tr","th","td",
-      "span","div",
+      "h1",
+      "h2",
+      "h3",
+      "h4",
+      "h5",
+      "h6",
+      "p",
+      "br",
+      "hr",
+      "ul",
+      "ol",
+      "li",
+      "b",
+      "strong",
+      "i",
+      "em",
+      "u",
+      "s",
+      "blockquote",
+      "a",
+      "img",
+      "code",
+      "pre",
+      "table",
+      "thead",
+      "tbody",
+      "tr",
+      "th",
+      "td",
+      "span",
+      "div",
+      "figure",
+      "figcaption",
     ],
     allowedAttributes: {
-      a: ["href","name","target","rel"],
-      img: ["src","alt","title","width","height","loading"],
-      "*": ["class","id"],
+      a: ["href", "name", "target", "rel"],
+      img: ["src", "alt", "title", "width", "height", "loading"],
+      "*": ["class", "id"],
     },
-    allowedSchemes: ["http","https","mailto"],
+    allowedSchemes: ["http", "https", "mailto"],
     allowProtocolRelative: false,
     transformTags: {
-      a: (tagName, attribs) => {
+      a: (_tagName, attribs) => {
         const href = safeStr(attribs.href);
-        const next: any = { ...attribs };
-        if (href) {
-          next.rel = "nofollow noopener noreferrer";
-          if (safeStr(attribs.target) === "_blank") next.target = "_blank";
+        const nextAttribs: Record<string, string> = {};
+
+        if (href) nextAttribs.href = href;
+        if (safeStr(attribs.name)) nextAttribs.name = safeStr(attribs.name);
+
+        const target = safeStr(attribs.target);
+        if (target === "_blank") {
+          nextAttribs.target = "_blank";
         }
-        return { tagName, attribs: next };
+
+        const rel = safeStr(attribs.rel);
+        if (isExternalHref(href)) {
+          nextAttribs.rel = rel
+            ? rel
+            : "nofollow noopener noreferrer";
+        } else if (rel) {
+          nextAttribs.rel = rel;
+        }
+
+        return { tagName: "a", attribs: nextAttribs };
+      },
+      img: (_tagName, attribs) => {
+        const nextAttribs: Record<string, string> = {};
+        const src = safeStr(attribs.src);
+
+        if (src) nextAttribs.src = src;
+        if (safeStr(attribs.alt)) nextAttribs.alt = safeStr(attribs.alt);
+        if (safeStr(attribs.title)) nextAttribs.title = safeStr(attribs.title);
+        if (safeStr(attribs.width)) nextAttribs.width = safeStr(attribs.width);
+        if (safeStr(attribs.height)) nextAttribs.height = safeStr(attribs.height);
+        nextAttribs.loading = safeStr(attribs.loading) || "lazy";
+
+        return { tagName: "img", attribs: nextAttribs };
       },
     },
     disallowedTagsMode: "discard",
@@ -79,16 +166,49 @@ function normalizeContentHtml(input: any) {
 }
 
 function autoExcerpt(excerpt: string, contentHtml: string) {
-  const ex = safeStr(excerpt);
-  if (ex) return ex.slice(0, 220);
+  const manualExcerpt = safeStr(excerpt);
+  if (manualExcerpt) return manualExcerpt.slice(0, 220);
+
   const text = stripHtmlToText(contentHtml);
   if (!text) return "";
+
   return text.slice(0, 180);
 }
 
-async function normalizeCategoryId(input: any) {
+function normalizeMetaTitle(metaTitle: unknown, title: string) {
+  const value = safeStr(metaTitle) || safeStr(title);
+  return value.slice(0, 70);
+}
+
+function normalizeMetaDescription(
+  metaDescription: unknown,
+  excerpt: string,
+  contentHtml: string
+) {
+  const manual = safeStr(metaDescription);
+  if (manual) return manual.slice(0, 170);
+
+  const fallback = safeStr(excerpt) || stripHtmlToText(contentHtml);
+  return fallback.slice(0, 170);
+}
+
+function normalizeCoverAlt(coverAlt: unknown, title: string) {
+  const value = safeStr(coverAlt) || safeStr(title);
+  return value.slice(0, 140);
+}
+
+function normalizePublishedAt(input: unknown) {
+  const raw = safeStr(input);
+  if (!raw) return null;
+
+  const date = new Date(raw);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+async function normalizeCategoryId(input: unknown) {
   const id = safeStr(input);
   if (!id) return null;
+
   try {
     const exists = await BlogCategory.findById(id).select("_id").lean();
     return exists ? id : null;
@@ -97,24 +217,57 @@ async function normalizeCategoryId(input: any) {
   }
 }
 
-// ✅ Admin: list blogs
+function mapBlogRow(blog: any) {
+  return {
+    _id: String(blog._id),
+    title: safeStr(blog.title),
+    slug: safeStr(blog.slug),
+    excerpt: safeStr(blog.excerpt),
+    metaTitle: safeStr(blog.metaTitle),
+    metaDescription: safeStr(blog.metaDescription),
+    coverUrl: safeStr(blog.coverUrl),
+    coverAlt: safeStr(blog.coverAlt),
+    tags: Array.isArray(blog.tags) ? blog.tags.filter(Boolean) : [],
+    categoryId: blog.categoryId ? String(blog.categoryId) : null,
+    authorName: safeStr(blog.authorName) || "IGNOU Students Portal",
+    isPublished: !!blog.isPublished,
+    publishedAt: blog.publishedAt || null,
+    createdAt: blog.createdAt || null,
+    updatedAt: blog.updatedAt || null,
+  };
+}
+
 export async function GET(req: NextRequest) {
   try {
     const auth = await requireAdmin();
-    if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status });
+    if (!auth.ok) {
+      return NextResponse.json(
+        { error: auth.error },
+        { status: auth.status }
+      );
+    }
 
     await dbConnect();
+
     const url = new URL(req.url);
-    const qSearch = safeStr(url.searchParams.get("search"));
+    const search = safeStr(url.searchParams.get("search"));
     const only = safeStr(url.searchParams.get("only")); // published | draft | ""
 
-    const query: any = {};
+    const query: Record<string, any> = {};
+
     if (only === "published") query.isPublished = true;
     if (only === "draft") query.isPublished = false;
 
-    if (qSearch) {
-      const re = new RegExp(qSearch.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "i");
-      query.$or = [{ title: re }, { slug: re }, { excerpt: re }, { tags: re }];
+    if (search) {
+      const re = new RegExp(escapeRegex(search), "i");
+      query.$or = [
+        { title: re },
+        { slug: re },
+        { excerpt: re },
+        { metaTitle: re },
+        { metaDescription: re },
+        { tags: re },
+      ];
     }
 
     const blogs = await Blog.find(query)
@@ -122,63 +275,96 @@ export async function GET(req: NextRequest) {
       .limit(200)
       .lean();
 
-    const mapped = (blogs || []).map((b: any) => ({
-      _id: String(b._id),
-      title: safeStr(b.title),
-      slug: safeStr(b.slug),
-      excerpt: safeStr(b.excerpt),
-      coverUrl: safeStr(b.coverUrl),
-      tags: Array.isArray(b.tags) ? b.tags.filter(Boolean) : [],
-      categoryId: b.categoryId ? String(b.categoryId) : null,
-      authorName: safeStr(b.authorName) || "IGNOU Students Portal",
-      isPublished: !!b.isPublished,
-      publishedAt: b.publishedAt || null,
-      createdAt: b.createdAt || null,
-      updatedAt: b.updatedAt || null,
-    }));
-
-    return NextResponse.json({ blogs: mapped }, { status: 200 });
-  } catch (e: any) {
-    return NextResponse.json({ error: "Server error", message: e?.message || "" }, { status: 500 });
+    return NextResponse.json(
+      { blogs: (blogs || []).map(mapBlogRow) },
+      { status: 200 }
+    );
+  } catch (error: any) {
+    return NextResponse.json(
+      {
+        error: "Server error",
+        message: error?.message || "",
+      },
+      { status: 500 }
+    );
   }
 }
 
-// ✅ Admin: create blog
 export async function POST(req: NextRequest) {
   try {
     const auth = await requireAdmin();
-    if (!auth.ok) return NextResponse.json({ error: auth.error }, { status: auth.status });
+    if (!auth.ok) {
+      return NextResponse.json(
+        { error: auth.error },
+        { status: auth.status }
+      );
+    }
 
     await dbConnect();
+
     const body = await req.json();
 
-    const title = safeStr(body.title);
-    const slug = slugify(body.slug || title);
+    const title = safeStr(body?.title);
+    const slug = slugify(body?.slug || title);
 
-    if (!title) return NextResponse.json({ error: "Title is required" }, { status: 400 });
-    if (!slug) return NextResponse.json({ error: "Slug is required" }, { status: 400 });
+    if (!title) {
+      return NextResponse.json(
+        { error: "Title is required" },
+        { status: 400 }
+      );
+    }
+
+    if (!slug) {
+      return NextResponse.json(
+        { error: "Slug is required" },
+        { status: 400 }
+      );
+    }
 
     const exists = await Blog.findOne({ slug }).select("_id").lean();
-    if (exists) return NextResponse.json({ error: "Slug already exists" }, { status: 409 });
+    if (exists) {
+      return NextResponse.json(
+        { error: "Slug already exists" },
+        { status: 409 }
+      );
+    }
 
-    const isPublished = Boolean(body.isPublished);
-    const publishedAt = isPublished ? (body.publishedAt ? new Date(body.publishedAt) : new Date()) : null;
+    const contentHtml = normalizeContentHtml(body?.contentHtml);
+    const excerpt = autoExcerpt(body?.excerpt, contentHtml);
+    const metaTitle = normalizeMetaTitle(body?.metaTitle, title);
+    const metaDescription = normalizeMetaDescription(
+      body?.metaDescription,
+      excerpt,
+      contentHtml
+    );
 
-    const contentHtml = normalizeContentHtml(body.contentHtml);
-    const excerpt = autoExcerpt(safeStr(body.excerpt), contentHtml);
+    const coverUrl =
+      safeStr(body?.coverUrl) ||
+      safeStr(body?.imageUrl) ||
+      safeStr(body?.coverImageUrl);
 
-    const categoryId = await normalizeCategoryId(body.categoryId);
+    const coverAlt = normalizeCoverAlt(body?.coverAlt, title);
+    const categoryId = await normalizeCategoryId(body?.categoryId);
+
+    const isPublished = Boolean(body?.isPublished);
+    const manualPublishedAt = normalizePublishedAt(body?.publishedAt);
+    const publishedAt = isPublished
+      ? manualPublishedAt || new Date()
+      : null;
 
     const doc = await Blog.create({
       title,
       slug,
       excerpt,
       contentHtml,
-      coverUrl: safeStr(body.coverUrl),
-      youtubeUrl: safeStr(body.youtubeUrl),
-      tags: parseTags(body.tags),
+      metaTitle,
+      metaDescription,
+      coverUrl,
+      coverAlt,
+      youtubeUrl: safeStr(body?.youtubeUrl),
+      tags: parseTags(body?.tags),
       categoryId,
-      authorName: safeStr(body.authorName) || "IGNOU Students Portal",
+      authorName: safeStr(body?.authorName) || "IGNOU Students Portal",
       isPublished,
       publishedAt,
     });
@@ -189,13 +375,24 @@ export async function POST(req: NextRequest) {
           _id: String(doc._id),
           title: safeStr(doc.title),
           slug: safeStr(doc.slug),
+          excerpt: safeStr(doc.excerpt),
+          metaTitle: safeStr(doc.metaTitle),
+          metaDescription: safeStr(doc.metaDescription),
+          coverUrl: safeStr(doc.coverUrl),
+          coverAlt: safeStr(doc.coverAlt),
           isPublished: !!doc.isPublished,
           publishedAt: doc.publishedAt || null,
         },
       },
       { status: 201 }
     );
-  } catch (e: any) {
-    return NextResponse.json({ error: "Server error", message: e?.message || "" }, { status: 500 });
+  } catch (error: any) {
+    return NextResponse.json(
+      {
+        error: "Server error",
+        message: error?.message || "",
+      },
+      { status: 500 }
+    );
   }
 }
