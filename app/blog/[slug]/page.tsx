@@ -62,10 +62,82 @@ function stripHtml(html: string) {
 }
 
 function cleanupHtml(raw: string) {
-  let html = String(raw || "");
-  html = html.replace(/^```html\s*/i, "");
-  html = html.replace(/^```\s*/i, "");
-  html = html.replace(/```$/i, "");
+  let html = String(raw || "").trim();
+
+  // Remove markdown/html code fences like:
+  // ```html
+  // ...content...
+  // ```
+  // or ```html id="abc"
+  html = html.replace(/^```(?:html)?[^\n\r]*[\r\n]*/i, "");
+  html = html.replace(/[\r\n]*```$/i, "");
+
+  // Remove accidental leftover opening-fence metadata like: id="abc"
+  html = html.replace(/^\s*id=(['"]).*?\1\s*/i, "");
+
+  return html.trim();
+}
+
+function decodeHtmlEntities(input: string) {
+  if (!input) return "";
+
+  const named: Record<string, string> = {
+    amp: "&",
+    lt: "<",
+    gt: ">",
+    quot: '"',
+    apos: "'",
+    nbsp: " ",
+    ndash: "–",
+    mdash: "—",
+    hellip: "…",
+    rsquo: "’",
+    lsquo: "‘",
+    rdquo: "”",
+    ldquo: "“",
+    copy: "©",
+    reg: "®",
+    trade: "™",
+  };
+
+  return input
+    .replace(/&#(\d+);/g, (_, dec) => {
+      const code = Number(dec);
+      return Number.isFinite(code) ? String.fromCharCode(code) : _;
+    })
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex) => {
+      const code = Number.parseInt(hex, 16);
+      return Number.isFinite(code) ? String.fromCharCode(code) : _;
+    })
+    .replace(/&([a-zA-Z]+);/g, (full, name) => {
+      return Object.prototype.hasOwnProperty.call(named, name)
+        ? named[name]
+        : full;
+    });
+}
+
+function looksLikeEscapedHtml(input: string) {
+  if (!input) return false;
+
+  const hasEscapedTags =
+    /&lt;\/?(?:div|p|h1|h2|h3|h4|ul|ol|li|strong|b|em|a|img|table|blockquote|section|article|span|br)\b/i.test(
+      input
+    );
+  const hasRealTags =
+    /<\/?(?:div|p|h1|h2|h3|h4|ul|ol|li|strong|b|em|a|img|table|blockquote|section|article|span|br)\b/i.test(
+      input
+    );
+
+  return hasEscapedTags && !hasRealTags;
+}
+
+function normalizeBlogHtml(raw: string) {
+  let html = cleanupHtml(raw);
+
+  if (looksLikeEscapedHtml(html)) {
+    html = decodeHtmlEntities(html);
+  }
+
   return html.trim();
 }
 
@@ -175,7 +247,7 @@ function mapBlog(doc: any): BlogView {
     title: safeText(doc.title),
     slug: safeText(doc.slug),
     excerpt: safeText(doc.excerpt),
-    contentHtml: cleanupHtml(String(doc.contentHtml || "")),
+    contentHtml: normalizeBlogHtml(String(doc.contentHtml || "")),
     metaTitle: safeText(doc.metaTitle),
     metaDescription: safeText(doc.metaDescription),
     coverUrl: safeText(doc.coverUrl),
@@ -336,8 +408,8 @@ export default async function BlogPostPage({
 
   const contentHtmlRaw = safeText(blog.contentHtml);
   const contentHtml = injectHeadingIds(contentHtmlRaw);
-  const toc = extractHeadings(contentHtmlRaw);
-  const { mins } = readingTimeFromHtml(contentHtmlRaw);
+  const toc = extractHeadings(contentHtml);
+  const { mins } = readingTimeFromHtml(contentHtml);
   const yid = youtubeId(blog.youtubeUrl);
   const tags = Array.isArray(blog.tags) ? blog.tags.filter(Boolean) : [];
   const primaryTag = tags[0] || "";
@@ -401,8 +473,133 @@ export default async function BlogPostPage({
       <Navbar />
 
       <style>{`
-        .isp-prose :where(h2){scroll-margin-top:120px;}
-        .isp-prose :where(h3){scroll-margin-top:120px;}
+        .isp-prose { 
+          color: #334155;
+          font-size: 1.04rem;
+          line-height: 1.95;
+          word-break: break-word;
+          overflow-wrap: anywhere;
+        }
+
+        .isp-prose > :first-child {
+          margin-top: 0 !important;
+        }
+
+        .isp-prose > :last-child {
+          margin-bottom: 0 !important;
+        }
+
+        .isp-prose :where(h1, h2, h3, h4) {
+          color: #0f172a;
+          font-weight: 800 !important;
+          line-height: 1.35;
+          letter-spacing: -0.015em;
+        }
+
+        .isp-prose :where(h1) {
+          font-size: 2rem;
+          margin: 0 0 1rem 0;
+        }
+
+        .isp-prose :where(h2) {
+          font-size: 1.55rem;
+          margin: 2rem 0 1rem 0;
+          scroll-margin-top: 120px;
+        }
+
+        .isp-prose :where(h3) {
+          font-size: 1.26rem;
+          margin: 1.6rem 0 0.85rem 0;
+          scroll-margin-top: 120px;
+        }
+
+        .isp-prose :where(h4) {
+          font-size: 1.12rem;
+          margin: 1.3rem 0 0.7rem 0;
+        }
+
+        .isp-prose :where(p) {
+          margin: 0 0 1.15rem 0 !important;
+          color: #334155;
+          line-height: 1.95;
+          font-size: 1.04rem;
+          font-weight: 500;
+        }
+
+        .isp-prose :where(strong, b) {
+          color: #0f172a;
+          font-weight: 800 !important;
+        }
+
+        .isp-prose :where(em, i) {
+          font-style: italic;
+        }
+
+        .isp-prose :where(ul, ol) {
+          margin: 0 0 1.2rem 1.25rem;
+          padding: 0;
+          color: #334155;
+        }
+
+        .isp-prose :where(li) {
+          margin: 0 0 0.55rem 0;
+          line-height: 1.9;
+        }
+
+        .isp-prose :where(a) {
+          color: #1d4ed8;
+          font-weight: 700;
+          text-decoration: underline;
+          text-underline-offset: 2px;
+        }
+
+        .isp-prose :where(blockquote) {
+          margin: 1.5rem 0;
+          padding: 1rem 1.25rem;
+          border-left: 4px solid #2563eb;
+          background: #eff6ff;
+          border-radius: 0 1rem 1rem 0;
+          color: #1e293b;
+        }
+
+        .isp-prose :where(img) {
+          display: block;
+          max-width: 100%;
+          height: auto;
+          border-radius: 1rem;
+          margin: 1.5rem 0;
+        }
+
+        .isp-prose :where(table) {
+          width: 100%;
+          border-collapse: collapse;
+          margin: 1.5rem 0;
+          overflow: hidden;
+          border-radius: 1rem;
+        }
+
+        .isp-prose :where(th, td) {
+          border: 1px solid #e2e8f0;
+          padding: 0.8rem 0.9rem;
+          text-align: left;
+          vertical-align: top;
+        }
+
+        .isp-prose :where(th) {
+          background: #f8fafc;
+          color: #0f172a;
+          font-weight: 800;
+        }
+
+        .isp-prose :where(hr) {
+          border: 0;
+          border-top: 1px solid #e2e8f0;
+          margin: 1.75rem 0;
+        }
+
+        .isp-prose :where(div, section, article) {
+          max-width: 100%;
+        }
       `}</style>
 
       <section className="relative overflow-hidden bg-gradient-to-br from-slate-950 via-blue-950 to-slate-950 text-white">
@@ -565,7 +762,7 @@ export default async function BlogPostPage({
               <article className="overflow-hidden rounded-3xl border border-gray-200 bg-white shadow-sm">
                 <div className="p-5 md:p-8">
                   <div
-                    className="isp-prose prose prose-slate prose-headings:font-extrabold prose-a:text-blue-700 max-w-none"
+                    className="isp-prose max-w-none"
                     dangerouslySetInnerHTML={{ __html: contentHtml }}
                   />
                 </div>
