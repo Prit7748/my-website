@@ -904,8 +904,7 @@ export default async function BlogPostPage({
                 <div className="rounded-3xl border border-gray-200 bg-white p-5 shadow-sm">
                   <div className="text-sm font-extrabold text-slate-900">Quick Tip</div>
                   <div className="mt-2 text-sm font-semibold leading-relaxed text-slate-600">
-                    Blog me jo bhi checklist aur steps hain, unko copy karke apne notes
-                    me rakho. Submission se pehle ek baar re-check karna best hota hai.
+                    Bookmark these essential steps and keep the checklist handy. Whether you're preparing assignments or gearing up for exams, a quick final review before your IGNOU submission is always a smart move.
                   </div>
                 </div>
               </div>
