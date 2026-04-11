@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { usePathname, useRouter } from "next/navigation";
 import { ArrowUp, MessageCircle, X, ChevronLeft, Send } from "lucide-react";
 
 type FlowNode = { text: string; options: { label: string; nextId: string }[] };
@@ -26,9 +27,19 @@ type SocialItem = {
   sortOrder: number;
 };
 
-// ==============================================================================
-// DEFAULT FLOW (safe fallback) - unchanged
-// ==============================================================================
+const NAV_START_EVENT = "isp:navigation-start";
+
+const PRODUCT_DETAIL_CATEGORY_PREFIXES = new Set([
+  "products",
+  "solved-assignments",
+  "question-papers",
+  "guess-papers",
+  "ebooks",
+  "projects",
+  "handwritten-pdfs",
+  "handwritten-hardcopy",
+]);
+
 const DEFAULT_FLOW: FlowMap = {
   root: {
     text: "Hi! I am Navi 🤖. How can I help you today?",
@@ -90,23 +101,61 @@ const DEFAULT_FLOW: FlowMap = {
   },
 };
 
+function safeStr(value: unknown) {
+  return String(value ?? "").trim();
+}
+
 function cleanNumber(x: string) {
   return String(x || "").replace(/[^\d]/g, "");
+}
+
+function dispatchNavigationStart(href?: string) {
+  if (typeof window === "undefined") return;
+
+  window.dispatchEvent(
+    new CustomEvent(NAV_START_EVENT, {
+      detail: {
+        href: safeStr(href) || undefined,
+      },
+    })
+  );
+}
+
+function isMobileProductDetailPath(pathname: string) {
+  const cleanPath = safeStr(pathname).split("?")[0].split("#")[0];
+  const segments = cleanPath.split("/").filter(Boolean);
+
+  if (!segments.length) return false;
+
+  if (segments[0] === "combo" && segments.length === 3) {
+    return true;
+  }
+
+  if (segments.length !== 2) {
+    return false;
+  }
+
+  return PRODUCT_DETAIL_CATEGORY_PREFIXES.has(segments[0]);
 }
 
 async function fetchChatBotConfig(): Promise<ChatBotConfig | null> {
   try {
     const res = await fetch("/api/site-settings/chatbot", { cache: "no-store" });
     if (!res.ok) return null;
+
     const data = await res.json();
     return {
       isEnabled: !!data.isEnabled,
-      provider: (data.provider || "whatsapp") as any,
+      provider: (data.provider || "whatsapp") as ChatBotConfig["provider"],
       showOnMobile: data.showOnMobile !== false,
       showOnDesktop: data.showOnDesktop !== false,
-      position: (data.position === "left" ? "left" : "right") as any,
-      whatsappNumber: String(data.whatsappNumber || ""),
-      whatsappMessage: String(data.whatsappMessage || "Hi! I need help regarding IGNOU materials."),
+      position: (data.position === "left" ? "left" : "right") as "left" | "right",
+      whatsappNumber: String(
+        data.whatsappNumber || ""
+      ),
+      whatsappMessage: String(
+        data.whatsappMessage || "Hi! I need help regarding IGNOU materials."
+      ),
       themeColor: String(data.themeColor || "#3B82F6"),
     };
   } catch {
@@ -116,11 +165,15 @@ async function fetchChatBotConfig(): Promise<ChatBotConfig | null> {
 
 async function fetchChatFlow(): Promise<FlowMap | null> {
   try {
-    const res = await fetch("/api/site-settings/chatbot-flow", { cache: "no-store" });
+    const res = await fetch("/api/site-settings/chatbot-flow", {
+      cache: "no-store",
+    });
     if (!res.ok) return null;
+
     const data = await res.json();
     const nodes = data?.nodes;
     if (!nodes || typeof nodes !== "object") return null;
+
     return nodes as FlowMap;
   } catch {
     return null;
@@ -129,8 +182,11 @@ async function fetchChatFlow(): Promise<FlowMap | null> {
 
 async function fetchSocialLinks(): Promise<SocialItem[]> {
   try {
-    const res = await fetch("/api/site-settings/social-links", { cache: "no-store" });
+    const res = await fetch("/api/site-settings/social-links", {
+      cache: "no-store",
+    });
     const data = await res.json();
+
     if (!data?.ok) return [];
     const items = Array.isArray(data.items) ? data.items : [];
     return items.filter((x: any) => x && x.isActive);
@@ -140,6 +196,9 @@ async function fetchSocialLinks(): Promise<SocialItem[]> {
 }
 
 export default function FloatingButtons() {
+  const router = useRouter();
+  const pathname = usePathname();
+
   const [mounted, setMounted] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
   const [showScroll, setShowScroll] = useState(false);
@@ -150,8 +209,6 @@ export default function FloatingButtons() {
 
   const [cfg, setCfg] = useState<ChatBotConfig | null>(null);
   const [flow, setFlow] = useState<FlowMap>(DEFAULT_FLOW);
-
-  // ✅ new: socials from DB
   const [socials, setSocials] = useState<SocialItem[]>([]);
 
   useEffect(() => {
@@ -159,40 +216,61 @@ export default function FloatingButtons() {
 
     const mq = window.matchMedia("(max-width: 767px)");
     const update = () => setIsMobile(!!mq.matches);
+
     update();
 
-    if (typeof mq.addEventListener === "function") mq.addEventListener("change", update);
-    else mq.addListener(update);
+    if (typeof mq.addEventListener === "function") {
+      mq.addEventListener("change", update);
+    } else {
+      mq.addListener(update);
+    }
 
     return () => {
-      if (typeof mq.removeEventListener === "function") mq.removeEventListener("change", update);
-      else mq.removeListener(update);
+      if (typeof mq.removeEventListener === "function") {
+        mq.removeEventListener("change", update);
+      } else {
+        mq.removeListener(update);
+      }
     };
   }, []);
 
   useEffect(() => {
     if (!mounted) return;
+
     const checkScroll = () => setShowScroll(window.scrollY > 300);
     window.addEventListener("scroll", checkScroll);
     checkScroll();
+
     return () => window.removeEventListener("scroll", checkScroll);
   }, [mounted]);
 
-  // fetch config + flow + socials
   useEffect(() => {
     if (!mounted) return;
+
     let alive = true;
+
     (async () => {
-      const [c, f, s] = await Promise.all([fetchChatBotConfig(), fetchChatFlow(), fetchSocialLinks()]);
+      const [c, f, s] = await Promise.all([
+        fetchChatBotConfig(),
+        fetchChatFlow(),
+        fetchSocialLinks(),
+      ]);
+
       if (!alive) return;
+
       setCfg(c);
       if (f && Object.keys(f).length) setFlow(f);
       setSocials(s);
     })();
+
     return () => {
       alive = false;
     };
   }, [mounted]);
+
+  useEffect(() => {
+    setIsChatOpen(false);
+  }, [pathname]);
 
   const allowChatBot = useMemo(() => {
     if (!mounted) return false;
@@ -205,14 +283,20 @@ export default function FloatingButtons() {
 
   const posRight = (cfg?.position || "right") === "right";
 
-  // ✅ Floating rule: only WhatsApp + YouTube
   const youtubeUrl = useMemo(() => {
     const it = socials.find((x) => {
       const n = String(x.name || "").toLowerCase();
       const ic = String(x.icon || "").toLowerCase();
       const u = String(x.url || "").toLowerCase();
-      return n.includes("youtube") || ic.includes("youtube") || u.includes("youtube.com") || u.includes("youtu.be");
+
+      return (
+        n.includes("youtube") ||
+        ic.includes("youtube") ||
+        u.includes("youtube.com") ||
+        u.includes("youtu.be")
+      );
     });
+
     return it?.url || "https://www.youtube.com/@IGNOU7748";
   }, [socials]);
 
@@ -221,24 +305,37 @@ export default function FloatingButtons() {
       const n = String(x.name || "").toLowerCase();
       const ic = String(x.icon || "").toLowerCase();
       const u = String(x.url || "").toLowerCase();
-      return n.includes("whatsapp") || ic.includes("whatsapp") || u.includes("wa.me");
+
+      return (
+        n.includes("whatsapp") ||
+        ic.includes("whatsapp") ||
+        u.includes("wa.me")
+      );
     });
+
     return it?.url || "";
   }, [socials]);
 
-  const scrollToTop = () => window.scrollTo({ top: 0, behavior: "smooth" });
+  const hideOnMobileProductDetail = useMemo(() => {
+    return Boolean(isMobile && isMobileProductDetailPath(pathname || ""));
+  }, [isMobile, pathname]);
+
+  const scrollToTop = () => {
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  };
 
   const openWhatsApp = () => {
-    // ✅ if DB url exists, use it (best control)
     if (whatsappUrl) {
       window.open(whatsappUrl, "_blank", "noopener,noreferrer");
       return;
     }
 
-    // fallback: chatbot config based
     const num = cleanNumber(cfg?.whatsappNumber || "917496865680");
-    const msg = encodeURIComponent(cfg?.whatsappMessage || "Hi! I need help regarding IGNOU materials.");
+    const msg = encodeURIComponent(
+      cfg?.whatsappMessage || "Hi! I need help regarding IGNOU materials."
+    );
     const url = `https://wa.me/${num}?text=${msg}`;
+
     window.open(url, "_blank", "noopener,noreferrer");
   };
 
@@ -247,11 +344,16 @@ export default function FloatingButtons() {
       openWhatsApp();
       return;
     }
+
     if (String(nextId).startsWith("open:")) {
       const path = String(nextId).slice(5) || "/";
-      window.location.href = path;
+
+      setIsChatOpen(false);
+      dispatchNavigationStart(path);
+      router.push(path);
       return;
     }
+
     setHistory((h) => [...h, currentStep]);
     setCurrentStep(nextId);
   };
@@ -259,6 +361,7 @@ export default function FloatingButtons() {
   const handleBack = () => {
     setHistory((h) => {
       if (!h.length) return h;
+
       const prev = h[h.length - 1];
       setCurrentStep(prev);
       return h.slice(0, -1);
@@ -270,103 +373,145 @@ export default function FloatingButtons() {
     setHistory([]);
   };
 
-  const node = flow[currentStep] || flow["root"] || DEFAULT_FLOW["root"];
+  const node = flow[currentStep] || flow.root || DEFAULT_FLOW.root;
+
+  if (!mounted || hideOnMobileProductDetail) {
+    return null;
+  }
 
   return (
     <div className="z-[100] font-sans">
-      {/* 1) Scroll to top */}
       <button
         onClick={scrollToTop}
-        className={`fixed bottom-4 left-4 md:bottom-6 md:left-6 z-40 bg-sky-500 text-white p-2 md:p-3 rounded-full shadow-lg transition-all duration-300 transform hover:scale-110 active:scale-90 hover:bg-sky-600 ${
+        className={`fixed bottom-4 left-4 z-40 rounded-full bg-sky-500 p-2 text-white shadow-lg transition-all duration-300 hover:scale-110 hover:bg-sky-600 active:scale-90 md:bottom-6 md:left-6 md:p-3 ${
           showScroll ? "translate-y-0 opacity-100" : "translate-y-20 opacity-0"
         }`}
         title="Go to Top"
+        aria-label="Go to Top"
+        type="button"
       >
-        <ArrowUp className="w-6 h-6 md:w-7 md:h-7" strokeWidth={3} />
+        <ArrowUp className="h-6 w-6 md:h-7 md:w-7" strokeWidth={3} />
       </button>
 
-      {/* 2) Right side buttons */}
       <div
-        className={`fixed bottom-4 ${posRight ? "right-4 md:right-6" : "left-4 md:left-6"} md:bottom-6 flex flex-col items-end gap-3 md:gap-4 z-50`}
+        className={`fixed bottom-4 z-50 flex flex-col items-end gap-3 md:bottom-6 md:gap-4 ${
+          posRight ? "right-4 md:right-6" : "left-4 md:left-6"
+        }`}
       >
-        {/* YouTube (DB driven) */}
         <a
           href={youtubeUrl}
           target="_blank"
           rel="noopener noreferrer"
-          className="bg-[#FF0000] w-10 h-10 md:w-14 md:h-14 rounded-full flex items-center justify-center text-white shadow-md transition-all duration-300 hover:scale-110 active:scale-90 hover:shadow-xl hover:shadow-red-500/30"
+          className="flex h-10 w-10 items-center justify-center rounded-full bg-[#FF0000] text-white shadow-md transition-all duration-300 hover:scale-110 hover:shadow-xl hover:shadow-red-500/30 active:scale-90 md:h-14 md:w-14"
           title="Watch on YouTube"
+          aria-label="Watch on YouTube"
         >
-          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white" className="w-5 h-5 md:w-7 md:h-7">
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            viewBox="0 0 24 24"
+            fill="white"
+            className="h-5 w-5 md:h-7 md:w-7"
+          >
             <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.008 3.008 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z" />
           </svg>
         </a>
 
-        {/* WhatsApp (DB driven) */}
         <button
           onClick={openWhatsApp}
-          className="bg-[#25D366] w-10 h-10 md:w-14 md:h-14 rounded-full flex items-center justify-center text-white shadow-md transition-all duration-300 hover:scale-110 active:scale-90 hover:shadow-xl hover:shadow-green-500/30"
+          className="flex h-10 w-10 items-center justify-center rounded-full bg-[#25D366] text-white shadow-md transition-all duration-300 hover:scale-110 hover:shadow-xl hover:shadow-green-500/30 active:scale-90 md:h-14 md:w-14"
           title="Chat on WhatsApp"
+          aria-label="Chat on WhatsApp"
+          type="button"
         >
-          <svg viewBox="0 0 24 24" fill="white" className="w-5 h-5 md:w-8 md:h-8">
+          <svg
+            viewBox="0 0 24 24"
+            fill="white"
+            className="h-5 w-5 md:h-8 md:w-8"
+          >
             <path d="M12.031 6.172c-3.181 0-5.767 2.586-5.768 5.766-.001 1.298.38 2.27 1.019 3.287l-.711 2.592 2.654-.696c1.001.574 2.146.877 3.303.877 3.18 0 5.767-2.587 5.768-5.766.001-3.181-2.584-5.761-5.765-5.761zm6.927 5.766c-.001 3.82-3.107 6.925-6.927 6.925-1.129 0-2.235-.291-3.21-.842l-3.593.942.958-3.504c-.628-1.04-1.002-2.213-1.002-3.521-.001-3.819 3.106-6.925 6.927-6.925 3.82 0 6.926 3.106 6.927 6.925z" />
             <path d="M15.42 13.064c-.177-.089-1.047-.516-1.209-.576-.161-.059-.279-.089-.396.089-.118.178-.456.576-.559.694-.102.119-.205.133-.382.045-.178-.089-.751-.277-1.429-.882-.53-.473-.888-1.057-.992-1.235-.104-.177-.011-.273.078-.362.08-.08.178-.207.266-.31.089-.104.119-.178.178-.297.059-.118.029-.222-.015-.31-.044-.089-.396-.955-.542-1.309-.143-.343-.288-.296-.396-.301-.102-.005-.219-.005-.337-.005-.118 0-.31.044-.472.222-.162.178-.62.606-.62 1.478 0 .872.635 1.714.723 1.833.089.119 1.251 1.91 3.03 2.678 1.054.455 1.47.532 1.996.448.586-.093 1.047-.428 1.195-.841.148-.414.148-.769.104-.841-.044-.074-.162-.119-.339-.207z" />
           </svg>
         </button>
 
-        {/* Ask Navi (unchanged behavior) */}
         {allowChatBot ? (
           <button
             onClick={() => setIsChatOpen((v) => !v)}
-            className="w-12 h-12 md:w-16 md:h-16 rounded-full flex items-center justify-center text-white shadow-lg transition-all duration-300 hover:scale-110 active:scale-90 hover:shadow-xl border-2 border-white ring-2 ring-blue-100"
+            className="flex h-12 w-12 items-center justify-center rounded-full border-2 border-white text-white shadow-lg ring-2 ring-blue-100 transition-all duration-300 hover:scale-110 hover:shadow-xl active:scale-90 md:h-16 md:w-16"
             style={{ backgroundColor: cfg?.themeColor || "#3B82F6" }}
             title="Ask Navi"
+            aria-label="Ask Navi"
+            type="button"
           >
             {isChatOpen ? (
-              <X className="w-6 h-6 md:w-8 md:h-8" strokeWidth={2.5} />
+              <X className="h-6 w-6 md:h-8 md:w-8" strokeWidth={2.5} />
             ) : (
-              <span className="font-extrabold text-sm md:text-xl tracking-wide">Ask</span>
+              <span className="text-sm font-extrabold tracking-wide md:text-xl">
+                Ask
+              </span>
             )}
           </button>
         ) : null}
       </div>
 
-      {/* Chatbot UI (unchanged) */}
       {allowChatBot && isChatOpen ? (
         <div
-          className={`fixed bottom-20 md:bottom-28 ${posRight ? "right-4 md:right-6" : "left-4 md:left-6"} w-[90vw] md:w-[350px] bg-white rounded-2xl shadow-2xl border border-gray-100 overflow-hidden z-[60] flex flex-col max-h-[60vh] md:max-h-[500px]`}
+          className={`fixed z-[60] flex max-h-[60vh] w-[90vw] flex-col overflow-hidden rounded-2xl border border-gray-100 bg-white shadow-2xl md:max-h-[500px] md:w-[350px] ${
+            posRight ? "right-4 md:right-6" : "left-4 md:left-6"
+          } bottom-20 md:bottom-28`}
         >
-          <div className="p-4 text-white flex justify-between items-center shadow-md" style={{ backgroundColor: cfg?.themeColor || "#3B82F6" }}>
+          <div
+            className="flex items-center justify-between p-4 text-white shadow-md"
+            style={{ backgroundColor: cfg?.themeColor || "#3B82F6" }}
+          >
             <div className="flex items-center gap-2">
-              <div className="bg-white/20 p-1.5 rounded-full">
+              <div className="rounded-full bg-white/20 p-1.5">
                 <MessageCircle size={20} fill="white" />
               </div>
               <div>
-                <h3 className="font-bold text-sm">Ask Navi</h3>
-                <p className="text-[10px] text-white/80 flex items-center gap-1">
-                  <span className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse"></span> Online
+                <h3 className="text-sm font-bold">Ask Navi</h3>
+                <p className="flex items-center gap-1 text-[10px] text-white/80">
+                  <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-green-400" />
+                  Online
                 </p>
               </div>
             </div>
 
             <div className="flex gap-2">
               {history.length > 0 ? (
-                <button onClick={handleBack} className="p-1 hover:bg-white/20 rounded" title="Back">
+                <button
+                  onClick={handleBack}
+                  className="rounded p-1 hover:bg-white/20"
+                  title="Back"
+                  aria-label="Back"
+                  type="button"
+                >
                   <ChevronLeft size={18} />
                 </button>
               ) : null}
-              <button onClick={() => setIsChatOpen(false)} className="p-1 hover:bg-white/20 rounded" title="Close">
+
+              <button
+                onClick={() => setIsChatOpen(false)}
+                className="rounded p-1 hover:bg-white/20"
+                title="Close"
+                aria-label="Close"
+                type="button"
+              >
                 <X size={18} />
               </button>
             </div>
           </div>
 
-          <div className="flex-1 bg-gray-50 p-4 overflow-y-auto min-h-[250px] md:min-h-[300px]">
-            <div className="flex gap-3 mb-4">
-              <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center flex-shrink-0 mt-1">
-                <MessageCircle size={18} className="text-blue-600" fill="currentColor" />
+          <div className="min-h-[250px] flex-1 overflow-y-auto bg-gray-50 p-4 md:min-h-[300px]">
+            <div className="mb-4 flex gap-3">
+              <div className="mt-1 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-blue-100">
+                <MessageCircle
+                  size={18}
+                  className="text-blue-600"
+                  fill="currentColor"
+                />
               </div>
-              <div className="bg-white p-3 rounded-2xl rounded-tl-none shadow-sm border border-gray-100 text-sm text-slate-700 leading-relaxed">
+
+              <div className="rounded-2xl rounded-tl-none border border-gray-100 bg-white p-3 text-sm leading-relaxed text-slate-700 shadow-sm">
                 {node?.text || "Hi!"}
               </div>
             </div>
@@ -376,24 +521,32 @@ export default function FloatingButtons() {
                 <button
                   key={index}
                   onClick={() => handleOptionClick(option.nextId)}
-                  className="bg-blue-600 hover:bg-blue-700 active:bg-blue-800 text-white text-xs md:text-sm py-2.5 px-4 rounded-xl text-left transition-all shadow-sm active:scale-95 flex justify-between items-center group"
+                  className="group flex items-center justify-between rounded-xl bg-blue-600 px-4 py-2.5 text-left text-xs text-white shadow-sm transition-all hover:bg-blue-700 active:scale-95 active:bg-blue-800 md:text-sm"
+                  type="button"
                 >
                   {option.label}
-                  <Send size={12} className="opacity-0 group-hover:opacity-100 transition-opacity" />
+                  <Send
+                    size={12}
+                    className="opacity-0 transition-opacity group-hover:opacity-100"
+                  />
                 </button>
               ))}
             </div>
 
             {currentStep !== "root" ? (
-              <div className="text-center mt-6">
-                <button onClick={resetChat} className="text-xs text-slate-400 hover:text-blue-600 underline">
+              <div className="mt-6 text-center">
+                <button
+                  onClick={resetChat}
+                  className="text-xs text-slate-400 underline hover:text-blue-600"
+                  type="button"
+                >
                   Start Over
                 </button>
               </div>
             ) : null}
           </div>
 
-          <div className="bg-white p-3 border-t border-gray-100 text-center text-[10px] text-slate-400">
+          <div className="border-t border-gray-100 bg-white p-3 text-center text-[10px] text-slate-400">
             Powered by IGNOU Students Portal AI
           </div>
         </div>

@@ -23,26 +23,93 @@ type SocialItem = {
   sortOrder: number;
 };
 
-function safeStr(x: any) {
-  return String(x ?? "").trim();
+function safeStr(value: unknown) {
+  return String(value ?? "").trim();
 }
 
-function iconFor(key: string) {
+function socialType(key: string) {
   const k = safeStr(key).toLowerCase();
-  if (k.includes("facebook")) return Facebook;
-  if (k.includes("instagram")) return Instagram;
-  if (k.includes("twitter") || k.includes("x")) return Twitter;
-  if (k.includes("youtube")) return Youtube;
-  if (k.includes("telegram")) return Send;
-  if (k.includes("whatsapp") || k.includes("wa.me")) return Send;
-  return Send;
+
+  if (k.includes("facebook")) return "facebook";
+  if (k.includes("instagram")) return "instagram";
+  if (k.includes("twitter") || k.includes("x")) return "twitter";
+  if (k.includes("youtube")) return "youtube";
+  if (k.includes("telegram")) return "telegram";
+  if (k.includes("whatsapp") || k.includes("wa.me")) return "whatsapp";
+
+  return "default";
+}
+
+function SocialIcon({
+  type,
+  size = 18,
+  className = "",
+}: {
+  type: string;
+  size?: number;
+  className?: string;
+}) {
+  if (type === "facebook") return <Facebook size={size} className={className} />;
+  if (type === "instagram") return <Instagram size={size} className={className} />;
+  if (type === "twitter") return <Twitter size={size} className={className} />;
+  if (type === "youtube") return <Youtube size={size} className={className} />;
+  if (type === "telegram") return <Send size={size} className={className} />;
+
+  if (type === "whatsapp") {
+    return (
+      <svg
+        viewBox="0 0 24 24"
+        width={size}
+        height={size}
+        aria-hidden="true"
+        className={className}
+        fill="currentColor"
+      >
+        <path d="M20.52 3.48A11.86 11.86 0 0 0 12.06 0C5.52 0 .18 5.34.18 11.88c0 2.1.54 4.14 1.62 5.94L0 24l6.42-1.68a11.8 11.8 0 0 0 5.64 1.44h.06c6.54 0 11.88-5.34 11.88-11.88 0-3.18-1.26-6.18-3.48-8.4ZM12.12 21.72h-.06a9.8 9.8 0 0 1-4.98-1.38l-.36-.18-3.78.96 1.02-3.66-.24-.36a9.82 9.82 0 0 1-1.56-5.22c0-5.46 4.44-9.9 9.9-9.9 2.64 0 5.1 1.02 6.96 2.88a9.78 9.78 0 0 1 2.88 6.96c0 5.46-4.44 9.9-9.9 9.9Zm5.4-7.38c-.3-.15-1.74-.84-2.04-.96-.24-.09-.42-.15-.6.15-.18.3-.69.96-.84 1.14-.15.18-.33.21-.63.06-.3-.15-1.26-.45-2.4-1.44a8.93 8.93 0 0 1-1.65-2.04c-.18-.3-.03-.45.12-.6.12-.12.3-.33.45-.48.15-.18.21-.3.3-.48.09-.18.03-.36-.03-.51-.06-.15-.6-1.47-.84-2.01-.21-.54-.45-.45-.6-.45h-.51c-.18 0-.45.06-.69.33-.24.27-.9.9-.9 2.19 0 1.29.93 2.52 1.05 2.7.15.18 1.83 2.79 4.41 3.9.63.27 1.11.42 1.47.54.63.18 1.2.15 1.65.09.51-.09 1.53-.63 1.74-1.23.21-.6.21-1.11.15-1.23-.06-.09-.24-.15-.54-.3Z" />
+      </svg>
+    );
+  }
+
+  return <Send size={size} className={className} />;
+}
+
+function socialButtonClass(type: string) {
+  if (type === "instagram") {
+    return "border-fuchsia-300/60 bg-[radial-gradient(circle_at_30%_30%,rgba(255,255,255,0.35),transparent_35%),linear-gradient(135deg,rgba(244,114,182,0.22),rgba(251,146,60,0.2))] text-pink-200 hover:text-white hover:border-fuchsia-300 hover:shadow-[0_12px_28px_rgba(232,121,249,0.28)]";
+  }
+
+  if (type === "youtube") {
+    return "border-red-300/50 bg-[radial-gradient(circle_at_30%_30%,rgba(255,255,255,0.28),transparent_35%),linear-gradient(135deg,rgba(239,68,68,0.22),rgba(248,113,113,0.14))] text-red-200 hover:text-white hover:border-red-300 hover:shadow-[0_12px_28px_rgba(239,68,68,0.28)]";
+  }
+
+  if (type === "facebook") {
+    return "border-blue-300/50 bg-[radial-gradient(circle_at_30%_30%,rgba(255,255,255,0.28),transparent_35%),linear-gradient(135deg,rgba(59,130,246,0.22),rgba(96,165,250,0.14))] text-blue-200 hover:text-white hover:border-blue-300 hover:shadow-[0_12px_28px_rgba(59,130,246,0.28)]";
+  }
+
+  if (type === "twitter") {
+    return "border-slate-300/50 bg-[radial-gradient(circle_at_30%_30%,rgba(255,255,255,0.22),transparent_35%),linear-gradient(135deg,rgba(148,163,184,0.18),rgba(71,85,105,0.16))] text-slate-100 hover:text-white hover:border-slate-200 hover:shadow-[0_12px_28px_rgba(148,163,184,0.22)]";
+  }
+
+  if (type === "telegram") {
+    return "border-cyan-300/50 bg-[radial-gradient(circle_at_30%_30%,rgba(255,255,255,0.28),transparent_35%),linear-gradient(135deg,rgba(34,211,238,0.2),rgba(56,189,248,0.14))] text-cyan-200 hover:text-white hover:border-cyan-300 hover:shadow-[0_12px_28px_rgba(34,211,238,0.24)]";
+  }
+
+  if (type === "whatsapp") {
+    return "border-emerald-300/50 bg-[radial-gradient(circle_at_30%_30%,rgba(255,255,255,0.32),transparent_35%),linear-gradient(135deg,rgba(34,197,94,0.24),rgba(74,222,128,0.14))] text-emerald-200 hover:text-white hover:border-emerald-300 hover:shadow-[0_12px_28px_rgba(34,197,94,0.28)]";
+  }
+
+  return "border-white/15 bg-white/5 text-slate-200 hover:text-white hover:border-white/25 hover:bg-white/10 hover:shadow-[0_12px_28px_rgba(148,163,184,0.16)]";
 }
 
 async function fetchSocialLinks(): Promise<SocialItem[]> {
   try {
-    const res = await fetch("/api/site-settings/social-links", { cache: "no-store" });
+    const res = await fetch("/api/site-settings/social-links", {
+      cache: "no-store",
+    });
     const data = await res.json();
+
     if (!data?.ok) return [];
+
     const items = Array.isArray(data.items) ? data.items : [];
     return items.filter((x: any) => x && x.isActive);
   } catch {
@@ -55,25 +122,30 @@ export default function Footer() {
 
   useEffect(() => {
     let alive = true;
+
     (async () => {
       const list = await fetchSocialLinks();
       if (!alive) return;
       setSocials(list);
     })();
+
     return () => {
       alive = false;
     };
   }, []);
 
-  const footerSocials = useMemo(() => socials.slice(0, 8), [socials]);
+  const footerSocials = useMemo(() => {
+    return [...socials]
+      .sort((a, b) => Number(a.sortOrder || 0) - Number(b.sortOrder || 0))
+      .slice(0, 8);
+  }, [socials]);
 
   return (
-    <footer className="bg-gradient-to-b from-slate-950 via-[#0d1730] to-slate-950 text-slate-300 font-sans">
-      {/* Top Section: Newsletter */}
+    <footer className="bg-gradient-to-b from-slate-950 via-[#0d1730] to-slate-950 font-sans text-slate-300">
       <div className="border-b border-white/10 bg-white/[0.02] backdrop-blur-sm">
-        <div className="max-w-[1600px] mx-auto px-4 py-8 flex flex-col md:flex-row items-center justify-between gap-4">
+        <div className="mx-auto flex max-w-[1600px] flex-col items-center justify-between gap-4 px-4 py-8 md:flex-row">
           <div className="text-center md:text-left">
-            <h3 className="text-white text-lg font-bold tracking-tight">
+            <h3 className="text-lg font-bold tracking-tight text-white">
               Join our IGNOU Community
             </h3>
             <p className="text-sm text-slate-400">
@@ -81,60 +153,70 @@ export default function Footer() {
             </p>
           </div>
 
-          <div className="flex w-full md:w-auto gap-2">
+          <div className="flex w-full gap-2 md:w-auto">
             <input
               type="email"
               placeholder="Enter your email"
-              className="bg-white/5 border border-white/10 text-white px-4 py-2.5 rounded-lg outline-none focus:border-blue-500 focus:bg-white/[0.07] w-full md:w-64 transition"
+              className="w-full rounded-lg border border-white/10 bg-white/5 px-4 py-2.5 text-white outline-none transition placeholder:text-slate-500 focus:border-blue-500 focus:bg-white/[0.07] md:w-64"
             />
-            <button className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2.5 rounded-lg font-bold transition flex items-center gap-2 shadow-lg shadow-blue-950/30">
+            <button
+              type="button"
+              className="flex items-center gap-2 rounded-lg bg-blue-600 px-6 py-2.5 font-bold text-white shadow-lg shadow-blue-950/30 transition hover:bg-blue-700"
+            >
               Subscribe <Send size={16} />
             </button>
           </div>
         </div>
       </div>
 
-      {/* Main Footer Content */}
-      <div className="max-w-[1600px] mx-auto px-4 py-16">
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-12">
-          {/* Column 1: About & Social */}
+      <div className="mx-auto max-w-[1600px] px-4 py-16">
+        <div className="grid grid-cols-1 gap-12 md:grid-cols-2 lg:grid-cols-4">
           <div className="space-y-6">
             <div className="inline-flex flex-col">
-              <h2 className="text-white text-2xl md:text-[28px] font-extrabold tracking-[0.02em] leading-none">
+              <h2 className="text-2xl font-extrabold leading-none tracking-[0.02em] text-white md:text-[28px]">
                 I <span className="text-blue-400">Students</span> Portal
               </h2>
               <span className="mt-2 h-[3px] w-16 rounded-full bg-gradient-to-r from-blue-500 to-cyan-400" />
             </div>
 
-            <p className="text-sm leading-relaxed text-slate-400 max-w-sm">
+            <p className="max-w-sm text-sm leading-relaxed text-slate-400">
               Your one-stop destination for IGNOU solved assignments, handwritten
               notes, and projects help. We ensure 90+ marks quality content created
               by toppers.
             </p>
 
-            <div className="flex gap-3 pt-2 flex-wrap">
+            <div className="flex flex-wrap gap-3 pt-2">
               {footerSocials.length === 0 ? (
                 <a
                   href="#"
-                  className="bg-white/5 border border-white/10 p-2.5 rounded-full opacity-60 cursor-not-allowed"
-                  onClick={(e) => e.preventDefault()}
                   title="Social links not set"
+                  aria-label="Social links not set"
+                  onClick={(e) => e.preventDefault()}
+                  className="cursor-not-allowed rounded-full border border-white/10 bg-white/5 p-2.5 opacity-60"
                 >
                   <Send size={18} />
                 </a>
               ) : (
                 footerSocials.map((it) => {
-                  const Icon = iconFor(it.icon || it.name);
+                  const type = socialType(it.icon || it.name);
+
                   return (
                     <a
                       key={it._id}
                       href={it.url}
                       target="_blank"
                       rel="noopener noreferrer"
-                      className="bg-white/5 border border-white/10 p-2.5 rounded-full hover:bg-white/10 hover:text-white hover:border-white/20 transition"
                       title={it.name}
+                      aria-label={it.name}
+                      className={`group rounded-full border p-2.5 backdrop-blur-sm transition-all duration-200 hover:-translate-y-[2px] ${socialButtonClass(
+                        type
+                      )}`}
                     >
-                      <Icon size={18} />
+                      <SocialIcon
+                        type={type}
+                        size={18}
+                        className="transition-transform duration-200 group-hover:scale-110"
+                      />
                     </a>
                   );
                 })
@@ -142,80 +224,86 @@ export default function Footer() {
             </div>
           </div>
 
-          {/* Column 2: Quick Links */}
           <div>
-            <h3 className="text-white font-bold text-lg mb-6 relative inline-block tracking-tight">
+            <h3 className="relative mb-6 inline-block text-lg font-bold tracking-tight text-white">
               Quick Links
-              <span className="absolute bottom-0 left-0 w-1/2 h-0.5 bg-blue-500 -mb-2 rounded-full"></span>
+              <span className="absolute bottom-0 left-0 -mb-2 h-0.5 w-1/2 rounded-full bg-blue-500" />
             </h3>
+
             <ul className="space-y-3 text-sm">
               <li>
-                <Link href="/" className="hover:text-blue-400 flex items-center gap-2 transition">
+                <Link href="/" className="flex items-center gap-2 transition hover:text-blue-400">
                   <ChevronRight size={14} /> Home
                 </Link>
               </li>
               <li>
-                <Link href="/about" className="hover:text-blue-400 flex items-center gap-2 transition">
+                <Link href="/about" className="flex items-center gap-2 transition hover:text-blue-400">
                   <ChevronRight size={14} /> About Us
                 </Link>
               </li>
               <li>
-                <Link href="/blog" className="hover:text-blue-400 flex items-center gap-2 transition">
+                <Link href="/blog" className="flex items-center gap-2 transition hover:text-blue-400">
                   <ChevronRight size={14} /> Blog / Updates
                 </Link>
               </li>
               <li>
-                <Link href="/contact" className="hover:text-blue-400 flex items-center gap-2 transition">
+                <Link href="/contact" className="flex items-center gap-2 transition hover:text-blue-400">
                   <ChevronRight size={14} /> Contact Support
                 </Link>
               </li>
               <li>
-                <Link href="/solved-assignments" className="hover:text-blue-400 flex items-center gap-2 transition">
+                <Link
+                  href="/solved-assignments"
+                  className="flex items-center gap-2 transition hover:text-blue-400"
+                >
                   <ChevronRight size={14} /> Buy Assignments
                 </Link>
               </li>
             </ul>
           </div>
 
-          {/* Column 3: Policies */}
           <div>
-            <h3 className="text-white font-bold text-lg mb-6 relative inline-block tracking-tight">
+            <h3 className="relative mb-6 inline-block text-lg font-bold tracking-tight text-white">
               Policy Info
-              <span className="absolute bottom-0 left-0 w-1/2 h-0.5 bg-blue-500 -mb-2 rounded-full"></span>
+              <span className="absolute bottom-0 left-0 -mb-2 h-0.5 w-1/2 rounded-full bg-blue-500" />
             </h3>
+
             <ul className="space-y-3 text-sm">
               <li>
-                <Link href="/privacy" className="hover:text-blue-400 flex items-center gap-2 transition">
+                <Link href="/privacy" className="flex items-center gap-2 transition hover:text-blue-400">
                   <ChevronRight size={14} /> Privacy Policy
                 </Link>
               </li>
               <li>
-                <Link href="/terms" className="hover:text-blue-400 flex items-center gap-2 transition">
+                <Link href="/terms" className="flex items-center gap-2 transition hover:text-blue-400">
                   <ChevronRight size={14} /> Terms & Conditions
                 </Link>
               </li>
               <li>
-                <Link href="/refund-policy" className="hover:text-blue-400 flex items-center gap-2 transition">
+                <Link
+                  href="/refund-policy"
+                  className="flex items-center gap-2 transition hover:text-blue-400"
+                >
                   <ChevronRight size={14} /> Refund Policy
                 </Link>
               </li>
               <li>
-                <Link href="/faq" className="hover:text-blue-400 flex items-center gap-2 transition">
+                <Link href="/faq" className="flex items-center gap-2 transition hover:text-blue-400">
                   <ChevronRight size={14} /> Help & FAQs
                 </Link>
               </li>
             </ul>
           </div>
 
-          {/* Column 4: Contact Info */}
           <div>
-            <h3 className="text-white font-bold text-lg mb-6 relative inline-block tracking-tight">
+            <h3 className="relative mb-6 inline-block text-lg font-bold tracking-tight text-white">
               Get In Touch
-              <span className="absolute bottom-0 left-0 w-1/2 h-0.5 bg-blue-500 -mb-2 rounded-full"></span>
+              <span className="absolute bottom-0 left-0 -mb-2 h-0.5 w-1/2 rounded-full bg-blue-500" />
             </h3>
+
             <ul className="space-y-4 text-sm">
               <li className="flex items-start gap-3">
-                <MapPin className="text-blue-400 mt-1 flex-shrink-0" size={18} />
+                <MapPin className="mt-1 flex-shrink-0 text-blue-400" size={18} />
                 <span>
                   Old Police Colony, Hansi Road, Near PS Sadar,
                   <br />
@@ -223,11 +311,11 @@ export default function Footer() {
                 </span>
               </li>
               <li className="flex items-center gap-3">
-                <Phone className="text-blue-400 flex-shrink-0" size={18} />
+                <Phone className="flex-shrink-0 text-blue-400" size={18} />
                 <span>+91 7496865680</span>
               </li>
               <li className="flex items-center gap-3">
-                <Mail className="text-blue-400 flex-shrink-0" size={18} />
+                <Mail className="flex-shrink-0 text-blue-400" size={18} />
                 <span>support@istudentsportal.com</span>
               </li>
             </ul>
@@ -235,20 +323,28 @@ export default function Footer() {
         </div>
       </div>
 
-      {/* Bottom Bar */}
       <div className="border-t border-white/10 bg-black/20 py-6">
-        <div className="max-w-[1600px] mx-auto px-4 flex flex-col md:flex-row items-center justify-between gap-4 text-xs text-slate-500">
-          <p>&copy; {new Date().getFullYear()} IGNOU Students Portal. All Rights Reserved.</p>
+        <div className="mx-auto flex max-w-[1600px] flex-col items-center justify-between gap-4 px-4 text-xs text-slate-500 md:flex-row">
+          <p>
+            &copy; {new Date().getFullYear()} IGNOU Students Portal. All Rights Reserved.
+          </p>
+
           <div className="flex items-center gap-2">
             <span className="font-bold text-slate-400">We Accept:</span>
-            <div className="flex gap-1 opacity-80 grayscale hover:grayscale-0 transition">
-              <div className="bg-white text-slate-900 px-2 py-1 rounded font-bold text-[10px]">UPI</div>
-              <div className="bg-white text-slate-900 px-2 py-1 rounded font-bold text-[10px]">VISA</div>
-              <div className="bg-white text-slate-900 px-2 py-1 rounded font-bold text-[10px]">RuPay</div>
+            <div className="flex gap-1 opacity-80 transition hover:grayscale-0">
+              <div className="rounded bg-white px-2 py-1 text-[10px] font-bold text-slate-900">
+                UPI
+              </div>
+              <div className="rounded bg-white px-2 py-1 text-[10px] font-bold text-slate-900">
+                VISA
+              </div>
+              <div className="rounded bg-white px-2 py-1 text-[10px] font-bold text-slate-900">
+                RuPay
+              </div>
             </div>
           </div>
         </div>
       </div>
     </footer>
   );
-} 
+}

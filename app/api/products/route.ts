@@ -1,8 +1,11 @@
 import { NextResponse } from "next/server";
 import dbConnect from "@/lib/db";
 import Product from "@/models/Product";
+import Course from "@/models/Course";
+import Session from "@/models/Session";
 import GlobalToggle from "@/models/GlobalToggle";
 import { attachResolvedOnDemandTimingToProducts } from "@/lib/onDemandTiming";
+import { categoryLabelToSessionSlugCandidates } from "@/lib/productCatalog";
 
 /* =========================
    Basic helpers
@@ -47,6 +50,59 @@ function fileNameOf(urlOrPath: string) {
   return (parts[parts.length - 1] || "").toLowerCase();
 }
 
+function normalizeCourseCodeForCompare(input: any) {
+  return safeStr(input).replace(/\s+/g, " ").toUpperCase();
+}
+
+function normalizeLanguageValue(input: any) {
+  return safeStr(input).replace(/\s+/g, " ").trim();
+}
+
+function sortAlphaNumeric(a: string, b: string) {
+  return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
+}
+
+function uniqueByKey<T>(items: T[], keyFn: (item: T) => string) {
+  const seen = new Set<string>();
+  const out: T[] = [];
+  for (const item of items) {
+    const key = keyFn(item);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push(item);
+  }
+  return out;
+}
+
+function sortLanguages(values: string[]) {
+  const preferredOrder = [
+    "English",
+    "Hindi",
+    "Urdu",
+    "Sanskrit",
+    "Bengali",
+    "Punjabi",
+    "Marathi",
+    "Gujarati",
+    "Tamil",
+    "Telugu",
+    "Kannada",
+    "Malayalam",
+    "Odia",
+    "Assamese",
+  ];
+
+  const rank = new Map<string, number>();
+  preferredOrder.forEach((v, i) => rank.set(v.toLowerCase(), i));
+
+  return [...values].sort((a, b) => {
+    const ra = rank.has(a.toLowerCase()) ? rank.get(a.toLowerCase())! : 999;
+    const rb = rank.has(b.toLowerCase()) ? rank.get(b.toLowerCase())! : 999;
+    if (ra !== rb) return ra - rb;
+    return sortAlphaNumeric(a, b);
+  });
+}
+
 /* =========================
    Image normalization
    ========================= */
@@ -88,7 +144,7 @@ function normalizeImagesToUrls(images: any) {
     .filter(Boolean);
 
   const urls = Array.from(new Set([...strings, ...objects])).sort((a, b) =>
-    fileNameOf(a).localeCompare(b, undefined, { numeric: true })
+    fileNameOf(a).localeCompare(fileNameOf(b), undefined, { numeric: true })
   );
 
   const thumbUrl = urls[0] || "";
@@ -197,6 +253,117 @@ function resolveAvailability(rawAvailability: string, onDemandSalesEnabled: bool
   if (a === "available" || a === "in_stock" || a === "instock" || a === "") return "available";
 
   return "available";
+}
+
+/* =========================
+   Facet helpers
+   ========================= */
+
+async function buildCategoryAwareFacets(categories: string[]) {
+  const baseForFacets: any = {
+    isActive: true,
+    $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+  };
+
+  if (categories.length) {
+    baseForFacets.category = { $in: categories };
+  }
+
+  const [courseFacetRaw, sessionFacetRaw, languageFacetRaw] = await Promise.all([
+    Product.distinct("courseCodes", baseForFacets),
+    Product.distinct("session", baseForFacets),
+    Product.distinct("language", baseForFacets),
+  ]);
+
+  const courseCodes = uniqueStrings(
+    (courseFacetRaw || [])
+      .flat()
+      .map((x: any) => normalizeCourseCodeForCompare(x))
+      .filter(Boolean)
+  ).sort(sortAlphaNumeric);
+
+  const productSessions = uniqueStrings(
+    (sessionFacetRaw || []).map((x: any) => safeStr(x)).filter(Boolean)
+  ).sort((a, b) => sortAlphaNumeric(b, a));
+
+  const languages = sortLanguages(
+    uniqueStrings(
+      (languageFacetRaw || []).map((x: any) => normalizeLanguageValue(x)).filter(Boolean)
+    )
+  );
+
+  let coursesDetailed: Array<{ code: string; title: string }> = [];
+  if (courseCodes.length) {
+    const courseDocs: any[] = await Course.find({
+      isActive: true,
+      code: { $in: courseCodes },
+    })
+      .select("code title")
+      .lean();
+
+    const courseTitleMap = new Map<string, string>();
+    for (const doc of courseDocs || []) {
+      const code = normalizeCourseCodeForCompare(doc?.code);
+      if (!code) continue;
+      if (!courseTitleMap.has(code)) {
+        courseTitleMap.set(code, safeStr(doc?.title));
+      }
+    }
+
+    coursesDetailed = courseCodes.map((code) => ({
+      code,
+      title: courseTitleMap.get(code) || "",
+    }));
+  }
+
+  let sessionsDetailed: Array<{
+    name: string;
+    slug: string;
+    categories: string[];
+    sortOrder: number;
+  }> = [];
+
+  if (categories.length) {
+    const sessionCategoryCandidates = uniqueStrings(
+      categories
+        .flatMap((cat) => categoryLabelToSessionSlugCandidates(cat))
+        .map((x) => safeStr(x))
+        .filter(Boolean)
+    );
+
+    const sessionDocs: any[] = await Session.find({
+      isActive: true,
+      categories: { $in: sessionCategoryCandidates },
+    })
+      .select("name slug categories sortOrder")
+      .sort({ sortOrder: 1, name: 1, _id: 1 })
+      .lean();
+
+    sessionsDetailed = uniqueByKey(
+      (sessionDocs || []).map((doc: any) => ({
+        name: safeStr(doc?.name),
+        slug: safeStr(doc?.slug),
+        categories: Array.isArray(doc?.categories)
+          ? doc.categories.map((x: any) => safeStr(x)).filter(Boolean)
+          : [],
+        sortOrder: Number(doc?.sortOrder || 0),
+      })),
+      (item) => item.name
+    ).filter((item) => item.name);
+  }
+
+  const sessions =
+    sessionsDetailed.length > 0
+      ? uniqueStrings(sessionsDetailed.map((x) => x.name))
+      : productSessions;
+
+  return {
+    courses: courseCodes,
+    coursesDetailed,
+    sessions,
+    sessionsDetailed,
+    languages,
+  };
 }
 
 /* =========================
@@ -460,35 +627,21 @@ export async function GET(req: Request) {
     thumbnailUrl: p.thumbnailUrl || "",
   }));
 
-  let coursesFlat: string[] = [];
-  let sessionsClean: string[] = [];
+  let facets = {
+    courses: [] as string[],
+    coursesDetailed: [] as Array<{ code: string; title: string }>,
+    sessions: [] as string[],
+    sessionsDetailed: [] as Array<{
+      name: string;
+      slug: string;
+      categories: string[];
+      sortOrder: number;
+    }>,
+    languages: [] as string[],
+  };
 
   if (includeFacets) {
-    const baseForFacets: any = {
-      isActive: true,
-      $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
-    };
-
-    if (categories.length) baseForFacets.category = { $in: categories };
-
-    const [courseFacetRaw, sessionFacet] = await Promise.all([
-      Product.distinct("courseCodes", baseForFacets),
-      Product.distinct("session", baseForFacets),
-    ]);
-
-    coursesFlat = Array.from(
-      new Set(
-        (courseFacetRaw || [])
-          .flat()
-          .map((x: any) => safeStr(x))
-          .filter(Boolean)
-      )
-    ).sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-
-    sessionsClean = (sessionFacet || [])
-      .map((x: any) => safeStr(x))
-      .filter(Boolean)
-      .sort((a: string, b: string) => a.localeCompare(b, undefined, { numeric: true }));
+    facets = await buildCategoryAwareFacets(categories);
   }
 
   return NextResponse.json(
@@ -501,10 +654,7 @@ export async function GET(req: Request) {
         total,
         totalPages: Math.max(1, Math.ceil(total / limit)),
       },
-      facets: {
-        courses: coursesFlat,
-        sessions: sessionsClean,
-      },
+      facets,
       toggles: {
         onDemandSalesEnabled,
       },
@@ -524,4 +674,4 @@ export async function GET(req: Request) {
       },
     }
   );
-} 
+}

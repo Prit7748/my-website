@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import Image from "next/image";
 import {
@@ -18,6 +18,7 @@ import {
   Wallet,
   BadgePercent,
 } from "lucide-react";
+
 import { useCart } from "../context/CartContext";
 import { getResellerPlanTheme } from "@/lib/reseller";
 
@@ -40,13 +41,33 @@ type MeUser = {
   };
 };
 
-function safeStr(x: any) {
+const NAV_START_EVENT = "isp:navigation-start";
+
+function safeStr(x: unknown) {
   return String(x ?? "").trim();
+}
+
+function normalizeHref(href: string) {
+  const raw = safeStr(href);
+  if (!raw) return "/";
+  if (/^https?:\/\//i.test(raw)) return raw;
+  return raw.startsWith("/") ? raw : `/${raw}`;
+}
+
+function dispatchNavigationStart(href?: string) {
+  if (typeof window === "undefined") return;
+  window.dispatchEvent(
+    new CustomEvent(NAV_START_EVENT, {
+      detail: { href: safeStr(href) || undefined },
+    })
+  );
 }
 
 export default function Navbar() {
   const { cartCount } = useCart();
   const router = useRouter();
+  const pathname = usePathname();
+  const searchParams = useSearchParams();
 
   const [isOpen, setIsOpen] = useState(false);
   const [mobileSubMenu, setMobileSubMenu] = useState<string | null>(null);
@@ -58,6 +79,14 @@ export default function Navbar() {
   const [authLoading, setAuthLoading] = useState(true);
   const [currentUser, setCurrentUser] = useState<MeUser | null>(null);
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
+
+  const [pressedHref, setPressedHref] = useState("");
+  const pressedTimerRef = useRef<number | null>(null);
+
+  const routeKey = useMemo(() => {
+    const qs = searchParams?.toString() || "";
+    return `${pathname || ""}${qs ? `?${qs}` : ""}`;
+  }, [pathname, searchParams]);
 
   const navLinks: NavLink[] = useMemo(
     () => [
@@ -101,6 +130,7 @@ export default function Navbar() {
         setIsUserMenuOpen(false);
       }
     };
+
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, []);
@@ -140,20 +170,74 @@ export default function Navbar() {
     };
   }, []);
 
+  useEffect(() => {
+    if (pressedTimerRef.current) {
+      window.clearTimeout(pressedTimerRef.current);
+      pressedTimerRef.current = null;
+    }
+    setPressedHref("");
+  }, [routeKey]);
+
+  useEffect(() => {
+    return () => {
+      if (pressedTimerRef.current) {
+        window.clearTimeout(pressedTimerRef.current);
+      }
+    };
+  }, []);
+
+  const markPressed = (href: string) => {
+    const normalized = normalizeHref(href);
+    setPressedHref(normalized);
+
+    if (pressedTimerRef.current) {
+      window.clearTimeout(pressedTimerRef.current);
+    }
+
+    pressedTimerRef.current = window.setTimeout(() => {
+      setPressedHref("");
+    }, 1800);
+  };
+
+  const handleInternalNavigate = (
+    href: string,
+    options?: {
+      closeMenu?: boolean;
+      closeUserMenu?: boolean;
+    }
+  ) => {
+    const normalized = normalizeHref(href);
+    markPressed(normalized);
+
+    if (options?.closeMenu) {
+      setIsOpen(false);
+      setMobileSubMenu(null);
+      setMobileNestedMenu(null);
+    }
+
+    if (options?.closeUserMenu) {
+      setIsUserMenuOpen(false);
+    }
+  };
+
   const toggleSubMenu = (name: string) => {
-    setMobileSubMenu(mobileSubMenu === name ? null : name);
+    setMobileSubMenu((prev) => (prev === name ? null : name));
     setMobileNestedMenu(null);
   };
 
   const toggleNestedMenu = (name: string) => {
-    setMobileNestedMenu(mobileNestedMenu === name ? null : name);
+    setMobileNestedMenu((prev) => (prev === name ? null : name));
   };
 
   const runSearch = (qRaw?: string) => {
     const q = (qRaw ?? searchValue).trim();
     if (!q) return;
+
+    const href = `/products?search=${encodeURIComponent(q)}`;
     setIsSearchOpen(false);
-    router.push(`/products?search=${encodeURIComponent(q)}`);
+    markPressed("/products");
+    dispatchNavigationStart(href);
+    router.push(href);
   };
 
   const displayName = useMemo(() => {
@@ -179,7 +263,6 @@ export default function Navbar() {
   const sellerTheme = getResellerPlanTheme(reseller?.planCode);
   const planName = safeStr(reseller?.planName || sellerTheme.label);
   const walletBalance = Number(reseller?.walletBalance || 0);
-
   const isLoggedIn = !!currentUser;
 
   const handleLogout = async () => {
@@ -193,33 +276,45 @@ export default function Navbar() {
     setCurrentUser(null);
     setIsUserMenuOpen(false);
     setIsOpen(false);
+    markPressed("/");
+    dispatchNavigationStart("/");
     router.push("/");
     router.refresh();
   };
 
+  const isPressed = (href: string) => pressedHref === normalizeHref(href);
+
   return (
     <>
-      <nav className="bg-white sticky top-0 z-50 border-b border-gray-100">
-        <div className="max-w-[1600px] mx-auto px-4">
-          <div className="flex items-center h-20">
-            <Link href="/" className="flex items-center gap-2 flex-shrink-0" aria-label="Home">
+      <nav className="sticky top-0 z-50 bg-white/92 backdrop-blur-md shadow-[0_10px_30px_rgba(15,23,42,0.05)] before:pointer-events-none before:absolute before:inset-x-0 before:top-0 before:h-px before:bg-gradient-to-r before:from-transparent before:via-slate-200 before:to-transparent after:pointer-events-none after:absolute after:inset-x-0 after:bottom-0 after:h-px after:bg-gradient-to-r after:from-transparent after:via-blue-100 after:to-transparent">
+        <div className="absolute inset-0 bg-gradient-to-b from-slate-50/70 via-white/80 to-white/95 pointer-events-none" />
+        <div className="relative mx-auto max-w-[1600px] px-4">
+          <div className="flex h-20 items-center">
+            <Link
+              href="/"
+              aria-label="Home"
+              onClick={() => handleInternalNavigate("/")}
+              className={`flex flex-shrink-0 items-center gap-2 transition duration-150 active:scale-[0.985] ${
+                isPressed("/") ? "scale-[0.992] opacity-85" : ""
+              }`}
+            >
               <Image
                 src="/logo.png"
                 alt="IGNOU Students Portal"
                 width={170}
                 height={48}
                 priority
-                className="h-10 md:h-12 w-auto object-contain"
+                className="h-10 w-auto object-contain md:h-12"
               />
             </Link>
 
-            <div className="hidden lg:flex items-center gap-5 xl:gap-8 ml-auto">
+            <div className="ml-auto hidden items-center gap-5 lg:flex xl:gap-8">
               {navLinks.map((link) => (
-                <div key={link.name} className="relative group">
+                <div key={link.name} className="group relative">
                   {link.subLinks ? (
                     <button
                       type="button"
-                      className="text-slate-700 text-[14px] xl:text-[15px] font-semibold hover:text-blue-700 transition flex items-center gap-1 py-6"
+                      className="flex items-center gap-1 py-6 text-[14px] font-semibold text-slate-700 transition hover:text-blue-700 xl:text-[15px]"
                       aria-haspopup="menu"
                     >
                       {link.name}
@@ -228,22 +323,25 @@ export default function Navbar() {
                   ) : (
                     <Link
                       href={link.href || "/"}
-                      className="text-slate-700 text-[14px] xl:text-[15px] font-semibold hover:text-blue-700 transition flex items-center gap-1 py-6"
+                      onClick={() => handleInternalNavigate(link.href || "/")}
+                      className={`flex items-center gap-1 py-6 text-[14px] font-semibold text-slate-700 transition hover:text-blue-700 active:scale-[0.985] xl:text-[15px] ${
+                        isPressed(link.href || "/") ? "opacity-85" : ""
+                      }`}
                     >
                       {link.name}
                     </Link>
                   )}
 
                   {link.subLinks && (
-                    <div className="absolute top-full left-0 w-72 bg-white shadow-2xl border border-gray-100 rounded-2xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all duration-200 translate-y-2 group-hover:translate-y-0 z-50">
+                    <div className="invisible absolute left-0 top-full z-50 w-72 translate-y-2 rounded-2xl border border-gray-100 bg-white opacity-0 shadow-2xl transition-all duration-200 group-hover:visible group-hover:translate-y-0 group-hover:opacity-100">
                       <div className="px-2 py-2">
                         {link.subLinks.map((sub) => (
-                          <div key={sub.name} className="relative group/sub">
+                          <div key={sub.name} className="group/sub relative">
                             <div className="relative">
                               {sub.nestedLinks ? (
                                 <button
                                   type="button"
-                                  className="peer w-full flex justify-between items-center px-3 py-3 text-sm font-semibold text-slate-700 rounded-xl hover:bg-blue-50 hover:text-blue-700 transition"
+                                  className="peer flex w-full items-center justify-between rounded-xl px-3 py-3 text-sm font-semibold text-slate-700 transition hover:bg-blue-50 hover:text-blue-700"
                                 >
                                   {sub.name}
                                   <ChevronRight size={16} className="opacity-70" />
@@ -251,25 +349,34 @@ export default function Navbar() {
                               ) : (
                                 <Link
                                   href={sub.href || "/"}
-                                  className="flex justify-between items-center px-3 py-3 text-sm font-semibold text-slate-700 rounded-xl hover:bg-blue-50 hover:text-blue-700 transition"
+                                  onClick={() => handleInternalNavigate(sub.href || "/")}
+                                  className={`flex items-center justify-between rounded-xl px-3 py-3 text-sm font-semibold text-slate-700 transition hover:bg-blue-50 hover:text-blue-700 active:scale-[0.99] ${
+                                    isPressed(sub.href || "/") ? "bg-blue-50 text-blue-700" : ""
+                                  }`}
                                 >
                                   {sub.name}
                                 </Link>
                               )}
                             </div>
 
-                            {sub.nestedLinks && (
-                              <span className="absolute top-0 left-full w-3 h-full" aria-hidden="true" />
-                            )}
+                            {sub.nestedLinks ? (
+                              <span
+                                className="absolute left-full top-0 h-full w-3"
+                                aria-hidden="true"
+                              />
+                            ) : null}
 
                             {sub.nestedLinks && (
-                              <div className="absolute left-full top-0 ml-2 w-64 bg-white shadow-2xl border border-gray-100 rounded-2xl opacity-0 invisible group-hover/sub:opacity-100 group-hover/sub:visible transition-all duration-200 translate-x-2 group-hover/sub:translate-x-0 z-50 overflow-hidden">
+                              <div className="invisible absolute left-full top-0 z-50 ml-2 w-64 translate-x-2 overflow-hidden rounded-2xl border border-gray-100 bg-white opacity-0 shadow-2xl transition-all duration-200 group-hover/sub:visible group-hover/sub:translate-x-0 group-hover/sub:opacity-100">
                                 <div className="px-2 py-2">
                                   {sub.nestedLinks.map((nested) => (
                                     <Link
                                       key={nested.name}
                                       href={nested.href}
-                                      className="block px-3 py-3 text-sm font-semibold text-slate-700 rounded-xl hover:bg-blue-50 hover:text-blue-700 transition"
+                                      onClick={() => handleInternalNavigate(nested.href)}
+                                      className={`block rounded-xl px-3 py-3 text-sm font-semibold text-slate-700 transition hover:bg-blue-50 hover:text-blue-700 active:scale-[0.99] ${
+                                        isPressed(nested.href) ? "bg-blue-50 text-blue-700" : ""
+                                      }`}
                                     >
                                       {nested.name}
                                     </Link>
@@ -286,20 +393,21 @@ export default function Navbar() {
               ))}
             </div>
 
-            <div className="hidden lg:flex items-center gap-3 ml-6">
+            <div className="ml-6 hidden items-center gap-3 lg:flex">
               <button
                 onClick={() => {
                   setSearchValue("");
                   setIsSearchOpen(true);
                 }}
-                className="inline-flex items-center justify-center h-11 w-11 rounded-full border border-gray-200 bg-white text-slate-700 hover:text-blue-700 hover:border-blue-200 hover:bg-blue-50 transition shadow-sm ring-attn"
+                className="ring-attn inline-flex h-11 w-11 items-center justify-center rounded-full border border-gray-200 bg-white text-slate-700 shadow-sm transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 active:scale-95"
                 aria-label="Search"
+                type="button"
               >
                 <Search size={20} />
               </button>
 
               {authLoading ? (
-                <div className="inline-flex items-center gap-2 h-11 px-5 rounded-full border border-gray-200 bg-white text-slate-400 font-bold shadow-sm">
+                <div className="inline-flex h-11 items-center gap-2 rounded-full border border-gray-200 bg-white px-5 font-bold text-slate-400 shadow-sm">
                   <User size={18} />
                   Loading...
                 </div>
@@ -308,7 +416,7 @@ export default function Navbar() {
                   <button
                     type="button"
                     onClick={() => setIsUserMenuOpen((v) => !v)}
-                    className={`inline-flex items-center gap-2 h-11 px-5 rounded-full border font-bold transition shadow-sm ${
+                    className={`inline-flex h-11 items-center gap-2 rounded-full border px-5 font-bold shadow-sm transition active:scale-[0.985] ${
                       isActiveSeller
                         ? `${sellerTheme.capsuleClass} ${sellerTheme.glowClass}`
                         : "border-blue-100 bg-blue-50 text-blue-800 hover:border-blue-200 hover:bg-blue-100"
@@ -317,7 +425,7 @@ export default function Navbar() {
                     <User size={18} />
                     <span title={displayName}>{shortDisplayName}</span>
                     {isActiveSeller ? (
-                      <span className="hidden xl:inline-flex items-center rounded-full bg-white/80 px-2 py-0.5 text-[10px] font-black">
+                      <span className="hidden rounded-full bg-white/80 px-2 py-0.5 text-[10px] font-black xl:inline-flex">
                         {planName}
                       </span>
                     ) : null}
@@ -325,23 +433,28 @@ export default function Navbar() {
                   </button>
 
                   {isUserMenuOpen && (
-                    <div className="absolute right-0 top-full mt-2 w-72 bg-white border border-gray-100 rounded-2xl shadow-2xl z-[70] overflow-hidden">
+                    <div className="absolute right-0 top-full z-[70] mt-2 w-72 overflow-hidden rounded-2xl border border-gray-100 bg-white shadow-2xl">
                       <div
-                        className={`px-4 py-4 border-b ${
+                        className={`border-b px-4 py-4 ${
                           isActiveSeller
-                            ? "bg-gradient-to-r from-violet-50 via-white to-cyan-50 border-violet-100"
-                            : "bg-blue-50 border-blue-100"
+                            ? "border-violet-100 bg-gradient-to-r from-violet-50 via-white to-cyan-50"
+                            : "border-blue-100 bg-blue-50"
                         }`}
                       >
-                        <div className="text-sm font-extrabold text-slate-900">{displayName}</div>
+                        <div className="text-sm font-extrabold text-slate-900">
+                          {displayName}
+                        </div>
+
                         {currentUser?.email ? (
-                          <div className="text-xs text-slate-500 mt-1">{currentUser.email}</div>
+                          <div className="mt-1 text-xs text-slate-500">
+                            {currentUser.email}
+                          </div>
                         ) : null}
 
                         {isActiveSeller ? (
                           <div className="mt-3 grid grid-cols-2 gap-2">
                             <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
-                              <div className="text-[10px] uppercase font-extrabold tracking-wide text-slate-500">
+                              <div className="text-[10px] font-extrabold uppercase tracking-wide text-slate-500">
                                 Plan
                               </div>
                               <div className="mt-1 text-xs font-extrabold text-slate-900">
@@ -349,7 +462,7 @@ export default function Navbar() {
                               </div>
                             </div>
                             <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
-                              <div className="text-[10px] uppercase font-extrabold tracking-wide text-slate-500">
+                              <div className="text-[10px] font-extrabold uppercase tracking-wide text-slate-500">
                                 Wallet
                               </div>
                               <div className="mt-1 text-xs font-extrabold text-slate-900">
@@ -363,8 +476,12 @@ export default function Navbar() {
                       <div className="p-2">
                         <Link
                           href="/dashboard"
-                          onClick={() => setIsUserMenuOpen(false)}
-                          className="flex items-center gap-3 px-3 py-3 rounded-xl text-sm font-semibold text-slate-700 hover:bg-blue-50 hover:text-blue-700 transition"
+                          onClick={() =>
+                            handleInternalNavigate("/dashboard", { closeUserMenu: true })
+                          }
+                          className={`flex items-center gap-3 rounded-xl px-3 py-3 text-sm font-semibold text-slate-700 transition hover:bg-blue-50 hover:text-blue-700 active:scale-[0.99] ${
+                            isPressed("/dashboard") ? "bg-blue-50 text-blue-700" : ""
+                          }`}
                         >
                           <LayoutDashboard size={16} />
                           Dashboard
@@ -372,8 +489,12 @@ export default function Navbar() {
 
                         <Link
                           href="/orders"
-                          onClick={() => setIsUserMenuOpen(false)}
-                          className="flex items-center gap-3 px-3 py-3 rounded-xl text-sm font-semibold text-slate-700 hover:bg-blue-50 hover:text-blue-700 transition"
+                          onClick={() =>
+                            handleInternalNavigate("/orders", { closeUserMenu: true })
+                          }
+                          className={`flex items-center gap-3 rounded-xl px-3 py-3 text-sm font-semibold text-slate-700 transition hover:bg-blue-50 hover:text-blue-700 active:scale-[0.99] ${
+                            isPressed("/orders") ? "bg-blue-50 text-blue-700" : ""
+                          }`}
                         >
                           <ShoppingCart size={16} />
                           My Orders
@@ -381,8 +502,12 @@ export default function Navbar() {
 
                         <Link
                           href="/wallet"
-                          onClick={() => setIsUserMenuOpen(false)}
-                          className="flex items-center gap-3 px-3 py-3 rounded-xl text-sm font-semibold text-slate-700 hover:bg-violet-50 hover:text-violet-700 transition"
+                          onClick={() =>
+                            handleInternalNavigate("/wallet", { closeUserMenu: true })
+                          }
+                          className={`flex items-center gap-3 rounded-xl px-3 py-3 text-sm font-semibold text-slate-700 transition hover:bg-violet-50 hover:text-violet-700 active:scale-[0.99] ${
+                            isPressed("/wallet") ? "bg-violet-50 text-violet-700" : ""
+                          }`}
                         >
                           <Wallet size={16} />
                           Wallet Balance
@@ -390,8 +515,12 @@ export default function Navbar() {
 
                         <Link
                           href="/wallet"
-                          onClick={() => setIsUserMenuOpen(false)}
-                          className="flex items-center gap-3 px-3 py-3 rounded-xl text-sm font-semibold text-slate-700 hover:bg-amber-50 hover:text-amber-700 transition"
+                          onClick={() =>
+                            handleInternalNavigate("/wallet", { closeUserMenu: true })
+                          }
+                          className={`flex items-center gap-3 rounded-xl px-3 py-3 text-sm font-semibold text-slate-700 transition hover:bg-amber-50 hover:text-amber-700 active:scale-[0.99] ${
+                            isPressed("/wallet") ? "bg-amber-50 text-amber-700" : ""
+                          }`}
                         >
                           <BadgePercent size={16} />
                           Subscription / Plans
@@ -400,7 +529,7 @@ export default function Navbar() {
                         <button
                           type="button"
                           onClick={handleLogout}
-                          className="w-full flex items-center gap-3 px-3 py-3 rounded-xl text-sm font-semibold text-red-600 hover:bg-red-50 transition"
+                          className="flex w-full items-center gap-3 rounded-xl px-3 py-3 text-sm font-semibold text-red-600 transition hover:bg-red-50 active:scale-[0.99]"
                         >
                           <LogOut size={16} />
                           Logout
@@ -412,7 +541,10 @@ export default function Navbar() {
               ) : (
                 <Link
                   href="/login"
-                  className="inline-flex items-center gap-2 h-11 px-5 rounded-full border border-gray-200 bg-white text-slate-700 font-bold hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 transition shadow-sm float-attn"
+                  onClick={() => handleInternalNavigate("/login")}
+                  className={`float-attn inline-flex h-11 items-center gap-2 rounded-full border border-gray-200 bg-white px-5 font-bold text-slate-700 shadow-sm transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 active:scale-[0.985] ${
+                    isPressed("/login") ? "opacity-85" : ""
+                  }`}
                 >
                   <User size={18} />
                   Login
@@ -421,49 +553,59 @@ export default function Navbar() {
 
               <Link
                 href="/cart"
-                className={`relative inline-flex items-center justify-center h-11 w-11 rounded-full border border-gray-200 bg-white text-slate-700 hover:text-blue-700 hover:border-blue-200 hover:bg-blue-50 transition shadow-sm ${
+                onClick={() => handleInternalNavigate("/cart")}
+                className={`relative inline-flex h-11 w-11 items-center justify-center rounded-full border border-gray-200 bg-white text-slate-700 shadow-sm transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 active:scale-95 ${
                   cartCount > 0 ? "cart-attn" : ""
-                }`}
+                } ${isPressed("/cart") ? "opacity-85" : ""}`}
                 aria-label="Cart"
               >
                 <ShoppingCart size={20} />
                 {cartCount > 0 && (
-                  <span className="absolute -top-1 -right-1 bg-red-500 text-white text-[11px] min-w-5 h-5 px-1 flex items-center justify-center rounded-full font-extrabold border-2 border-white">
+                  <span className="absolute -right-1 -top-1 flex h-5 min-w-5 items-center justify-center rounded-full border-2 border-white bg-red-500 px-1 text-[11px] font-extrabold text-white">
                     {cartCount}
                   </span>
                 )}
               </Link>
             </div>
 
-            <div className="flex items-center gap-3 lg:hidden ml-auto">
+            <div className="ml-auto flex items-center gap-3 lg:hidden">
               <button
                 onClick={() => {
                   setSearchValue("");
                   setIsSearchOpen(true);
                 }}
-                className="inline-flex items-center justify-center h-10 w-10 rounded-full border border-gray-200 bg-white text-slate-700 hover:text-blue-700 hover:border-blue-200 hover:bg-blue-50 transition shadow-sm"
+                className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-gray-200 bg-white text-slate-700 shadow-sm transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 active:scale-95"
                 aria-label="Search"
+                type="button"
               >
                 <Search size={18} />
               </button>
 
               <Link
                 href="/cart"
-                className="relative inline-flex items-center justify-center h-10 w-10 rounded-full border border-gray-200 bg-white text-slate-700 hover:text-blue-700 hover:border-blue-200 hover:bg-blue-50 transition shadow-sm"
+                onClick={() =>
+                  handleInternalNavigate("/cart", {
+                    closeMenu: false,
+                  })
+                }
+                className={`relative inline-flex h-10 w-10 items-center justify-center rounded-full border border-gray-200 bg-white text-slate-700 shadow-sm transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 active:scale-95 ${
+                  isPressed("/cart") ? "opacity-85" : ""
+                }`}
                 aria-label="Cart"
               >
                 <ShoppingCart size={18} />
                 {cartCount > 0 && (
-                  <span className="absolute -top-1 -right-1 bg-red-500 text-white text-[10px] min-w-4 h-4 px-1 flex items-center justify-center rounded-full font-extrabold border border-white">
+                  <span className="absolute -right-1 -top-1 flex h-4 min-w-4 items-center justify-center rounded-full border border-white bg-red-500 px-1 text-[10px] font-extrabold text-white">
                     {cartCount}
                   </span>
                 )}
               </Link>
 
               <button
-                onClick={() => setIsOpen(!isOpen)}
-                className="inline-flex items-center justify-center h-10 w-10 rounded-full border border-gray-200 bg-white text-slate-700 hover:text-blue-700 hover:border-blue-200 hover:bg-blue-50 transition shadow-sm"
+                onClick={() => setIsOpen((prev) => !prev)}
+                className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-gray-200 bg-white text-slate-700 shadow-sm transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 active:scale-95"
                 aria-label="Menu"
+                type="button"
               >
                 {isOpen ? <X size={20} /> : <Menu size={20} />}
               </button>
@@ -472,27 +614,43 @@ export default function Navbar() {
         </div>
 
         {isOpen && (
-          <div className="lg:hidden fixed inset-0 z-40">
-            <div className="absolute inset-0 bg-black/30" onClick={() => setIsOpen(false)} />
-            <div className="absolute top-20 left-0 w-full bg-white border-t border-gray-100 shadow-2xl max-h-[82vh] overflow-y-auto">
-              <div className="p-4 space-y-2">
+          <div className="fixed inset-0 z-40 lg:hidden">
+            <div
+              className="absolute inset-0 bg-black/30"
+              onClick={() => setIsOpen(false)}
+            />
+            <div className="absolute left-0 top-20 max-h-[82vh] w-full overflow-y-auto border-t border-gray-100 bg-white shadow-2xl">
+              <div className="space-y-2 p-4">
                 {navLinks.map((link) => (
-                  <div key={link.name} className="rounded-2xl border border-gray-100 overflow-hidden">
+                  <div
+                    key={link.name}
+                    className="overflow-hidden rounded-2xl border border-gray-100"
+                  >
                     <div className="flex items-center justify-between bg-white">
                       {link.subLinks ? (
                         <button
                           type="button"
                           onClick={() => toggleSubMenu(link.name)}
-                          className="w-full text-left px-4 py-4 font-bold text-slate-800 flex items-center justify-between"
+                          className="flex w-full items-center justify-between px-4 py-4 text-left font-bold text-slate-800"
                         >
                           {link.name}
-                          {mobileSubMenu === link.name ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
+                          {mobileSubMenu === link.name ? (
+                            <ChevronUp size={18} />
+                          ) : (
+                            <ChevronDown size={18} />
+                          )}
                         </button>
                       ) : (
                         <Link
                           href={link.href || "/"}
-                          onClick={() => setIsOpen(false)}
-                          className="w-full px-4 py-4 font-bold text-slate-800"
+                          onClick={() =>
+                            handleInternalNavigate(link.href || "/", {
+                              closeMenu: true,
+                            })
+                          }
+                          className={`w-full px-4 py-4 font-bold text-slate-800 active:scale-[0.99] ${
+                            isPressed(link.href || "/") ? "bg-blue-50 text-blue-700" : ""
+                          }`}
                         >
                           {link.name}
                         </Link>
@@ -508,20 +666,32 @@ export default function Navbar() {
                                 <button
                                   type="button"
                                   onClick={() => toggleNestedMenu(sub.name)}
-                                  className="w-full flex items-center justify-between px-3 py-3 rounded-xl font-semibold text-slate-700 hover:bg-white transition"
+                                  className="flex w-full items-center justify-between rounded-xl px-3 py-3 font-semibold text-slate-700 transition hover:bg-white"
                                 >
                                   {sub.name}
-                                  {mobileNestedMenu === sub.name ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                                  {mobileNestedMenu === sub.name ? (
+                                    <ChevronUp size={16} />
+                                  ) : (
+                                    <ChevronDown size={16} />
+                                  )}
                                 </button>
 
                                 {mobileNestedMenu === sub.name && (
-                                  <div className="pl-3 pb-2">
+                                  <div className="pb-2 pl-3">
                                     {sub.nestedLinks.map((nested) => (
                                       <Link
                                         key={nested.name}
                                         href={nested.href}
-                                        onClick={() => setIsOpen(false)}
-                                        className="block px-3 py-3 rounded-xl text-sm font-semibold text-slate-600 hover:bg-white hover:text-blue-700 transition"
+                                        onClick={() =>
+                                          handleInternalNavigate(nested.href, {
+                                            closeMenu: true,
+                                          })
+                                        }
+                                        className={`block rounded-xl px-3 py-3 text-sm font-semibold text-slate-600 transition hover:bg-white hover:text-blue-700 active:scale-[0.99] ${
+                                          isPressed(nested.href)
+                                            ? "bg-white text-blue-700"
+                                            : ""
+                                        }`}
                                       >
                                         {nested.name}
                                       </Link>
@@ -532,8 +702,16 @@ export default function Navbar() {
                             ) : (
                               <Link
                                 href={sub.href || "/"}
-                                onClick={() => setIsOpen(false)}
-                                className="block px-3 py-3 rounded-xl text-sm font-semibold text-slate-700 hover:bg-white hover:text-blue-700 transition"
+                                onClick={() =>
+                                  handleInternalNavigate(sub.href || "/", {
+                                    closeMenu: true,
+                                  })
+                                }
+                                className={`block rounded-xl px-3 py-3 text-sm font-semibold text-slate-700 transition hover:bg-white hover:text-blue-700 active:scale-[0.99] ${
+                                  isPressed(sub.href || "/")
+                                    ? "bg-white text-blue-700"
+                                    : ""
+                                }`}
                               >
                                 {sub.name}
                               </Link>
@@ -547,28 +725,33 @@ export default function Navbar() {
 
                 {authLoading ? (
                   <div className="grid grid-cols-1 gap-3 pt-2">
-                    <div className="h-11 rounded-2xl border border-gray-200 bg-white font-bold text-slate-500 flex items-center justify-center shadow-sm">
+                    <div className="flex h-11 items-center justify-center rounded-2xl border border-gray-200 bg-white font-bold text-slate-500 shadow-sm">
                       Loading...
                     </div>
                   </div>
                 ) : isLoggedIn ? (
-                  <div className="pt-2 space-y-3">
+                  <div className="space-y-3 pt-2">
                     <div
-                      className={`rounded-2xl p-4 border ${
+                      className={`rounded-2xl border p-4 ${
                         isActiveSeller
                           ? "border-violet-200 bg-gradient-to-r from-violet-50 via-white to-cyan-50"
                           : "border-blue-100 bg-blue-50"
                       }`}
                     >
-                      <div className="text-sm font-extrabold text-slate-900">{displayName}</div>
+                      <div className="text-sm font-extrabold text-slate-900">
+                        {displayName}
+                      </div>
+
                       {currentUser?.email ? (
-                        <div className="text-xs text-slate-500 mt-1">{currentUser.email}</div>
+                        <div className="mt-1 text-xs text-slate-500">
+                          {currentUser.email}
+                        </div>
                       ) : null}
 
                       {isActiveSeller ? (
                         <div className="mt-3 grid grid-cols-2 gap-2">
                           <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
-                            <div className="text-[10px] uppercase font-extrabold tracking-wide text-slate-500">
+                            <div className="text-[10px] font-extrabold uppercase tracking-wide text-slate-500">
                               Plan
                             </div>
                             <div className="mt-1 text-xs font-extrabold text-slate-900">
@@ -576,7 +759,7 @@ export default function Navbar() {
                             </div>
                           </div>
                           <div className="rounded-xl border border-slate-200 bg-white px-3 py-2">
-                            <div className="text-[10px] uppercase font-extrabold tracking-wide text-slate-500">
+                            <div className="text-[10px] font-extrabold uppercase tracking-wide text-slate-500">
                               Wallet
                             </div>
                             <div className="mt-1 text-xs font-extrabold text-slate-900">
@@ -590,15 +773,23 @@ export default function Navbar() {
                     <div className="grid grid-cols-2 gap-3">
                       <Link
                         href="/dashboard"
-                        onClick={() => setIsOpen(false)}
-                        className="h-11 rounded-2xl border border-gray-200 bg-white font-bold text-slate-800 flex items-center justify-center hover:bg-blue-50 hover:border-blue-200 hover:text-blue-700 transition shadow-sm"
+                        onClick={() =>
+                          handleInternalNavigate("/dashboard", { closeMenu: true })
+                        }
+                        className={`flex h-11 items-center justify-center rounded-2xl border border-gray-200 bg-white font-bold text-slate-800 shadow-sm transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 active:scale-[0.99] ${
+                          isPressed("/dashboard") ? "bg-blue-50 text-blue-700" : ""
+                        }`}
                       >
                         Dashboard
                       </Link>
                       <Link
                         href="/orders"
-                        onClick={() => setIsOpen(false)}
-                        className="h-11 rounded-2xl bg-[#1E40AF] text-white font-bold flex items-center justify-center hover:bg-blue-800 transition shadow-sm"
+                        onClick={() =>
+                          handleInternalNavigate("/orders", { closeMenu: true })
+                        }
+                        className={`flex h-11 items-center justify-center rounded-2xl bg-[#1E40AF] font-bold text-white shadow-sm transition hover:bg-blue-800 active:scale-[0.99] ${
+                          isPressed("/orders") ? "opacity-85" : ""
+                        }`}
                       >
                         Orders
                       </Link>
@@ -607,15 +798,23 @@ export default function Navbar() {
                     <div className="grid grid-cols-2 gap-3">
                       <Link
                         href="/wallet"
-                        onClick={() => setIsOpen(false)}
-                        className="h-11 rounded-2xl border border-violet-200 bg-violet-50 text-violet-700 font-bold flex items-center justify-center hover:bg-violet-100 transition shadow-sm"
+                        onClick={() =>
+                          handleInternalNavigate("/wallet", { closeMenu: true })
+                        }
+                        className={`flex h-11 items-center justify-center rounded-2xl border border-violet-200 bg-violet-50 font-bold text-violet-700 shadow-sm transition hover:bg-violet-100 active:scale-[0.99] ${
+                          isPressed("/wallet") ? "opacity-85" : ""
+                        }`}
                       >
                         Wallet
                       </Link>
                       <Link
                         href="/wallet"
-                        onClick={() => setIsOpen(false)}
-                        className="h-11 rounded-2xl border border-amber-200 bg-amber-50 text-amber-700 font-bold flex items-center justify-center hover:bg-amber-100 transition shadow-sm"
+                        onClick={() =>
+                          handleInternalNavigate("/wallet", { closeMenu: true })
+                        }
+                        className={`flex h-11 items-center justify-center rounded-2xl border border-amber-200 bg-amber-50 font-bold text-amber-700 shadow-sm transition hover:bg-amber-100 active:scale-[0.99] ${
+                          isPressed("/wallet") ? "opacity-85" : ""
+                        }`}
                       >
                         Plans
                       </Link>
@@ -624,7 +823,7 @@ export default function Navbar() {
                     <button
                       type="button"
                       onClick={handleLogout}
-                      className="w-full h-11 rounded-2xl border border-red-200 bg-red-50 text-red-600 font-bold flex items-center justify-center hover:bg-red-100 transition shadow-sm"
+                      className="flex h-11 w-full items-center justify-center rounded-2xl border border-red-200 bg-red-50 font-bold text-red-600 shadow-sm transition hover:bg-red-100 active:scale-[0.99]"
                     >
                       Logout
                     </button>
@@ -633,15 +832,23 @@ export default function Navbar() {
                   <div className="grid grid-cols-2 gap-3 pt-2">
                     <Link
                       href="/login"
-                      onClick={() => setIsOpen(false)}
-                      className="h-11 rounded-2xl border border-gray-200 bg-white font-bold text-slate-800 flex items-center justify-center hover:bg-blue-50 hover:border-blue-200 hover:text-blue-700 transition shadow-sm"
+                      onClick={() =>
+                        handleInternalNavigate("/login", { closeMenu: true })
+                      }
+                      className={`flex h-11 items-center justify-center rounded-2xl border border-gray-200 bg-white font-bold text-slate-800 shadow-sm transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 active:scale-[0.99] ${
+                        isPressed("/login") ? "bg-blue-50 text-blue-700" : ""
+                      }`}
                     >
                       Login
                     </Link>
                     <Link
                       href="/register"
-                      onClick={() => setIsOpen(false)}
-                      className="h-11 rounded-2xl bg-[#1E40AF] text-white font-bold flex items-center justify-center hover:bg-blue-800 transition shadow-sm"
+                      onClick={() =>
+                        handleInternalNavigate("/register", { closeMenu: true })
+                      }
+                      className={`flex h-11 items-center justify-center rounded-2xl bg-[#1E40AF] font-bold text-white shadow-sm transition hover:bg-blue-800 active:scale-[0.99] ${
+                        isPressed("/register") ? "opacity-85" : ""
+                      }`}
                     >
                       Register
                     </Link>
@@ -651,8 +858,12 @@ export default function Navbar() {
                 <div className="sticky bottom-0 pt-3">
                   <Link
                     href="/cart"
-                    onClick={() => setIsOpen(false)}
-                    className="w-full h-12 rounded-2xl bg-[#1E40AF] text-white font-extrabold flex items-center justify-center gap-2 shadow-lg hover:bg-blue-800 transition"
+                    onClick={() =>
+                      handleInternalNavigate("/cart", { closeMenu: true })
+                    }
+                    className={`flex h-12 w-full items-center justify-center gap-2 rounded-2xl bg-[#1E40AF] font-extrabold text-white shadow-lg transition hover:bg-blue-800 active:scale-[0.99] ${
+                      isPressed("/cart") ? "opacity-85" : ""
+                    }`}
                   >
                     <ShoppingCart size={18} />
                     Cart ({cartCount})
@@ -667,17 +878,17 @@ export default function Navbar() {
           <button
             type="button"
             aria-label="Close user menu backdrop"
-            className="hidden lg:block fixed inset-0 z-[60] cursor-default"
+            className="fixed inset-0 z-[60] hidden cursor-default lg:block"
             onClick={() => setIsUserMenuOpen(false)}
           />
         ) : null}
       </nav>
 
       {isSearchOpen && (
-        <div className="fixed inset-0 z-[60] bg-black/50 backdrop-blur-sm flex items-start justify-center pt-20 px-4">
-          <div className="bg-white w-full max-w-2xl rounded-3xl shadow-2xl overflow-hidden border border-gray-100">
-            <div className="p-4 md:p-5 border-b border-gray-100 flex items-center gap-3">
-              <div className="h-10 w-10 rounded-2xl bg-blue-50 text-blue-700 flex items-center justify-center">
+        <div className="fixed inset-0 z-[60] flex items-start justify-center bg-black/50 px-4 pt-20 backdrop-blur-sm">
+          <div className="w-full max-w-2xl overflow-hidden rounded-3xl border border-gray-100 bg-white shadow-2xl">
+            <div className="flex items-center gap-3 border-b border-gray-100 p-4 md:p-5">
+              <div className="flex h-10 w-10 items-center justify-center rounded-2xl bg-blue-50 text-blue-700">
                 <Search size={18} />
               </div>
 
@@ -689,54 +900,72 @@ export default function Navbar() {
                 }}
                 type="text"
                 placeholder="Search IGNOU assignments, notes, course codes..."
-                className="flex-1 text-base md:text-lg outline-none text-slate-800 placeholder:text-gray-400 h-10"
+                className="h-10 flex-1 text-base text-slate-800 outline-none placeholder:text-gray-400 md:text-lg"
                 autoFocus
               />
 
               <button
                 onClick={() => runSearch()}
-                className="hidden sm:inline-flex items-center justify-center h-10 px-6 rounded-2xl bg-[#1E40AF] text-white font-extrabold hover:bg-blue-800 transition"
+                className="hidden h-10 items-center justify-center rounded-2xl bg-[#1E40AF] px-6 font-extrabold text-white transition hover:bg-blue-800 active:scale-[0.98] sm:inline-flex"
+                type="button"
               >
                 Search
               </button>
 
               <button
                 onClick={() => setIsSearchOpen(false)}
-                className="h-10 w-10 rounded-2xl hover:bg-gray-100 text-gray-600 transition flex items-center justify-center"
+                className="flex h-10 w-10 items-center justify-center rounded-2xl text-gray-600 transition hover:bg-gray-100 active:scale-95"
                 aria-label="Close search"
+                type="button"
               >
                 <X size={18} />
               </button>
             </div>
 
-            <div className="p-5 bg-gray-50">
-              <div className="flex items-center justify-between mb-3">
-                <h3 className="text-xs font-extrabold text-gray-400 uppercase tracking-wider">Popular Searches</h3>
-                <button onClick={() => setSearchValue("")} className="text-xs font-bold text-blue-700 hover:underline">
+            <div className="bg-gray-50 p-5">
+              <div className="mb-3 flex items-center justify-between">
+                <h3 className="text-xs font-extrabold uppercase tracking-wider text-gray-400">
+                  Popular Searches
+                </h3>
+                <button
+                  onClick={() => setSearchValue("")}
+                  className="text-xs font-bold text-blue-700 hover:underline"
+                  type="button"
+                >
                   Clear
                 </button>
               </div>
 
               <div className="flex flex-wrap gap-2">
-                {["M.Com Assignment", "History Notes", "MBA Projects", "Solved Papers 2025"].map((tag) => (
+                {[
+                  "M.Com Assignment",
+                  "History Notes",
+                  "MBA Projects",
+                  "Solved Papers 2025",
+                ].map((tag) => (
                   <button
                     key={tag}
                     onClick={() => runSearch(tag)}
-                    className="px-3 py-2 bg-white border border-gray-200 rounded-xl text-sm font-semibold text-slate-700 hover:border-blue-200 hover:text-blue-700 hover:bg-blue-50 transition"
+                    className="rounded-xl border border-gray-200 bg-white px-3 py-2 text-sm font-semibold text-slate-700 transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 active:scale-[0.98]"
+                    type="button"
                   >
                     {tag}
                   </button>
                 ))}
               </div>
 
-              <p className="text-xs text-gray-500 mt-4">
-                Tip: Enter course code like <span className="font-bold text-slate-700">MPA-036</span> or{" "}
+              <p className="mt-4 text-xs text-gray-500">
+                Tip: Enter course code like{" "}
+                <span className="font-bold text-slate-700">MPA-036</span> or{" "}
                 <span className="font-bold text-slate-700">BHIC-131</span>.
               </p>
             </div>
           </div>
 
-          <div className="absolute inset-0 -z-10" onClick={() => setIsSearchOpen(false)} />
+          <div
+            className="absolute inset-0 -z-10"
+            onClick={() => setIsSearchOpen(false)}
+          />
         </div>
       )}
 
@@ -744,6 +973,7 @@ export default function Navbar() {
         .ring-attn {
           animation: ringPulse 2.8s infinite;
         }
+
         @keyframes ringPulse {
           0% {
             box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.25);
@@ -759,6 +989,7 @@ export default function Navbar() {
         .float-attn {
           animation: floatSoft 3.2s ease-in-out infinite;
         }
+
         @keyframes floatSoft {
           0%,
           100% {
@@ -772,6 +1003,7 @@ export default function Navbar() {
         .cart-attn {
           animation: cartNudge 2.2s ease-in-out infinite;
         }
+
         @keyframes cartNudge {
           0%,
           100% {
@@ -790,4 +1022,4 @@ export default function Navbar() {
       `}</style>
     </>
   );
-} 
+}

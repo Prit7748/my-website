@@ -2,9 +2,11 @@ import type { Metadata, Viewport } from "next";
 import { Suspense } from "react";
 import Script from "next/script";
 import { Outfit } from "next/font/google";
+
 import "./globals.css";
 import { CartProvider } from "../context/CartContext";
 import AnalyticsProvider from "../components/AnalyticsProvider";
+import NavigationProgress from "../components/NavigationProgress";
 
 const outfit = Outfit({
   subsets: ["latin"],
@@ -26,7 +28,6 @@ function normalizeBaseUrl(input?: string) {
   try {
     const url = new URL(normalized);
 
-    // production preferred host = non-www https
     if (
       url.hostname === "www.istudentsportal.com" ||
       url.hostname === "istudentsportal.com"
@@ -34,11 +35,7 @@ function normalizeBaseUrl(input?: string) {
       return "https://istudentsportal.com";
     }
 
-    // localhost/dev allowed
-    if (
-      url.hostname === "localhost" ||
-      url.hostname === "127.0.0.1"
-    ) {
+    if (url.hostname === "localhost" || url.hostname === "127.0.0.1") {
       return normalized;
     }
 
@@ -150,6 +147,8 @@ export default function RootLayout({
             </Script>
           </>
         ) : null}
+
+        <NavigationProgress />
 
         <CartProvider>
           <Suspense fallback={null}>

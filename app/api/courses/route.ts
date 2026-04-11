@@ -1,13 +1,107 @@
 import { NextResponse } from "next/server";
 import dbConnect from "@/lib/db";
+import Course from "@/models/Course";
 import Product from "@/models/Product";
+import { normalizeProductCategory } from "@/lib/productCatalog";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 function safeStr(x: any) {
-  return String(x || "").trim();
+  return String(x ?? "").trim();
 }
 
-function normalizeCourse(code: string) {
-  return safeStr(code).toUpperCase().replace(/\s+/g, "").replace(/[^A-Z0-9]/g, "");
+function normalizeCourse(code: any) {
+  return safeStr(code).replace(/\s+/g, " ").toUpperCase();
+}
+
+function parseList(value: string | null) {
+  if (!value) return [];
+  return value
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean);
+}
+
+function uniqueStrings(arr: string[]) {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const v of arr) {
+    const k = safeStr(v);
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    out.push(k);
+  }
+  return out;
+}
+
+function escapeRegex(str: string) {
+  return String(str || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function sortAlphaNumeric(a: string, b: string) {
+  return a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" });
+}
+
+async function getCategoryCourseCodeSet(categories: string[]) {
+  if (!categories.length) return null;
+
+  const filter: any = {
+    isActive: true,
+    $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+    category: { $in: categories },
+  };
+
+  const raw = await Product.distinct("courseCodes", filter);
+
+  const codes = uniqueStrings(
+    (raw || [])
+      .flat()
+      .map((x: any) => normalizeCourse(x))
+      .filter(Boolean)
+  );
+
+  return new Set(codes);
+}
+
+async function getFallbackTitlesFromProducts(categories: string[], codes: string[]) {
+  if (!codes.length) return new Map<string, string>();
+
+  const filter: any = {
+    isActive: true,
+    $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+    courseCodes: { $in: codes },
+  };
+
+  if (categories.length) {
+    filter.category = { $in: categories };
+  }
+
+  const docs: any[] = await Product.find(filter)
+    .select("courseCodes courseTitles")
+    .lean();
+
+  const titleMap = new Map<string, string>();
+
+  for (const doc of docs || []) {
+    const productCodes = Array.isArray(doc?.courseCodes)
+      ? doc.courseCodes.map((x: any) => normalizeCourse(x)).filter(Boolean)
+      : [];
+
+    const productTitles = Array.isArray(doc?.courseTitles)
+      ? doc.courseTitles.map((x: any) => safeStr(x))
+      : [];
+
+    for (let i = 0; i < productCodes.length; i += 1) {
+      const code = productCodes[i];
+      const title = safeStr(productTitles[i] || productTitles[0] || "");
+      if (!code || !titleMap.has(code) && title) {
+        titleMap.set(code, title);
+      }
+    }
+  }
+
+  return titleMap;
 }
 
 export async function GET(request: Request) {
@@ -15,72 +109,85 @@ export async function GET(request: Request) {
 
   const url = new URL(request.url);
   const search = safeStr(url.searchParams.get("search")).toLowerCase();
-  const limit = Math.min(500, Math.max(1, Number(url.searchParams.get("limit") || 300)));
+  const limit = Math.min(1000, Math.max(1, Number(url.searchParams.get("limit") || 300)));
 
-  // Only active products
-  const match: any = { $or: [{ isActive: true }, { isActive: { $exists: false } }] };
+  const rawCategories = uniqueStrings(parseList(url.searchParams.get("category")));
+  const categories = rawCategories
+    .map((x) => normalizeProductCategory(x))
+    .filter(Boolean);
 
-  const pipeline: any[] = [
-    { $match: match },
-    { $project: { courseCodes: 1, courseTitles: 1 } },
-    { $unwind: "$courseCodes" },
-    {
-      $group: {
-        _id: "$courseCodes",
-        count: { $sum: 1 },
-        // optional: first title from courseTitles[0] if exists
-        title: { $first: { $arrayElemAt: ["$courseTitles", 0] } },
-      },
-    },
-    {
-      $project: {
-        _id: 0,
-        code: "$_id",
-        title: { $ifNull: ["$title", ""] },
-        count: 1,
-      },
-    },
-  ];
+  const categoryCourseSet = await getCategoryCourseCodeSet(categories);
 
-  let rows: any[] = await Product.aggregate(pipeline);
+  const courseFilter: any = {
+    isActive: true,
+  };
 
-  // Normalize + cleanup
-  rows = rows
-    .map((r) => ({
-      code: normalizeCourse(r.code),
-      title: safeStr(r.title),
-      count: Number(r.count || 0),
-    }))
-    .filter((r) => r.code);
-
-  // Merge duplicates after normalization
-  const map = new Map<string, { code: string; title: string; count: number }>();
-  for (const r of rows) {
-    const prev = map.get(r.code);
-    if (!prev) map.set(r.code, r);
-    else map.set(r.code, { code: r.code, title: prev.title || r.title, count: prev.count + r.count });
+  if (search) {
+    const rx = new RegExp(escapeRegex(search), "i");
+    courseFilter.$or = [{ code: rx }, { title: rx }];
   }
 
-  let courses = Array.from(map.values());
+  let masterCourses: any[] = await Course.find(courseFilter)
+    .select("code title")
+    .lean();
 
-  // Search filter
-  if (search) {
-    courses = courses.filter((c) => {
-      const hay = `${c.code} ${c.title}`.toLowerCase();
-      return hay.includes(search);
+  let courses = (masterCourses || [])
+    .map((doc: any) => ({
+      code: normalizeCourse(doc?.code),
+      title: safeStr(doc?.title),
+    }))
+    .filter((row) => row.code);
+
+  if (categoryCourseSet) {
+    courses = courses.filter((row) => categoryCourseSet.has(row.code));
+  }
+
+  if (categoryCourseSet) {
+    const existingCodes = new Set(courses.map((x) => x.code));
+    const missingCodes = Array.from(categoryCourseSet).filter((code) => !existingCodes.has(code));
+
+    if (missingCodes.length) {
+      const fallbackTitleMap = await getFallbackTitlesFromProducts(categories, missingCodes);
+
+      const missingRows = missingCodes.map((code) => ({
+        code,
+        title: fallbackTitleMap.get(code) || "",
+      }));
+
+      courses = [...courses, ...missingRows];
+    }
+  }
+
+  if (search && categoryCourseSet) {
+    const s = search.toLowerCase();
+    courses = courses.filter((row) => {
+      const hay = `${row.code} ${row.title}`.toLowerCase();
+      return hay.includes(s);
     });
   }
 
-  // Sort A-Z
-  courses.sort((a, b) => a.code.localeCompare(b.code, undefined, { numeric: true }));
+  courses = uniqueStrings(courses.map((x) => x.code)).map((code) => {
+    const found = courses.find((row) => row.code === code);
+    return {
+      code,
+      title: found?.title || "",
+    };
+  });
 
-  courses = courses.slice(0, limit);
+  courses.sort((a, b) => sortAlphaNumeric(a.code, b.code));
+
+  const sliced = courses.slice(0, limit);
 
   return NextResponse.json(
     {
-      courses,
+      courses: sliced,
       meta: {
-        total: courses.length,
+        total: sliced.length,
+      },
+      applied: {
+        category: categories,
+        search: search || "",
+        limit,
       },
     },
     { status: 200 }

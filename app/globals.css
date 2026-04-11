@@ -7,19 +7,62 @@
 html {
   scroll-behavior: smooth;
   text-rendering: optimizeLegibility;
+  -webkit-text-size-adjust: 100%;
 }
 
 body {
   font-family: var(--font-outfit), system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-/* Better focus style (accessibility + premium feel) */
+/* Better focus style */
 :focus-visible {
   outline: 2px solid rgba(30, 64, 175, 0.7);
   outline-offset: 3px;
 }
 
-/* Selection color */
+/* Cleaner selection */
 ::selection {
   background: rgba(30, 64, 175, 0.15);
+  color: inherit;
+}
+
+/* Better mobile interaction feel */
+a,
+button,
+[role="button"],
+input,
+select,
+textarea {
+  -webkit-tap-highlight-color: transparent;
+}
+
+button,
+[role="button"] {
+  touch-action: manipulation;
+}
+
+/* Media elements stay contained */
+img,
+video,
+canvas,
+svg {
+  max-width: 100%;
+}
+
+/* Reduced motion safety */
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

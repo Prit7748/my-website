@@ -3,7 +3,14 @@
 import { useMemo, useState, useEffect, useRef } from "react";
 import Image from "next/image";
 import Link from "next/link";
-import { FileText, Truck, Sparkles, ShoppingCart, CheckCircle2, XCircle } from "lucide-react";
+import {
+  FileText,
+  Truck,
+  Sparkles,
+  ShoppingCart,
+  CheckCircle2,
+  XCircle,
+} from "lucide-react";
 import { productHref } from "@/lib/productHref";
 import { useCart } from "@/context/CartContext";
 import { trackSelectItem } from "../lib/analytics";
@@ -90,6 +97,12 @@ function isOnDemandAvailability(v?: string) {
   );
 }
 
+function schemaAvailability(v?: string) {
+  if (isWantToBuyAvailability(v)) return "https://schema.org/OutOfStock";
+  if (isOnDemandAvailability(v)) return "https://schema.org/PreOrder";
+  return "https://schema.org/InStock";
+}
+
 async function sendWantToBuyRequest(product: ApiProduct) {
   try {
     const res = await fetch("/api/products/want-to-buy", {
@@ -146,12 +159,28 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
 
   const { cart, addToCart, removeFromCart } = useCart();
 
-  const [toast, setToast] = useState<{ show: boolean; text: string; kind: "add" | "remove" | "info" | "success" }>({
+  const [toast, setToast] = useState<{
+    show: boolean;
+    text: string;
+    kind: "add" | "remove" | "info" | "success";
+  }>({
     show: false,
     text: "",
     kind: "add",
   });
+
   const toastTimer = useRef<any>(null);
+
+  const productTitle = safeText(product.title) || "IGNOU Product";
+  const categoryLabel = safeText(product.category) || "Product";
+  const subjectCode = safeText(product.subjectCode);
+  const courseCodeText = extractCourseCodesText(product) || "";
+  const sessionText = safeText(product.session);
+  const languageText = safeText(product.language);
+  const href = productHref({ slug: product.slug, category: product.category });
+
+  const isHandwritten = useMemo(() => isHandwrittenHardcopyProduct(product), [product]);
+  const isSolved = useMemo(() => isSolvedAssignmentProduct(product), [product]);
 
   const imgPrimary = useMemo(() => {
     return firstValidImage(product);
@@ -165,17 +194,16 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
     setImgBroken(false);
   }, [imgPrimary]);
 
-  const hasDiscount = !!product.oldPrice && Number(product.oldPrice) > Number(product.price || 0);
+  const hasDiscount =
+    !!product.oldPrice && Number(product.oldPrice) > Number(product.price || 0);
   const discountPct = hasDiscount
-    ? Math.round(((Number(product.oldPrice) - Number(product.price)) / Number(product.oldPrice)) * 100)
+    ? Math.round(
+        ((Number(product.oldPrice) - Number(product.price)) / Number(product.oldPrice)) * 100
+      )
     : 0;
 
   const isHardcopy = safeText(product.category).toLowerCase().includes("hardcopy");
   const isDigital = product.isDigital ?? !isHardcopy;
-
-  const href = productHref({ slug: product.slug, category: product.category });
-
-  const courseCodeText = extractCourseCodesText(product) || "";
 
   const availability = normAvail(product.availability || "available");
 
@@ -196,6 +224,7 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
 
   function showToast(kind: "add" | "remove" | "info" | "success", text?: string) {
     if (toastTimer.current) clearTimeout(toastTimer.current);
+
     setToast({
       show: true,
       kind,
@@ -204,12 +233,15 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
         (kind === "add"
           ? "Added to cart ✅"
           : kind === "remove"
-          ? "Removed from cart ❌"
-          : kind === "success"
-          ? "Request received ✅"
-          : "Updated"),
+            ? "Removed from cart ❌"
+            : kind === "success"
+              ? "Request received ✅"
+              : "Updated"),
     });
-    toastTimer.current = setTimeout(() => setToast((p) => ({ ...p, show: false })), 1800);
+
+    toastTimer.current = setTimeout(() => {
+      setToast((p) => ({ ...p, show: false }));
+    }, 1800);
   }
 
   async function handleWantToBuy(e: React.MouseEvent) {
@@ -281,6 +313,7 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
           cls: "bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-700",
         };
       }
+
       return {
         text: wantLoading ? "Submitting..." : "Want to Buy",
         cls: "bg-orange-50 text-orange-700 border-orange-200 hover:bg-orange-100",
@@ -295,35 +328,45 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
     }
 
     return {
-      text: isOnDemand ? "Add to Cart" : "Add to Cart",
+      text: "Add to Cart",
       cls: "bg-blue-600 text-white border-blue-600 hover:bg-blue-700",
     };
-  }, [inCart, isWantToBuy, wantToBuySent, wantLoading, isOnDemand]);
+  }, [inCart, isWantToBuy, wantToBuySent, wantLoading]);
 
   const showPrimaryImage = !!imgPrimary && !imgBroken;
-  const showHoverImage =
-    !!imgQuick &&
-    !isSolvedAssignmentProduct(product) &&
-    !isHandwrittenHardcopyProduct(product) &&
-    imgQuick !== imgPrimary;
+  const showHoverImage = !!imgQuick && !isSolved && !isHandwritten && imgQuick !== imgPrimary;
+
+  const showDiscountBadge = hasDiscount && !isHandwritten;
+  const showTypeBadge = !isHandwritten;
 
   return (
-    <div
-      className="group relative rounded-2xl border border-gray-200 bg-white overflow-hidden
-                 transition-all duration-300 hover:-translate-y-1 hover:shadow-xl
-                 active:scale-[0.99]"
+    <article
+      itemScope
+      itemType="https://schema.org/Product"
+      className="group relative overflow-hidden rounded-[22px] border border-slate-200 bg-white transition-all duration-300 hover:-translate-y-1 hover:border-slate-300 hover:shadow-[0_18px_45px_rgba(15,23,42,0.10)] active:scale-[0.99]"
     >
-      {toast.show && (
-        <div className="absolute top-3 left-1/2 -translate-x-1/2 z-20">
+      <meta itemProp="name" content={productTitle} />
+      <meta itemProp="category" content={categoryLabel} />
+      {subjectCode ? <meta itemProp="sku" content={subjectCode} /> : null}
+      {imgPrimary ? <meta itemProp="image" content={imgPrimary} /> : null}
+
+      <div itemProp="offers" itemScope itemType="https://schema.org/Offer">
+        <meta itemProp="priceCurrency" content="INR" />
+        <meta itemProp="price" content={String(Number(product.price || 0))} />
+        <link itemProp="availability" href={schemaAvailability(product.availability)} />
+      </div>
+
+      {toast.show ? (
+        <div className="absolute left-1/2 top-3 z-20 -translate-x-1/2">
           <div
-            className={`inline-flex items-center gap-2 rounded-xl px-3 py-2 text-xs font-extrabold shadow-lg border ${
+            className={`inline-flex items-center gap-2 rounded-xl border px-3 py-2 text-xs font-extrabold shadow-lg ${
               toast.kind === "add"
-                ? "bg-emerald-50 text-emerald-800 border-emerald-200"
+                ? "border-emerald-200 bg-emerald-50 text-emerald-800"
                 : toast.kind === "remove"
-                ? "bg-rose-50 text-rose-800 border-rose-200"
-                : toast.kind === "success"
-                ? "bg-emerald-50 text-emerald-800 border-emerald-200"
-                : "bg-slate-50 text-slate-800 border-slate-200"
+                  ? "border-rose-200 bg-rose-50 text-rose-800"
+                  : toast.kind === "success"
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                    : "border-slate-200 bg-slate-50 text-slate-800"
             }`}
           >
             {toast.kind === "add" ? (
@@ -338,96 +381,139 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
             {toast.text}
           </div>
         </div>
-      )}
+      ) : null}
 
-      <Link href={href} className="block" aria-label={product.title} onClick={handleProductOpen}>
-        <div className="relative aspect-[210/297] bg-white">
+      <Link
+        href={href}
+        itemProp="url"
+        className="block"
+        aria-label={productTitle}
+        onClick={handleProductOpen}
+      >
+        <div className="relative aspect-[210/297] overflow-hidden bg-white">
           {showPrimaryImage ? (
             <Image
               src={imgPrimary}
-              alt={product.title}
+              alt={productTitle}
               fill
               className="object-cover transition-transform duration-500 group-hover:scale-[1.04]"
               sizes="(max-width: 768px) 50vw, (max-width: 1200px) 25vw, 16vw"
               onError={() => setImgBroken(true)}
               priority={false}
             />
-          ) : null}
+          ) : (
+            <div className="flex h-full w-full items-center justify-center bg-gradient-to-br from-slate-50 to-slate-100 text-center">
+              <div className="px-4">
+                <div className="text-[11px] font-extrabold uppercase tracking-[0.18em] text-slate-500">
+                  iStudentsPortal
+                </div>
+                <div className="mt-2 text-sm font-bold leading-6 text-slate-700">
+                  {subjectCode || courseCodeText || "IGNOU Material"}
+                </div>
+              </div>
+            </div>
+          )}
 
           {showHoverImage ? (
             <Image
               src={imgQuick}
               alt=""
               fill
-              className="hidden md:block object-cover opacity-0 group-hover:opacity-100 transition-opacity duration-300"
+              className="hidden object-cover opacity-0 transition-opacity duration-300 group-hover:opacity-100 md:block"
               sizes="(max-width: 768px) 50vw, (max-width: 1200px) 25vw, 16vw"
             />
           ) : null}
 
-          {hasDiscount && (
-            <div className="absolute top-2 left-2 z-10">
-              <span className="inline-flex items-center gap-1 rounded-lg bg-green-600 text-white text-[10px] font-extrabold px-2 py-1 shadow-sm">
+          {showDiscountBadge ? (
+            <div className="absolute left-2 top-2 z-10 hidden md:block">
+              <span
+                data-product-badge="discount"
+                className="inline-flex items-center gap-1 rounded-xl bg-emerald-600 px-2.5 py-1.5 text-[10px] font-extrabold text-white shadow-md"
+              >
                 <Sparkles size={12} />
                 SAVE {discountPct > 0 ? `${discountPct}%` : "MORE"}
               </span>
             </div>
-          )}
+          ) : null}
 
-          <div className="absolute top-2 right-2 z-10 flex flex-col gap-2 items-end">
-            <span
-              className={`inline-flex items-center gap-1 rounded-lg text-[10px] font-extrabold px-2 py-1 shadow-sm ${
-                isDigital ? "bg-blue-600 text-white" : "bg-orange-600 text-white"
-              }`}
-            >
-              {isDigital ? <FileText size={12} /> : <Truck size={12} />}
-              {isDigital ? "PDF" : "HARDCOPY"}
-            </span>
-          </div>
+          {showTypeBadge ? (
+            <div className="absolute right-2 top-2 z-10 hidden items-end md:flex">
+              <span
+                data-product-badge="type"
+                className={`inline-flex items-center gap-1 rounded-xl px-2.5 py-1.5 text-[10px] font-extrabold text-white shadow-md ${
+                  isDigital ? "bg-blue-600" : "bg-orange-600"
+                }`}
+              >
+                {isDigital ? <FileText size={12} /> : <Truck size={12} />}
+                {isDigital ? "PDF" : "HARDCOPY"}
+              </span>
+            </div>
+          ) : null}
 
-          <div className="absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-black/60 via-black/10 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
-          <div className="hidden md:flex absolute bottom-3 left-3 right-3 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
-            <div className="w-full rounded-xl bg-white/90 backdrop-blur px-3 py-2 text-center text-xs font-extrabold text-slate-800 shadow-sm border border-white/60">
+          <div className="absolute inset-x-0 bottom-0 h-20 bg-gradient-to-t from-black/65 via-black/10 to-transparent opacity-0 transition-opacity duration-300 group-hover:opacity-100" />
+
+          <div className="absolute bottom-3 left-3 right-3 hidden opacity-0 transition-opacity duration-300 group-hover:opacity-100 md:flex">
+            <div className="w-full rounded-xl border border-white/60 bg-white/90 px-3 py-2 text-center text-xs font-extrabold text-slate-800 shadow-sm backdrop-blur">
               View Details →
             </div>
           </div>
         </div>
 
-        <div className="p-3 pb-2">
-          <div className="text-[10px] font-extrabold uppercase tracking-wide text-blue-700">
-            {product.category || "Product"}
-          </div>
-
-          <h3 className="mt-1 font-extrabold text-[12px] md:text-sm text-slate-900 line-clamp-2 group-hover:text-blue-700 transition">
-            {product.title}
+        <div className="p-3 pb-2 md:p-3.5 md:pb-2.5">
+          <h3
+            itemProp="name"
+            className="mt-0 line-clamp-2 text-[12px] font-extrabold text-slate-900 transition group-hover:text-blue-700 md:text-sm"
+            title={productTitle}
+          >
+            {productTitle}
           </h3>
 
           <div className="mt-2 flex items-end gap-2">
-            <div className="text-blue-700 font-extrabold text-sm md:text-base">₹{money(product.price)}</div>
-            {!!product.oldPrice && Number(product.oldPrice) > 0 && (
-              <div className="text-xs text-gray-400 line-through font-bold">₹{money(Number(product.oldPrice))}</div>
-            )}
+            <div className="text-sm font-extrabold text-blue-700 md:text-base">
+              ₹{money(product.price)}
+            </div>
+            {!!product.oldPrice && Number(product.oldPrice) > 0 ? (
+              <div className="text-xs font-bold text-gray-400 line-through">
+                ₹{money(Number(product.oldPrice))}
+              </div>
+            ) : null}
           </div>
 
-          <div className="mt-2 text-[11px] text-gray-600 font-bold flex flex-wrap gap-x-2 gap-y-1">
+          <div className="mt-2 flex flex-wrap gap-1.5 text-[10px] font-bold text-gray-600 md:text-[11px]">
+            {subjectCode ? (
+              <span className="rounded-lg border border-blue-100 bg-blue-50 px-2 py-1 text-blue-700">
+                {subjectCode}
+              </span>
+            ) : null}
+
             {courseCodeText ? (
-              <span className="rounded-md bg-gray-50 px-2 py-1 border border-gray-100">{courseCodeText}</span>
+              <span className="rounded-lg border border-gray-100 bg-gray-50 px-2 py-1">
+                {courseCodeText}
+              </span>
             ) : null}
-            {product.session ? (
-              <span className="rounded-md bg-gray-50 px-2 py-1 border border-gray-100">{product.session}</span>
+
+            {sessionText ? (
+              <span className="rounded-lg border border-gray-100 bg-gray-50 px-2 py-1">
+                {sessionText}
+              </span>
             ) : null}
-            {product.language ? (
-              <span className="rounded-md bg-gray-50 px-2 py-1 border border-gray-100">{product.language}</span>
+
+            {languageText ? (
+              <span className="rounded-lg border border-gray-100 bg-gray-50 px-2 py-1">
+                {languageText}
+              </span>
             ) : null}
           </div>
         </div>
       </Link>
 
-      <div className="px-3 pb-3">
+      <div className="px-3 pb-3 md:px-3.5 md:pb-3.5">
         <button
           onClick={handleToggleCart}
           disabled={wantLoading}
-          className={`w-full inline-flex items-center justify-center gap-2 rounded-xl py-2 text-xs font-extrabold transition border ${buttonUi.cls} ${
-            wantLoading ? "opacity-80 cursor-not-allowed" : ""
+          aria-label={buttonUi.text}
+          className={`inline-flex w-full items-center justify-center gap-2 rounded-xl border py-2.5 text-xs font-extrabold transition ${buttonUi.cls} ${
+            wantLoading ? "cursor-not-allowed opacity-80" : ""
           }`}
           title={buttonUi.text}
         >
@@ -436,7 +522,7 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
         </button>
       </div>
 
-      <div className="pointer-events-none absolute inset-0 rounded-2xl ring-0 ring-blue-200/60 group-hover:ring-4 transition-all duration-300" />
-    </div>
+      <div className="pointer-events-none absolute inset-0 rounded-[22px] ring-0 ring-blue-200/60 transition-all duration-300 group-hover:ring-4" />
+    </article>
   );
 }
