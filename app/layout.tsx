@@ -148,12 +148,15 @@ export default function RootLayout({
           </>
         ) : null}
 
-        <NavigationProgress />
-
         <CartProvider>
           <Suspense fallback={null}>
             <AnalyticsProvider />
           </Suspense>
+
+          <Suspense fallback={null}>
+            <NavigationProgress />
+          </Suspense>
+
           {children}
         </CartProvider>
       </body>

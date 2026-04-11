@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import Link from "next/link";
 import Image from "next/image";
 import {
@@ -67,7 +67,6 @@ export default function Navbar() {
   const { cartCount } = useCart();
   const router = useRouter();
   const pathname = usePathname();
-  const searchParams = useSearchParams();
 
   const [isOpen, setIsOpen] = useState(false);
   const [mobileSubMenu, setMobileSubMenu] = useState<string | null>(null);
@@ -82,11 +81,6 @@ export default function Navbar() {
 
   const [pressedHref, setPressedHref] = useState("");
   const pressedTimerRef = useRef<number | null>(null);
-
-  const routeKey = useMemo(() => {
-    const qs = searchParams?.toString() || "";
-    return `${pathname || ""}${qs ? `?${qs}` : ""}`;
-  }, [pathname, searchParams]);
 
   const navLinks: NavLink[] = useMemo(
     () => [
@@ -176,7 +170,7 @@ export default function Navbar() {
       pressedTimerRef.current = null;
     }
     setPressedHref("");
-  }, [routeKey]);
+  }, [pathname]);
 
   useEffect(() => {
     return () => {
