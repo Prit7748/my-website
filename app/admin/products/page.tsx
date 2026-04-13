@@ -18,6 +18,9 @@ import {
   ChevronLeft,
   ChevronRight,
   LoaderCircle,
+  BarChart3,
+  X,
+  FileText,
 } from "lucide-react";
 
 type Product = {
@@ -28,7 +31,10 @@ type Product = {
   category: string;
   subjectCode: string;
   session: string;
+  session6?: string;
   language: string;
+  lang3?: string;
+  courseCodes?: string[];
   price: number;
   isActive: boolean;
   availability?: "available" | "on_demand" | "want_to_buy" | string;
@@ -51,6 +57,23 @@ type SortKey =
   | "active_first"
   | "availability";
 
+type CategoryCount = {
+  category: string;
+  count: number;
+};
+
+type SessionOption = {
+  _id: string;
+  name: string;
+  slug: string;
+};
+
+type CourseOption = {
+  _id: string;
+  code: string;
+  title: string;
+};
+
 type ProductsApiResponse = {
   ok?: boolean;
   error?: string;
@@ -61,7 +84,15 @@ type ProductsApiResponse = {
     category?: string;
     availability?: string;
     isActive?: string;
+    session?: string;
+    courseCode?: string;
+    language?: string;
     sortBy?: SortKey;
+  };
+  filterOptions?: {
+    sessions?: SessionOption[];
+    courses?: CourseOption[];
+    languages?: string[];
   };
   pagination?: {
     page: number;
@@ -78,9 +109,22 @@ type ProductsApiResponse = {
     activeProducts: number;
     inactiveProducts: number;
     availableProducts: number;
+    availablePdfCount: number;
+    onDemandByCategory: CategoryCount[];
+    wantToBuyByCategory: CategoryCount[];
     trashCount: number;
   };
 };
+
+const CATEGORY_OPTIONS = [
+  "Solved Assignments",
+  "Question Papers (PYQ)",
+  "Handwritten PDFs",
+  "Ebooks",
+  "projects",
+  "Guess Papers",
+  "Handwritten Hardcopy (Delivery)",
+];
 
 function formatDate(input?: string | null) {
   if (!input) return "-";
@@ -99,15 +143,9 @@ function safeAvailabilityLabel(input?: string) {
 
 function availabilityBadgeClass(input?: string) {
   const v = String(input || "").trim().toLowerCase();
-  if (v === "available") {
-    return "bg-emerald-50 text-emerald-700 border-emerald-200";
-  }
-  if (v === "on_demand") {
-    return "bg-amber-50 text-amber-700 border-amber-200";
-  }
-  if (v === "want_to_buy") {
-    return "bg-rose-50 text-rose-700 border-rose-200";
-  }
+  if (v === "available") return "bg-emerald-50 text-emerald-700 border-emerald-200";
+  if (v === "on_demand") return "bg-amber-50 text-amber-700 border-amber-200";
+  if (v === "want_to_buy") return "bg-rose-50 text-rose-700 border-rose-200";
   return "bg-slate-50 text-slate-700 border-slate-200";
 }
 
@@ -120,12 +158,21 @@ export default function AdminProductsPage() {
 
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("");
   const [availabilityFilter, setAvailabilityFilter] = useState("all");
   const [activeFilter, setActiveFilter] = useState("all");
+  const [sessionFilter, setSessionFilter] = useState("");
+  const [courseFilter, setCourseFilter] = useState("");
+  const [languageFilter, setLanguageFilter] = useState("");
   const [sortBy, setSortBy] = useState<SortKey>("latest");
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(25);
   const [reloadKey, setReloadKey] = useState(0);
+  const [overviewOpen, setOverviewOpen] = useState(false);
+
+  const [sessionOptions, setSessionOptions] = useState<SessionOption[]>([]);
+  const [courseOptions, setCourseOptions] = useState<CourseOption[]>([]);
+  const [languageOptions, setLanguageOptions] = useState<string[]>([]);
 
   const [totalFiltered, setTotalFiltered] = useState(0);
   const [totalPages, setTotalPages] = useState(1);
@@ -134,7 +181,10 @@ export default function AdminProductsPage() {
     total: 0,
     active: 0,
     inactive: 0,
-    available: 0,
+    availableProducts: 0,
+    availablePdfCount: 0,
+    onDemandByCategory: [] as CategoryCount[],
+    wantToBuyByCategory: [] as CategoryCount[],
   });
 
   const requestSeq = useRef(0);
@@ -149,7 +199,17 @@ export default function AdminProductsPage() {
 
   useEffect(() => {
     setPage(1);
-  }, [debouncedSearch, availabilityFilter, activeFilter, sortBy, pageSize]);
+  }, [
+    debouncedSearch,
+    categoryFilter,
+    availabilityFilter,
+    activeFilter,
+    sessionFilter,
+    courseFilter,
+    languageFilter,
+    sortBy,
+    pageSize,
+  ]);
 
   useEffect(() => {
     const seq = ++requestSeq.current;
@@ -170,9 +230,13 @@ export default function AdminProductsPage() {
         params.set("sortBy", sortBy);
 
         if (debouncedSearch) params.set("q", debouncedSearch);
+        if (categoryFilter.trim()) params.set("category", categoryFilter.trim());
         if (availabilityFilter !== "all") params.set("availability", availabilityFilter);
         if (activeFilter === "active") params.set("isActive", "true");
         if (activeFilter === "inactive") params.set("isActive", "false");
+        if (sessionFilter.trim()) params.set("session", sessionFilter.trim());
+        if (courseFilter.trim()) params.set("courseCode", courseFilter.trim());
+        if (languageFilter.trim()) params.set("language", languageFilter.trim());
 
         const res = await fetch(`/api/admin/products?${params.toString()}`, {
           credentials: "include",
@@ -191,6 +255,7 @@ export default function AdminProductsPage() {
         const nextItems = Array.isArray(data?.products) ? data.products : [];
         const nextPagination = data?.pagination;
         const nextTotals = data?.totals;
+        const nextFilterOptions = data?.filterOptions;
 
         const nextTotalPages = Math.max(1, Number(nextPagination?.totalPages || 1));
 
@@ -207,8 +272,25 @@ export default function AdminProductsPage() {
           total: Number(nextTotals?.allProducts || 0),
           active: Number(nextTotals?.activeProducts || 0),
           inactive: Number(nextTotals?.inactiveProducts || 0),
-          available: Number(nextTotals?.availableProducts || 0),
+          availableProducts: Number(nextTotals?.availableProducts || 0),
+          availablePdfCount: Number(nextTotals?.availablePdfCount || 0),
+          onDemandByCategory: Array.isArray(nextTotals?.onDemandByCategory)
+            ? nextTotals.onDemandByCategory
+            : [],
+          wantToBuyByCategory: Array.isArray(nextTotals?.wantToBuyByCategory)
+            ? nextTotals.wantToBuyByCategory
+            : [],
         });
+
+        setSessionOptions(
+          Array.isArray(nextFilterOptions?.sessions) ? nextFilterOptions.sessions : []
+        );
+        setCourseOptions(
+          Array.isArray(nextFilterOptions?.courses) ? nextFilterOptions.courses : []
+        );
+        setLanguageOptions(
+          Array.isArray(nextFilterOptions?.languages) ? nextFilterOptions.languages : []
+        );
       } catch (e: any) {
         if (controller.signal.aborted) return;
         if (seq !== requestSeq.current) return;
@@ -228,10 +310,36 @@ export default function AdminProductsPage() {
     load();
 
     return () => controller.abort();
-  }, [page, pageSize, debouncedSearch, availabilityFilter, activeFilter, sortBy, reloadKey, loading]);
+  }, [
+    page,
+    pageSize,
+    debouncedSearch,
+    categoryFilter,
+    availabilityFilter,
+    activeFilter,
+    sessionFilter,
+    courseFilter,
+    languageFilter,
+    sortBy,
+    reloadKey,
+    loading,
+  ]);
 
   async function reload() {
     setReloadKey((x) => x + 1);
+  }
+
+  function clearFilters() {
+    setSearch("");
+    setDebouncedSearch("");
+    setCategoryFilter("");
+    setAvailabilityFilter("all");
+    setActiveFilter("all");
+    setSessionFilter("");
+    setCourseFilter("");
+    setLanguageFilter("");
+    setSortBy("latest");
+    setPage(1);
   }
 
   async function softDelete(id: string) {
@@ -321,12 +429,11 @@ export default function AdminProductsPage() {
   }, [page, pageSize, totalFiltered]);
 
   const visiblePages = useMemo(() => {
-    const pages = Array.from({ length: totalPages }, (_, i) => i + 1).filter((p) => {
+    return Array.from({ length: totalPages }, (_, i) => i + 1).filter((p) => {
       if (totalPages <= 7) return true;
       if (p === 1 || p === totalPages) return true;
       return Math.abs(p - page) <= 1;
     });
-    return pages;
   }, [page, totalPages]);
 
   const trashBadge = useMemo(() => {
@@ -351,6 +458,15 @@ export default function AdminProductsPage() {
             </div>
 
             <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={() => setOverviewOpen(true)}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-950 text-white transition font-bold shadow-sm"
+              >
+                <BarChart3 size={18} />
+                Overview
+              </button>
+
               <button
                 onClick={reload}
                 disabled={fetching}
@@ -380,7 +496,7 @@ export default function AdminProductsPage() {
 
               <Link
                 href="/admin/products/new"
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-950 text-white transition font-bold shadow-sm"
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-bold shadow-sm"
               >
                 <Plus size={18} />
                 Add New
@@ -388,30 +504,8 @@ export default function AdminProductsPage() {
             </div>
           </div>
 
-          <div className="mt-6 grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
-            <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
-              <div className="text-xs font-bold text-slate-500 uppercase tracking-wide">Total Products</div>
-              <div className="mt-2 text-2xl font-extrabold">{stats.total}</div>
-            </div>
-
-            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
-              <div className="text-xs font-bold text-emerald-700 uppercase tracking-wide">Active</div>
-              <div className="mt-2 text-2xl font-extrabold text-emerald-700">{stats.active}</div>
-            </div>
-
-            <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4">
-              <div className="text-xs font-bold text-rose-700 uppercase tracking-wide">Inactive</div>
-              <div className="mt-2 text-2xl font-extrabold text-rose-700">{stats.inactive}</div>
-            </div>
-
-            <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
-              <div className="text-xs font-bold text-amber-700 uppercase tracking-wide">Available PDFs</div>
-              <div className="mt-2 text-2xl font-extrabold text-amber-700">{stats.available}</div>
-            </div>
-          </div>
-
           <div className="mt-6 rounded-2xl border border-gray-200 bg-gray-50 p-4">
-            <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1.4fr)_repeat(4,minmax(0,1fr))] gap-3">
+            <div className="grid grid-cols-1 lg:grid-cols-[minmax(0,1.5fr)_repeat(7,minmax(0,1fr))] gap-3">
               <div className="relative">
                 <Search size={18} className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                 <input
@@ -421,6 +515,58 @@ export default function AdminProductsPage() {
                   className="w-full pl-10 pr-4 py-3 rounded-xl border border-slate-200 bg-white outline-none focus:border-blue-500"
                 />
               </div>
+
+              <select
+                value={categoryFilter}
+                onChange={(e) => setCategoryFilter(e.target.value)}
+                className="px-4 py-3 rounded-xl border border-slate-200 bg-white outline-none"
+              >
+                <option value="">All Categories</option>
+                {CATEGORY_OPTIONS.map((item) => (
+                  <option key={item} value={item}>
+                    {item}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                value={sessionFilter}
+                onChange={(e) => setSessionFilter(e.target.value)}
+                className="px-4 py-3 rounded-xl border border-slate-200 bg-white outline-none"
+              >
+                <option value="">All Sessions</option>
+                {sessionOptions.map((item) => (
+                  <option key={item._id} value={item.name}>
+                    {item.name}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                value={courseFilter}
+                onChange={(e) => setCourseFilter(e.target.value)}
+                className="px-4 py-3 rounded-xl border border-slate-200 bg-white outline-none"
+              >
+                <option value="">All Courses</option>
+                {courseOptions.map((item) => (
+                  <option key={item._id} value={item.code}>
+                    {item.code}{item.title ? ` — ${item.title}` : ""}
+                  </option>
+                ))}
+              </select>
+
+              <select
+                value={languageFilter}
+                onChange={(e) => setLanguageFilter(e.target.value)}
+                className="px-4 py-3 rounded-xl border border-slate-200 bg-white outline-none"
+              >
+                <option value="">All Medium</option>
+                {languageOptions.map((item) => (
+                  <option key={item} value={item}>
+                    {item}
+                  </option>
+                ))}
+              </select>
 
               <select
                 value={availabilityFilter}
@@ -458,17 +604,6 @@ export default function AdminProductsPage() {
                 <option value="active_first">Active First</option>
                 <option value="availability">Availability</option>
               </select>
-
-              <select
-                value={String(pageSize)}
-                onChange={(e) => setPageSize(Number(e.target.value))}
-                className="px-4 py-3 rounded-xl border border-slate-200 bg-white outline-none"
-              >
-                <option value="25">25 / page</option>
-                <option value="50">50 / page</option>
-                <option value="100">100 / page</option>
-                <option value="200">200 / page</option>
-              </select>
             </div>
 
             <div className="mt-3 flex items-center justify-between gap-3 flex-wrap text-sm">
@@ -482,12 +617,34 @@ export default function AdminProductsPage() {
                 ) : null}
               </div>
 
-              {fetching ? (
-                <div className="inline-flex items-center gap-2 text-slate-500 font-semibold">
-                  <LoaderCircle size={16} className="animate-spin" />
-                  Updating results...
-                </div>
-              ) : null}
+              <div className="flex items-center gap-2 flex-wrap">
+                <select
+                  value={String(pageSize)}
+                  onChange={(e) => setPageSize(Number(e.target.value))}
+                  className="px-3 py-2 rounded-xl border border-slate-200 bg-white outline-none text-sm font-semibold"
+                >
+                  <option value="25">25 / page</option>
+                  <option value="50">50 / page</option>
+                  <option value="100">100 / page</option>
+                  <option value="200">200 / page</option>
+                </select>
+
+                <button
+                  type="button"
+                  onClick={clearFilters}
+                  className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-semibold shadow-sm"
+                >
+                  <X size={16} />
+                  Clear Filters
+                </button>
+
+                {fetching ? (
+                  <div className="inline-flex items-center gap-2 text-slate-500 font-semibold">
+                    <LoaderCircle size={16} className="animate-spin" />
+                    Updating results...
+                  </div>
+                ) : null}
+              </div>
             </div>
           </div>
 
@@ -570,6 +727,12 @@ export default function AdminProductsPage() {
                               <div className="mt-1 text-sm text-slate-600 break-words">
                                 <b>Category:</b> {p.category} &nbsp; | &nbsp; <b>Price:</b> ₹{Number(p.price || 0)}
                               </div>
+
+                              {Array.isArray(p.courseCodes) && p.courseCodes.length > 0 ? (
+                                <div className="mt-1 text-xs text-slate-500 break-words">
+                                  Courses: <b>{p.courseCodes.join(", ")}</b>
+                                </div>
+                              ) : null}
 
                               <div className="mt-1 text-xs text-slate-500">
                                 Created: {formatDate(p.createdAt)}
@@ -715,10 +878,123 @@ export default function AdminProductsPage() {
 
           <div className="mt-6 text-xs text-slate-500 flex items-center gap-2">
             <Clock3 size={14} />
-            Admin products page is now using server-side search, sorting, counts, and pagination for large product volume.
+            Admin products page is now using server-side search, sorting, counts, pagination, and dynamic filter options.
           </div>
         </div>
       </div>
+
+      {overviewOpen ? (
+        <div className="fixed inset-0 z-50 bg-slate-950/50 backdrop-blur-sm px-4 py-6 overflow-y-auto">
+          <div className="max-w-5xl mx-auto rounded-3xl bg-white border border-gray-200 shadow-2xl overflow-hidden">
+            <div className="px-5 py-4 border-b border-gray-200 bg-slate-50 flex items-center justify-between gap-4">
+              <div>
+                <div className="text-xl font-extrabold flex items-center gap-2">
+                  <BarChart3 size={22} />
+                  Products Overview
+                </div>
+                <div className="text-xs text-slate-500 mt-1">
+                  Available PDFs count is based on live PDF Vault uploads, not product availability.
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setOverviewOpen(false)}
+                className="h-10 w-10 rounded-2xl bg-white hover:bg-gray-50 border border-gray-200 flex items-center justify-center shadow-sm"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="p-5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-4 gap-4">
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <div className="text-xs font-bold text-slate-500 uppercase tracking-wide">Total Products</div>
+                  <div className="mt-2 text-2xl font-extrabold">{stats.total}</div>
+                </div>
+
+                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                  <div className="text-xs font-bold text-emerald-700 uppercase tracking-wide">Active</div>
+                  <div className="mt-2 text-2xl font-extrabold text-emerald-700">{stats.active}</div>
+                </div>
+
+                <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4">
+                  <div className="text-xs font-bold text-rose-700 uppercase tracking-wide">Inactive</div>
+                  <div className="mt-2 text-2xl font-extrabold text-rose-700">{stats.inactive}</div>
+                </div>
+
+                <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
+                  <div className="flex items-center justify-between gap-3">
+                    <div>
+                      <div className="text-xs font-bold text-blue-700 uppercase tracking-wide">Available PDFs</div>
+                      <div className="mt-2 text-2xl font-extrabold text-blue-700">{stats.availablePdfCount}</div>
+                    </div>
+                    <FileText size={24} className="text-blue-700" />
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-5 grid grid-cols-1 lg:grid-cols-2 gap-5">
+                <div className="rounded-2xl border border-amber-200 bg-white overflow-hidden">
+                  <div className="px-4 py-3 bg-amber-50 border-b border-amber-200">
+                    <div className="text-sm font-extrabold text-amber-800">
+                      Category-wise On Demand Products
+                    </div>
+                  </div>
+
+                  <div className="p-4">
+                    {stats.onDemandByCategory.length === 0 ? (
+                      <div className="text-sm text-slate-500 font-semibold">No On Demand products found.</div>
+                    ) : (
+                      <div className="space-y-2">
+                        {stats.onDemandByCategory.map((row) => (
+                          <div
+                            key={`on-demand-${row.category}`}
+                            className="flex items-center justify-between gap-3 rounded-xl border border-amber-100 bg-amber-50 px-3 py-2"
+                          >
+                            <div className="text-sm font-bold text-slate-800 break-words">{row.category}</div>
+                            <div className="text-sm font-extrabold text-amber-800">{row.count}</div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-rose-200 bg-white overflow-hidden">
+                  <div className="px-4 py-3 bg-rose-50 border-b border-rose-200">
+                    <div className="text-sm font-extrabold text-rose-800">
+                      Category-wise Want to Buy Products
+                    </div>
+                  </div>
+
+                  <div className="p-4">
+                    {stats.wantToBuyByCategory.length === 0 ? (
+                      <div className="text-sm text-slate-500 font-semibold">No Want to Buy products found.</div>
+                    ) : (
+                      <div className="space-y-2">
+                        {stats.wantToBuyByCategory.map((row) => (
+                          <div
+                            key={`want-to-buy-${row.category}`}
+                            className="flex items-center justify-between gap-3 rounded-xl border border-rose-100 bg-rose-50 px-3 py-2"
+                          >
+                            <div className="text-sm font-bold text-slate-800 break-words">{row.category}</div>
+                            <div className="text-sm font-extrabold text-rose-800">{row.count}</div>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-5 text-xs text-slate-500">
+                Note: Physical hardcopy products are excluded from category-wise On Demand and Want to Buy breakdown.
+              </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </main>
   );
 }

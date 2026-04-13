@@ -3,6 +3,7 @@ import Product from "@/models/Product";
 import PdfVaultFile from "@/models/PdfVaultFile";
 import OfficialPaper from "@/models/OfficialPaper";
 import { autoResolveWantToBuyForProduct } from "@/lib/wantToBuyAutoResolve";
+import { syncGeneratedHardcopyForProductChange } from "@/lib/hardcopyAutoSync";
 
 function safeStr(x: any) {
   return String(x ?? "").trim();
@@ -120,7 +121,10 @@ export async function syncProductAvailabilityBySku(skuInput: string) {
 
   if (!product) {
     const fallbackProduct: any = await Product.findOne({
-      sku: { $regex: `^${safeStr(skuInput).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, $options: "i" },
+      sku: {
+        $regex: `^${safeStr(skuInput).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+        $options: "i",
+      },
       deletedAt: null,
     });
 
@@ -150,6 +154,8 @@ export async function syncProductAvailabilityByProductId(productId: string) {
     };
   }
 
+  const beforeProduct = product.toObject ? product.toObject() : { ...product };
+
   const snapshot = await getDerivedAvailabilitySnapshotBySku(safeStr(product.sku));
   const beforeAvailability = safeStr(product.availability || "");
   const beforePdfKey = safeStr(product.pdfKey || "");
@@ -157,9 +163,7 @@ export async function syncProductAvailabilityByProductId(productId: string) {
 
   const nextPdfKey = snapshot.hasSolvedPdf ? snapshot.solvedPdfKey : "";
   const nextPages =
-    snapshot.hasSolvedPdf && snapshot.solvedPdfPages > 0
-      ? snapshot.solvedPdfPages
-      : 0;
+    snapshot.hasSolvedPdf && snapshot.solvedPdfPages > 0 ? snapshot.solvedPdfPages : 0;
 
   product.pdfKey = nextPdfKey;
   product.pdfUrl = nextPdfKey ? "" : safeStr(product.pdfUrl || "");
@@ -169,12 +173,33 @@ export async function syncProductAvailabilityByProductId(productId: string) {
 
   await product.save();
 
+  const afterProductDoc: any = await Product.findById(product._id);
+  const afterProduct = afterProductDoc?.toObject
+    ? afterProductDoc.toObject()
+    : product.toObject
+    ? product.toObject()
+    : product;
+
   const resolveResult = await autoResolveWantToBuyForProduct({
     productId: product._id,
     availability: product.availability,
     pdfKey: product.pdfKey,
     isActive: product.isActive,
   });
+
+  let hardcopySync: any = { ok: true, action: "skipped" };
+  try {
+    hardcopySync = await syncGeneratedHardcopyForProductChange({
+      before: beforeProduct,
+      after: afterProduct,
+    });
+  } catch (error: any) {
+    hardcopySync = {
+      ok: false,
+      action: "failed",
+      reason: safeStr(error?.message || "Hardcopy sync failed"),
+    };
+  }
 
   return {
     ok: true,
@@ -192,6 +217,7 @@ export async function syncProductAvailabilityByProductId(productId: string) {
     },
     snapshot,
     autoResolvedWantToBuy: resolveResult,
+    hardcopySync,
   };
 }
 

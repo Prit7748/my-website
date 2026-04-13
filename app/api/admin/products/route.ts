@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
 import type { SortOrder } from "mongoose";
+
 import dbConnect from "@/lib/db";
 import Product from "@/models/Product";
+import PdfVaultFile from "@/models/PdfVaultFile";
+import Session from "@/models/Session";
+import Course from "@/models/Course";
 import { getAuthUser, hasPermission } from "@/lib/auth";
 import { autoResolveWantToBuyForProduct } from "@/lib/wantToBuyAutoResolve";
 import { findVaultPdfBySku, safeStr as safeVaultStr } from "@/lib/pdfVault";
@@ -306,11 +310,14 @@ function buildListQuery(url: URL) {
   const category = safeStr(url.searchParams.get("category"));
   const availability = normalizeAvailability(url.searchParams.get("availability"));
   const isActiveParam = safeStr(url.searchParams.get("isActive"));
+  const session = safeStr(url.searchParams.get("session"));
+  const courseCode = safeStr(url.searchParams.get("courseCode")).toUpperCase();
+  const language = safeStr(url.searchParams.get("language"));
 
   const query: any = trash ? { deletedAt: { $ne: null } } : { deletedAt: null };
 
   if (category) {
-    const cats = uniqueStrings(category.split(",").map((x) => x.trim()));
+    const cats = uniqueStrings(category.split(",").map((x) => normalizeProductCategory(x)));
     if (cats.length === 1) query.category = cats[0];
     else if (cats.length > 1) query.category = { $in: cats };
   }
@@ -323,6 +330,29 @@ function buildListQuery(url: URL) {
     const v = isActiveParam.toLowerCase();
     if (["1", "true", "yes", "active"].includes(v)) query.isActive = true;
     if (["0", "false", "no", "inactive"].includes(v)) query.isActive = false;
+  }
+
+  if (session) {
+    const rx = new RegExp(escapeRegex(session), "i");
+    const session6 = normalizeSession6(session);
+    query.$and = Array.isArray(query.$and) ? query.$and : [];
+    query.$and.push({
+      $or: [{ session: rx }, ...(session6 ? [{ session6 }] : [])],
+    });
+  }
+
+  if (courseCode) {
+    const rx = new RegExp(escapeRegex(courseCode), "i");
+    query.courseCodes = rx;
+  }
+
+  if (language) {
+    const rx = new RegExp(escapeRegex(language), "i");
+    const lang3 = normalizeLang3(language);
+    query.$and = Array.isArray(query.$and) ? query.$and : [];
+    query.$and.push({
+      $or: [{ language: rx }, ...(lang3 ? [{ lang3 }] : [])],
+    });
   }
 
   if (q) {
@@ -364,7 +394,106 @@ function buildListQuery(url: URL) {
     category,
     availability,
     isActiveParam,
+    session,
+    courseCode,
+    language,
     query,
+  };
+}
+
+async function getCategoryAvailabilityBreakdown() {
+  const rows: any[] = await Product.aggregate([
+    {
+      $match: {
+        deletedAt: null,
+        category: { $ne: PHYSICAL_CATEGORY },
+        availability: { $in: ["on_demand", "want_to_buy"] },
+      },
+    },
+    {
+      $group: {
+        _id: {
+          category: "$category",
+          availability: "$availability",
+        },
+        count: { $sum: 1 },
+      },
+    },
+    {
+      $sort: {
+        "_id.availability": 1,
+        count: -1,
+        "_id.category": 1,
+      },
+    },
+  ]);
+
+  const onDemandByCategory: Array<{ category: string; count: number }> = [];
+  const wantToBuyByCategory: Array<{ category: string; count: number }> = [];
+
+  for (const row of rows) {
+    const category = normalizeProductCategory(row?._id?.category);
+    const availability = safeStr(row?._id?.availability);
+    const count = Number(row?.count || 0);
+
+    if (!category || category === PHYSICAL_CATEGORY || count <= 0) continue;
+
+    if (availability === "on_demand") {
+      onDemandByCategory.push({ category, count });
+    }
+
+    if (availability === "want_to_buy") {
+      wantToBuyByCategory.push({ category, count });
+    }
+  }
+
+  return {
+    onDemandByCategory,
+    wantToBuyByCategory,
+  };
+}
+
+async function getFilterOptions() {
+  const [sessionsRaw, coursesRaw, languagesRaw] = await Promise.all([
+    Session.find({ isActive: true })
+      .sort({ sortOrder: 1, name: 1, _id: 1 })
+      .select("_id name slug")
+      .lean(),
+    Course.find({ isActive: true })
+      .sort({ code: 1, _id: 1 })
+      .select("_id code title")
+      .lean(),
+    Product.aggregate([
+      { $match: { deletedAt: null, language: { $type: "string", $ne: "" } } },
+      { $group: { _id: "$language" } },
+      { $sort: { _id: 1 } },
+    ]),
+  ]);
+
+  const sessions = (Array.isArray(sessionsRaw) ? sessionsRaw : []).map((row: any) => ({
+    _id: String(row._id),
+    name: safeStr(row.name),
+    slug: safeStr(row.slug),
+  }));
+
+  const courses = (Array.isArray(coursesRaw) ? coursesRaw : []).map((row: any) => ({
+    _id: String(row._id),
+    code: safeStr(row.code),
+    title: safeStr(row.title),
+  }));
+
+  const languages = Array.from(
+    new Set(
+      (Array.isArray(languagesRaw) ? languagesRaw : [])
+        .map((row: any) => safeStr(row?._id))
+        .filter(Boolean)
+    )
+  );
+
+  return {
+    sessions,
+    courses,
+    languages,
   };
 }
 
@@ -379,7 +508,17 @@ export async function GET(req: NextRequest) {
   await dbConnect();
 
   const url = new URL(req.url);
-  const { trash, q, category, availability, isActiveParam, query } = buildListQuery(url);
+  const {
+    trash,
+    q,
+    category,
+    availability,
+    isActiveParam,
+    session,
+    courseCode,
+    language,
+    query,
+  } = buildListQuery(url);
 
   const pageRaw = Math.trunc(safeNum(url.searchParams.get("page"), 1));
   const page = Math.max(pageRaw || 1, 1);
@@ -399,7 +538,10 @@ export async function GET(req: NextRequest) {
     "category",
     "subjectCode",
     "session",
+    "session6",
     "language",
+    "lang3",
+    "courseCodes",
     "price",
     "isActive",
     "availability",
@@ -415,32 +557,49 @@ export async function GET(req: NextRequest) {
 
   const statsPromise = trash
     ? Promise.resolve({
-        total: 0,
-        active: 0,
-        inactive: 0,
-        available: 0,
+        productStats: [],
+        vaultPdfCount: 0,
+        breakdown: {
+          onDemandByCategory: [],
+          wantToBuyByCategory: [],
+        },
+        filterOptions: {
+          sessions: [],
+          courses: [],
+          languages: [],
+        },
       })
-    : Product.aggregate([
-        { $match: baseLiveQuery },
-        {
-          $group: {
-            _id: null,
-            total: { $sum: 1 },
-            active: {
-              $sum: {
-                $cond: [{ $eq: ["$isActive", true] }, 1, 0],
+    : Promise.all([
+        Product.aggregate([
+          { $match: baseLiveQuery },
+          {
+            $group: {
+              _id: null,
+              total: { $sum: 1 },
+              active: {
+                $sum: {
+                  $cond: [{ $eq: ["$isActive", true] }, 1, 0],
+                },
               },
-            },
-            available: {
-              $sum: {
-                $cond: [{ $eq: ["$availability", "available"] }, 1, 0],
+              availableProducts: {
+                $sum: {
+                  $cond: [{ $eq: ["$availability", "available"] }, 1, 0],
+                },
               },
             },
           },
-        },
-      ]);
+        ]),
+        PdfVaultFile.countDocuments({ deletedAt: null }),
+        getCategoryAvailabilityBreakdown(),
+        getFilterOptions(),
+      ]).then(([productStats, vaultPdfCount, breakdown, filterOptions]) => ({
+        productStats,
+        vaultPdfCount,
+        breakdown,
+        filterOptions,
+      }));
 
-  const [products, filteredTotal, trashCount, statsAgg] = await Promise.all([
+  const [products, filteredTotal, trashCount, statsData] = await Promise.all([
     Product.find(query)
       .select(selectFields)
       .sort(sort)
@@ -452,11 +611,16 @@ export async function GET(req: NextRequest) {
     statsPromise,
   ]);
 
-  const statsRow = Array.isArray(statsAgg) ? statsAgg[0] : null;
+  const statsAgg = Array.isArray((statsData as any)?.productStats)
+    ? (statsData as any).productStats
+    : [];
+  const statsRow = statsAgg[0] || null;
+
   const totalProducts = Number(statsRow?.total || 0);
   const activeProducts = Number(statsRow?.active || 0);
-  const availableProducts = Number(statsRow?.available || 0);
+  const availableProducts = Number(statsRow?.availableProducts || 0);
   const inactiveProducts = Math.max(0, totalProducts - activeProducts);
+  const availablePdfCount = Number((statsData as any)?.vaultPdfCount || 0);
 
   const totalPages = Math.max(1, Math.ceil(filteredTotal / limit));
 
@@ -471,7 +635,15 @@ export async function GET(req: NextRequest) {
         category,
         availability,
         isActive: isActiveParam || "",
+        session,
+        courseCode,
+        language,
         sortBy,
+      },
+      filterOptions: {
+        sessions: (statsData as any)?.filterOptions?.sessions || [],
+        courses: (statsData as any)?.filterOptions?.courses || [],
+        languages: (statsData as any)?.filterOptions?.languages || [],
       },
       pagination: {
         page,
@@ -488,6 +660,9 @@ export async function GET(req: NextRequest) {
         activeProducts,
         inactiveProducts,
         availableProducts,
+        availablePdfCount,
+        onDemandByCategory: (statsData as any)?.breakdown?.onDemandByCategory || [],
+        wantToBuyByCategory: (statsData as any)?.breakdown?.wantToBuyByCategory || [],
         trashCount,
       },
     },
