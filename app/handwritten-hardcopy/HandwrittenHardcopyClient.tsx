@@ -685,7 +685,7 @@ function SearchBox({
   }, [setShowSuggest]);
 
   return (
-    <div ref={wrapperRef} className="relative">
+    <div ref={wrapperRef} className="relative z-40">
       <div
         className={`flex items-center gap-3 rounded-[24px] border border-slate-200 bg-white shadow-sm transition hover:border-slate-300 ${
           isLarge ? "px-4 py-4 md:px-5 md:py-5" : "px-3 py-3"
@@ -949,8 +949,8 @@ function FiltersPanel({
   };
 
   return (
-    <div className="overflow-hidden rounded-[30px] border border-slate-200/80 bg-gradient-to-br from-white via-white to-slate-50/80 shadow-[0_18px_60px_rgba(15,23,42,0.08)]">
-      <div className="border-b border-slate-200/70 bg-gradient-to-r from-slate-50 via-blue-50/70 to-cyan-50/60 px-4 py-4 md:px-5">
+    <div className="relative z-20 rounded-[30px] border border-slate-200/80 bg-gradient-to-br from-white via-white to-slate-50/80 shadow-[0_18px_60px_rgba(15,23,42,0.08)]">
+      <div className="rounded-t-[30px] border-b border-slate-200/70 bg-gradient-to-r from-slate-50 via-blue-50/70 to-cyan-50/60 px-4 py-4 md:px-5">
         <div className="flex flex-col gap-4">
           <div className="flex items-start gap-3">
             <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-600 via-indigo-600 to-cyan-500 text-white shadow-lg">
@@ -1959,7 +1959,7 @@ export default function HandwrittenHardcopyClient({
         </div>
       </section>
 
-      <section className="relative z-[2] bg-white pb-2">
+      <section className="relative z-30 bg-white pb-2">
         <div className="max-w-[1600px] mx-auto px-4">
           <div className="-mt-1 md:mt-0">
             <div className="hidden lg:block">
@@ -1991,7 +1991,7 @@ export default function HandwrittenHardcopyClient({
               />
             </div>
 
-            <div className="space-y-3 lg:hidden">
+            <div className="relative z-40 space-y-3 lg:hidden">
               <SearchBox
                 value={searchInput}
                 onChange={setSearchInput}
@@ -2283,93 +2283,93 @@ export default function HandwrittenHardcopyClient({
               </button>
             </div>
           ) : null}
-        </div>
-      </section>
 
-      <section className="bg-white border-t border-gray-100">
-        <div className="max-w-[1600px] mx-auto px-4 py-10 md:py-12 space-y-6">
-          <div className="overflow-hidden rounded-[30px] border border-slate-200 bg-gradient-to-br from-white via-white to-slate-50 shadow-[0_18px_60px_rgba(15,23,42,0.06)]">
-            <div className="grid gap-6 p-5 md:p-6 lg:grid-cols-[minmax(0,1.2fr)_minmax(280px,0.8fr)] lg:items-start">
-              <div>
-                <div className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-[11px] font-extrabold uppercase tracking-wide text-blue-700">
-                  Student guide
-                </div>
-
-                <h2 className="mt-4 text-2xl font-extrabold leading-tight text-slate-900 md:text-3xl">
-                  How to select the right handwritten hardcopy before ordering
-                </h2>
-
-                <p className="mt-3 text-sm font-medium leading-7 text-slate-700 md:text-[15px]">
-                  {studentGuideParagraph}
-                </p>
-
-                <p className="mt-3 text-sm font-medium leading-7 text-slate-700 md:text-[15px]">
-                  The usual safe order is simple: search the subject code or title first, then confirm the course,
-                  then match the session, then check the medium, and only after that open the final product page.
-                  This is especially useful on larger catalogues where many product names can look similar.
-                </p>
-
-                <p className="mt-3 text-sm font-medium leading-7 text-slate-700 md:text-[15px]">
-                  Students who prefer physical reading, margin marking, and page-by-page revision often like hardcopy
-                  material more than only digital browsing. That is why this page keeps the top portion compact for quick
-                  discovery and uses the lower section to explain the practical checks that matter before ordering.
-                </p>
-              </div>
-
-              <div className="grid gap-3">
-                <div className="rounded-[24px] border border-slate-200 bg-white p-4 shadow-sm">
-                  <div className="flex items-start gap-2">
-                    <Pencil className="mt-0.5 text-indigo-600" size={18} />
-                    <div>
-                      <div className="text-[11px] font-extrabold uppercase tracking-wide text-slate-500">
-                        Preview first
-                      </div>
-                      <div className="mt-2 text-base font-extrabold text-slate-900">
-                        Check handwriting samples before ordering
-                      </div>
-                      <p className="mt-2 text-[13px] font-medium leading-6 text-slate-600">
-                        The samples button gives a faster preview flow without crowding the hero area.
-                      </p>
+          <section className="bg-white border-t border-gray-100 mt-10 rounded-[30px] overflow-hidden shadow-[0_18px_60px_rgba(15,23,42,0.06)]">
+            <div className="max-w-[1600px] mx-auto space-y-6">
+              <div className="border border-slate-200 bg-gradient-to-br from-white via-white to-slate-50">
+                <div className="grid gap-6 p-5 md:p-6 lg:grid-cols-[minmax(0,1.2fr)_minmax(280px,0.8fr)] lg:items-start">
+                  <div>
+                    <div className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-3 py-1 text-[11px] font-extrabold uppercase tracking-wide text-blue-700">
+                      Student guide
                     </div>
-                  </div>
-                </div>
 
-                <div className="rounded-[24px] border border-slate-200 bg-white p-4 shadow-sm">
-                  <div className="flex items-start gap-2">
-                    <BadgeCheck className="mt-0.5 text-emerald-600" size={18} />
-                    <div>
-                      <div className="text-[11px] font-extrabold uppercase tracking-wide text-slate-500">
-                        Before opening any product
+                    <h2 className="mt-4 text-2xl font-extrabold leading-tight text-slate-900 md:text-3xl">
+                      How to select the right handwritten hardcopy before ordering
+                    </h2>
+
+                    <p className="mt-3 text-sm font-medium leading-7 text-slate-700 md:text-[15px]">
+                      {studentGuideParagraph}
+                    </p>
+
+                    <p className="mt-3 text-sm font-medium leading-7 text-slate-700 md:text-[15px]">
+                      The usual safe order is simple: search the subject code or title first, then confirm the course,
+                      then match the session, then check the medium, and only after that open the final product page.
+                      This is especially useful on larger catalogues where many product names can look similar.
+                    </p>
+
+                    <p className="mt-3 text-sm font-medium leading-7 text-slate-700 md:text-[15px]">
+                      Students who prefer physical reading, margin marking, and page-by-page revision often like hardcopy
+                      material more than only digital browsing. That is why this page keeps the top portion compact for quick
+                      discovery and uses the lower section to explain the practical checks that matter before ordering.
+                    </p>
+                  </div>
+
+                  <div className="grid gap-3">
+                    <div className="rounded-[24px] border border-slate-200 bg-white p-4 shadow-sm">
+                      <div className="flex items-start gap-2">
+                        <Pencil className="mt-0.5 text-indigo-600" size={18} />
+                        <div>
+                          <div className="text-[11px] font-extrabold uppercase tracking-wide text-slate-500">
+                            Preview first
+                          </div>
+                          <div className="mt-2 text-base font-extrabold text-slate-900">
+                            Check handwriting samples before ordering
+                          </div>
+                          <p className="mt-2 text-[13px] font-medium leading-6 text-slate-600">
+                            The samples button gives a faster preview flow without crowding the hero area.
+                          </p>
+                        </div>
                       </div>
-                      <div className="mt-2 text-base font-extrabold text-slate-900">
-                        Match course, session, and medium
-                      </div>
-                      <p className="mt-2 text-[13px] font-medium leading-6 text-slate-600">
-                        These checks reduce mismatch and help students pick the correct hardcopy faster.
-                      </p>
                     </div>
-                  </div>
-                </div>
 
-                <div className="rounded-[24px] border border-blue-200 bg-blue-50/70 p-4 shadow-sm">
-                  <div className="flex items-start gap-2">
-                    <Sparkles className="mt-0.5 text-blue-700" size={18} />
-                    <div>
-                      <div className="text-[11px] font-extrabold uppercase tracking-wide text-blue-700">
-                        Current view
+                    <div className="rounded-[24px] border border-slate-200 bg-white p-4 shadow-sm">
+                      <div className="flex items-start gap-2">
+                        <BadgeCheck className="mt-0.5 text-emerald-600" size={18} />
+                        <div>
+                          <div className="text-[11px] font-extrabold uppercase tracking-wide text-slate-500">
+                            Before opening any product
+                          </div>
+                          <div className="mt-2 text-base font-extrabold text-slate-900">
+                            Match course, session, and medium
+                          </div>
+                          <p className="mt-2 text-[13px] font-medium leading-6 text-slate-600">
+                            These checks reduce mismatch and help students pick the correct hardcopy faster.
+                          </p>
+                        </div>
                       </div>
-                      <div className="mt-2 text-base font-extrabold text-slate-900">{countText}</div>
-                      <p className="mt-2 text-[13px] font-medium leading-6 text-slate-700">
-                        {resultSummary}
-                      </p>
+                    </div>
+
+                    <div className="rounded-[24px] border border-blue-200 bg-blue-50/70 p-4 shadow-sm">
+                      <div className="flex items-start gap-2">
+                        <Sparkles className="mt-0.5 text-blue-700" size={18} />
+                        <div>
+                          <div className="text-[11px] font-extrabold uppercase tracking-wide text-blue-700">
+                            Current view
+                          </div>
+                          <div className="mt-2 text-base font-extrabold text-slate-900">{countText}</div>
+                          <p className="mt-2 text-[13px] font-medium leading-6 text-slate-700">
+                            {resultSummary}
+                          </p>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </div>
               </div>
             </div>
-          </div>
+          </section>
 
-          <div className="grid gap-6 lg:grid-cols-2">
+          <div className="grid gap-6 lg:grid-cols-2 mt-6">
             <article className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-[0_12px_40px_rgba(15,23,42,0.05)] md:p-6">
               <h3 className="text-xl font-extrabold text-slate-900">
                 What to check before ordering handwritten hardcopy
@@ -2441,7 +2441,7 @@ export default function HandwrittenHardcopyClient({
             </article>
           </div>
 
-          <div className="rounded-[30px] border border-slate-200 bg-white p-5 shadow-[0_12px_40px_rgba(15,23,42,0.05)] md:p-6">
+          <div className="mt-6 rounded-[30px] border border-slate-200 bg-white p-5 shadow-[0_12px_40px_rgba(15,23,42,0.05)] md:p-6">
             <h2 className="text-2xl font-extrabold text-slate-900">Frequently asked questions</h2>
 
             <div className="mt-5 divide-y divide-slate-200">
@@ -2484,7 +2484,7 @@ export default function HandwrittenHardcopyClient({
             </div>
           </div>
 
-          <div className="rounded-[30px] border border-slate-200 bg-slate-50 p-5 shadow-[0_12px_40px_rgba(15,23,42,0.05)] md:p-6">
+          <div className="mt-6 rounded-[30px] border border-slate-200 bg-slate-50 p-5 shadow-[0_12px_40px_rgba(15,23,42,0.05)] md:p-6">
             <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
               <div className="min-w-0">
                 <div className="text-lg font-extrabold text-slate-900">
@@ -2503,7 +2503,7 @@ export default function HandwrittenHardcopyClient({
             </div>
           </div>
 
-          <div className="rounded-[30px] border border-slate-200 bg-white p-5 shadow-[0_12px_40px_rgba(15,23,42,0.05)] md:p-6">
+          <div className="mt-6 rounded-[30px] border border-slate-200 bg-white p-5 shadow-[0_12px_40px_rgba(15,23,42,0.05)] md:p-6">
             <h2 className="text-2xl md:text-3xl font-extrabold text-slate-900 mb-6">
               Why choose us?
             </h2>
@@ -2526,7 +2526,7 @@ export default function HandwrittenHardcopyClient({
             </div>
           </div>
 
-          <div className="rounded-[30px] border border-slate-200 bg-white p-5 shadow-[0_12px_40px_rgba(15,23,42,0.05)] md:p-6">
+          <div className="mt-6 rounded-[30px] border border-slate-200 bg-white p-5 shadow-[0_12px_40px_rgba(15,23,42,0.05)] md:p-6">
             <div className="flex items-start gap-3">
               <BookOpen className="mt-1 text-blue-700" size={20} />
               <div>

@@ -901,8 +901,8 @@ function FiltersPanel({
   };
 
   return (
-    <div className="overflow-hidden rounded-[30px] border border-slate-200/80 bg-gradient-to-br from-white via-white to-slate-50/80 shadow-[0_18px_60px_rgba(15,23,42,0.08)]">
-      <div className="border-b border-slate-200/70 bg-gradient-to-r from-slate-50 via-blue-50/70 to-cyan-50/60 px-4 py-4 md:px-5">
+    <div className="relative z-20 rounded-[30px] border border-slate-200/80 bg-gradient-to-br from-white via-white to-slate-50/80 shadow-[0_18px_60px_rgba(15,23,42,0.08)]">
+      <div className="rounded-t-[30px] border-b border-slate-200/70 bg-gradient-to-r from-slate-50 via-blue-50/70 to-cyan-50/60 px-4 py-4 md:px-5">
         <div className="flex flex-col gap-4">
           <div className="flex items-start gap-3">
             <div className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-2xl bg-gradient-to-br from-blue-600 via-indigo-600 to-cyan-500 text-white shadow-lg">
@@ -1704,8 +1704,10 @@ export default function SolvedAssignmentsClient({
         </div>
       </div>
 
-      <section className="relative overflow-hidden bg-white">
-        <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(59,130,246,0.08),transparent_35%),radial-gradient(circle_at_top_right,rgba(6,182,212,0.08),transparent_30%)]" />
+      <section className="relative z-20 bg-white">
+        <div className="pointer-events-none absolute inset-0 overflow-hidden">
+          <div className="absolute inset-0 bg-[radial-gradient(circle_at_top_left,rgba(59,130,246,0.08),transparent_35%),radial-gradient(circle_at_top_right,rgba(6,182,212,0.08),transparent_30%)]" />
+        </div>
         <div className="relative mx-auto max-w-[1600px] px-4 py-6 md:py-8">
           <div className="overflow-hidden rounded-[34px] border border-slate-200 bg-gradient-to-br from-slate-900 via-blue-950 to-slate-900 text-white shadow-[0_22px_80px_rgba(15,23,42,0.22)]">
             <div className="grid gap-6 px-5 py-6 md:px-7 md:py-7 lg:grid-cols-[minmax(0,1.3fr)_minmax(320px,0.7fr)] lg:items-start">
@@ -1866,7 +1868,7 @@ export default function SolvedAssignmentsClient({
             />
           </div>
 
-          <div className="mt-5 space-y-3 lg:hidden">
+          <div className="relative z-30 mt-5 space-y-3 lg:hidden">
             <SearchBox
               value={searchInput}
               onChange={setSearchInput}

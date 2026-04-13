@@ -27,6 +27,9 @@ import {
   CheckCircle2,
   Info,
   LoaderCircle,
+  BarChart3,
+  PackageSearch,
+  FileX2,
 } from "lucide-react";
 
 type BootstrapResponse = {
@@ -123,6 +126,34 @@ type PreparedDirectUpload = {
   s3Key: string;
   contentType: string;
   fileName: string;
+};
+
+type VaultStatsCategoryRow = {
+  category: string;
+  productCount: number;
+  sampleSkus?: string[];
+};
+
+type VaultStatsResponse = {
+  ok?: boolean;
+  stats?: {
+    totalVaultPdfCount?: number;
+    missingPdfProductsTotal?: number;
+    missingPdfByCategory?: VaultStatsCategoryRow[];
+    orphanVaultPdfCount?: number;
+  };
+  orphanPreview?: Array<{
+    _id: string;
+    skuNormalized: string;
+    fileName: string;
+    folderPath?: string;
+    uploadedAt?: string | null;
+    pageCount?: number;
+    sizeBytes?: number;
+    productExists?: boolean;
+  }>;
+  error?: string;
+  needsPuzzle?: boolean;
 };
 
 const MAX_DIRECT_UPLOAD_BYTES = 20 * 1024 * 1024;
@@ -254,6 +285,26 @@ export default function HiddenPdfVaultPage() {
   const [cutFileId, setCutFileId] = useState("");
   const [cutFileName, setCutFileName] = useState("");
   const [fileActionLoadingId, setFileActionLoadingId] = useState("");
+
+  const [statsLoading, setStatsLoading] = useState(false);
+  const [statsError, setStatsError] = useState("");
+  const [statsTotalVaultPdfCount, setStatsTotalVaultPdfCount] = useState(0);
+  const [statsMissingPdfProductsTotal, setStatsMissingPdfProductsTotal] = useState(0);
+  const [statsMissingPdfByCategory, setStatsMissingPdfByCategory] = useState<VaultStatsCategoryRow[]>([]);
+  const [statsOrphanVaultPdfCount, setStatsOrphanVaultPdfCount] = useState(0);
+  const [statsOrphanPreview, setStatsOrphanPreview] = useState<
+    Array<{
+      _id: string;
+      skuNormalized: string;
+      fileName: string;
+      folderPath?: string;
+      uploadedAt?: string | null;
+      pageCount?: number;
+      sizeBytes?: number;
+      productExists?: boolean;
+    }>
+  >([]);
+  const [csvDownloading, setCsvDownloading] = useState(false);
 
   const longTaskActiveRef = useRef(false);
   const uploadAbortControllerRef = useRef<AbortController | null>(null);
@@ -442,6 +493,82 @@ export default function HiddenPdfVaultPage() {
     }
   }
 
+  async function loadStats() {
+    setStatsLoading(true);
+    setStatsError("");
+
+    try {
+      const res = await fetch("/api/admin/pdf-vault/stats", {
+        credentials: "include",
+        cache: "no-store",
+      });
+
+      const data: VaultStatsResponse = await res.json().catch(() => ({}));
+
+      if (!res.ok) {
+        if ((data as any)?.needsPuzzle) {
+          setAccessGranted(false);
+          await loadBootstrap();
+          return;
+        }
+
+        setStatsError(safeText(data?.error || "Stats load failed"));
+        return;
+      }
+
+      setStatsTotalVaultPdfCount(Number(data?.stats?.totalVaultPdfCount || 0));
+      setStatsMissingPdfProductsTotal(Number(data?.stats?.missingPdfProductsTotal || 0));
+      setStatsMissingPdfByCategory(
+        Array.isArray(data?.stats?.missingPdfByCategory) ? data.stats!.missingPdfByCategory! : []
+      );
+      setStatsOrphanVaultPdfCount(Number(data?.stats?.orphanVaultPdfCount || 0));
+      setStatsOrphanPreview(Array.isArray(data?.orphanPreview) ? data.orphanPreview : []);
+    } catch (error: any) {
+      setStatsError(safeText(error?.message || "Stats load failed"));
+    } finally {
+      setStatsLoading(false);
+    }
+  }
+
+  async function downloadOrphanCsv() {
+    setCsvDownloading(true);
+    try {
+      const res = await fetch("/api/admin/pdf-vault/stats?format=csv", {
+        credentials: "include",
+        cache: "no-store",
+      });
+
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        let message = "CSV download failed";
+        try {
+          const parsed = JSON.parse(text);
+          message = safeText(parsed?.error || message);
+          if (parsed?.needsPuzzle) {
+            setAccessGranted(false);
+            await loadBootstrap();
+          }
+        } catch {
+          message = safeText(text || message);
+        }
+        alert(message);
+        return;
+      }
+
+      const blob = await res.blob();
+      const objectUrl = window.URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = objectUrl;
+      a.download = `pdf-vault-orphan-pdfs-${new Date().toISOString().slice(0, 10)}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(objectUrl);
+    } finally {
+      setCsvDownloading(false);
+    }
+  }
+
   async function solvePuzzle() {
     if (!puzzleAnswer.trim()) {
       alert("Answer fill karo.");
@@ -466,7 +593,7 @@ export default function HiddenPdfVaultPage() {
 
       setAccessGranted(true);
       setPuzzleAnswer("");
-      await Promise.all([loadFolders("root"), loadFiles("root", "")]);
+      await Promise.all([loadFolders("root"), loadFiles("root", ""), loadStats()]);
     } finally {
       setPuzzleLoading(false);
     }
@@ -927,7 +1054,7 @@ export default function HiddenPdfVaultPage() {
         return;
       }
 
-      await loadFolders(currentPath);
+      await Promise.all([loadFolders(currentPath), loadStats()]);
     } finally {
       setFolderActionLoadingId("");
     }
@@ -949,7 +1076,7 @@ export default function HiddenPdfVaultPage() {
         return;
       }
 
-      await Promise.all([loadFolders(currentPath), loadFiles(currentPath, globalSearch.trim())]);
+      await Promise.all([loadFolders(currentPath), loadFiles(currentPath, globalSearch.trim()), loadStats()]);
     } finally {
       setFolderActionLoadingId("");
     }
@@ -974,7 +1101,7 @@ export default function HiddenPdfVaultPage() {
         return;
       }
 
-      await loadFolders(currentPath);
+      await Promise.all([loadFolders(currentPath), loadStats()]);
     } finally {
       setFolderActionLoadingId("");
     }
@@ -1095,7 +1222,7 @@ export default function HiddenPdfVaultPage() {
         setCutFileName("");
       }
 
-      await loadFiles(currentPath, globalSearch.trim());
+      await Promise.all([loadFiles(currentPath, globalSearch.trim()), loadStats()]);
     } finally {
       setFileActionLoadingId("");
     }
@@ -1117,7 +1244,7 @@ export default function HiddenPdfVaultPage() {
         return;
       }
 
-      await loadFiles(currentPath, globalSearch.trim());
+      await Promise.all([loadFiles(currentPath, globalSearch.trim()), loadStats()]);
     } finally {
       setFileActionLoadingId("");
     }
@@ -1142,7 +1269,7 @@ export default function HiddenPdfVaultPage() {
         return;
       }
 
-      await loadFiles(currentPath, globalSearch.trim());
+      await Promise.all([loadFiles(currentPath, globalSearch.trim()), loadStats()]);
     } finally {
       setFileActionLoadingId("");
     }
@@ -1179,7 +1306,7 @@ export default function HiddenPdfVaultPage() {
   }
 
   async function refreshAll() {
-    await Promise.all([loadFolders(currentPath), loadFiles(currentPath, globalSearch.trim())]);
+    await Promise.all([loadFolders(currentPath), loadFiles(currentPath, globalSearch.trim()), loadStats()]);
   }
 
   useEffect(() => {
@@ -1211,6 +1338,11 @@ export default function HiddenPdfVaultPage() {
     filePage,
     filePageSize,
   ]);
+
+  useEffect(() => {
+    if (!accessGranted) return;
+    void loadStats();
+  }, [accessGranted]);
 
   useEffect(() => {
     setFilePage(1);
@@ -1394,6 +1526,166 @@ export default function HiddenPdfVaultPage() {
                   Agar upload beech me stop hota hai, jo PDFs uploaded count me aa chuki hain woh
                   already saved hoti hain.
                 </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div>
+                <div className="text-sm font-extrabold text-slate-900 flex items-center gap-2">
+                  <BarChart3 size={18} />
+                  Vault Summary
+                </div>
+                <div className="text-xs text-slate-500 mt-1">
+                  Handwritten Hardcopy (Delivery) category intentionally excluded from missing PDF product stats.
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 flex-wrap">
+                {statsOrphanVaultPdfCount > 0 ? (
+                  <button
+                    type="button"
+                    onClick={() => void downloadOrphanCsv()}
+                    disabled={csvDownloading || statsLoading}
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-gray-50 border border-slate-200 transition font-semibold shadow-sm disabled:opacity-60"
+                  >
+                    <Download size={16} />
+                    {csvDownloading ? "Preparing CSV..." : "Download Orphan PDFs CSV"}
+                  </button>
+                ) : null}
+
+                <button
+                  type="button"
+                  onClick={() => void loadStats()}
+                  disabled={statsLoading}
+                  className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-gray-50 border border-slate-200 transition font-semibold shadow-sm disabled:opacity-60"
+                >
+                  <RefreshCcw size={16} className={statsLoading ? "animate-spin" : ""} />
+                  {statsLoading ? "Refreshing..." : "Refresh Stats"}
+                </button>
+              </div>
+            </div>
+
+            {statsError ? (
+              <div className="mt-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-sm font-semibold text-rose-800">
+                {statsError}
+              </div>
+            ) : null}
+
+            <div className="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="rounded-2xl border border-emerald-200 bg-white p-4 shadow-sm">
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <div className="text-xs font-extrabold uppercase tracking-wide text-emerald-700">
+                      Total Vault PDFs
+                    </div>
+                    <div className="mt-2 text-3xl font-extrabold text-slate-900">
+                      {statsLoading ? "..." : statsTotalVaultPdfCount}
+                    </div>
+                    <div className="mt-2 text-xs text-slate-500">
+                      All live PDFs across all folders
+                    </div>
+                  </div>
+                  <div className="h-12 w-12 rounded-2xl bg-emerald-100 text-emerald-700 flex items-center justify-center shrink-0">
+                    <FileText size={22} />
+                  </div>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-amber-200 bg-white p-4 shadow-sm">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-xs font-extrabold uppercase tracking-wide text-amber-700">
+                      Products Without PDF
+                    </div>
+                    <div className="mt-2 text-3xl font-extrabold text-slate-900">
+                      {statsLoading ? "..." : statsMissingPdfProductsTotal}
+                    </div>
+                    <div className="mt-2 text-xs text-slate-500">
+                      Category wise live products with no solved PDF
+                    </div>
+                  </div>
+                  <div className="h-12 w-12 rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center shrink-0">
+                    <PackageSearch size={22} />
+                  </div>
+                </div>
+
+                {statsMissingPdfByCategory.length > 0 ? (
+                  <div className="mt-4 space-y-2">
+                    {statsMissingPdfByCategory.slice(0, 8).map((row) => (
+                      <div
+                        key={row.category}
+                        className="rounded-xl border border-amber-100 bg-amber-50 px-3 py-2"
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-bold text-slate-800 break-words">
+                            {row.category}
+                          </div>
+                          <div className="text-sm font-extrabold text-amber-800 shrink-0">
+                            {row.productCount}
+                          </div>
+                        </div>
+
+                        {Array.isArray(row.sampleSkus) && row.sampleSkus.length > 0 ? (
+                          <div className="mt-1 text-[11px] text-slate-500 break-all">
+                            Example: {row.sampleSkus.join(", ")}
+                          </div>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="mt-4 text-xs text-slate-500">
+                    No missing solved PDF products found.
+                  </div>
+                )}
+              </div>
+
+              <div className="rounded-2xl border border-rose-200 bg-white p-4 shadow-sm">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="text-xs font-extrabold uppercase tracking-wide text-rose-700">
+                      Orphan Vault PDFs
+                    </div>
+                    <div className="mt-2 text-3xl font-extrabold text-slate-900">
+                      {statsLoading ? "..." : statsOrphanVaultPdfCount}
+                    </div>
+                    <div className="mt-2 text-xs text-slate-500">
+                      PDFs available but matching product not created
+                    </div>
+                  </div>
+                  <div className="h-12 w-12 rounded-2xl bg-rose-100 text-rose-700 flex items-center justify-center shrink-0">
+                    <FileX2 size={22} />
+                  </div>
+                </div>
+
+                {statsOrphanPreview.length > 0 ? (
+                  <div className="mt-4 space-y-2">
+                    {statsOrphanPreview.slice(0, 5).map((row) => (
+                      <div
+                        key={row._id}
+                        className="rounded-xl border border-rose-100 bg-rose-50 px-3 py-2"
+                      >
+                        <div className="text-sm font-bold text-slate-800 break-words">
+                          {row.fileName}
+                        </div>
+                        <div className="mt-1 text-[11px] text-slate-500 break-all">
+                          SKU: <b>{row.skuNormalized || "-"}</b>
+                        </div>
+                        {row.folderPath ? (
+                          <div className="mt-1 text-[11px] text-slate-500 break-all">
+                            Folder: <b>{row.folderPath}</b>
+                          </div>
+                        ) : null}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="mt-4 text-xs text-slate-500">
+                    No orphan PDFs found.
+                  </div>
+                )}
               </div>
             </div>
           </div>
