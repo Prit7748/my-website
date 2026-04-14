@@ -20,6 +20,8 @@ import {
   CheckCircle2,
   AlertTriangle,
   Info,
+  BarChart3,
+  Download,
 } from "lucide-react";
 
 type BootstrapResponse = {
@@ -89,14 +91,55 @@ type DirectFolderUploadResponse = {
   };
 };
 
+type OverviewCategoryStats = {
+  category: string;
+  totalProducts: number;
+  totalProductsWithImages: number;
+  totalProductsWithoutImages: number;
+  totalImageOnlyWithoutProduct: number;
+};
+
+type OverviewResponse = {
+  ok?: boolean;
+  error?: string;
+  overview?: {
+    totalProducts?: number;
+    totalProductsWithImages?: number;
+    totalProductsWithoutImages?: number;
+    totalImageOnlyWithoutProduct?: number;
+    categories?: OverviewCategoryStats[];
+  };
+};
+
 type BrowserFolderFile = File & {
   webkitRelativePath?: string;
+  __relativePath?: string;
 };
 
 type FolderUploadGroup = {
   folderName: string;
   files: BrowserFolderFile[];
   totalBytes: number;
+};
+
+type FileSystemEntryLike = {
+  isFile: boolean;
+  isDirectory: boolean;
+  name: string;
+  fullPath?: string;
+};
+
+type FileSystemFileEntryLike = FileSystemEntryLike & {
+  file: (success: (file: File) => void, error?: (err: any) => void) => void;
+};
+
+type FileSystemDirectoryEntryLike = FileSystemEntryLike & {
+  createReader: () => {
+    readEntries: (
+      success: (entries: FileSystemEntryLike[]) => void,
+      error?: (err: any) => void
+    ) => void;
+  };
 };
 
 const DIRECT_FOLDER_CONCURRENCY = 3;
@@ -139,24 +182,27 @@ function notifyLongTaskEnd() {
   }
 }
 
+function getRelativePath(file: BrowserFolderFile) {
+  return safeText(file.webkitRelativePath || file.__relativePath || file.name).replace(/\\/g, "/");
+}
+
+function attachRelativePath(file: File, relativePath: string) {
+  const f = file as BrowserFolderFile;
+  f.__relativePath = safeText(relativePath).replace(/\\/g, "/");
+  return f;
+}
+
 function extractSkuFolderFromRelativePath(file: BrowserFolderFile) {
-  const rel = safeText(file.webkitRelativePath || "").replace(/\\/g, "/");
+  const rel = getRelativePath(file);
   const parts = rel.split("/").filter(Boolean);
 
-  if (parts.length >= 3) {
-    return safeText(parts[1]);
-  }
-
-  if (parts.length === 2) {
-    return safeText(parts[0]);
-  }
+  if (parts.length >= 3) return safeText(parts[1]);
+  if (parts.length === 2) return safeText(parts[0]);
 
   return "";
 }
 
-function normalizeSelectedFolderFiles(
-  fileList: FileList | File[] | null | undefined
-): BrowserFolderFile[] {
+function normalizeSelectedFolderFiles(fileList: FileList | File[] | null | undefined): BrowserFolderFile[] {
   const arr = Array.from(fileList || []) as BrowserFolderFile[];
 
   const onlyImages = arr.filter((file) => {
@@ -170,11 +216,10 @@ function normalizeSelectedFolderFiles(
   });
 
   const uniqueMap = new Map<string, BrowserFolderFile>();
+
   for (const file of onlyImages) {
-    const key = `${safeText(file.webkitRelativePath || file.name)}__${file.size}__${file.lastModified}`;
-    if (!uniqueMap.has(key)) {
-      uniqueMap.set(key, file);
-    }
+    const key = `${getRelativePath(file)}__${file.size}__${file.lastModified}`;
+    if (!uniqueMap.has(key)) uniqueMap.set(key, file);
   }
 
   return Array.from(uniqueMap.values());
@@ -203,6 +248,59 @@ function buildFolderUploadGroups(files: BrowserFolderFile[]) {
   return Array.from(map.values()).sort((a, b) => a.folderName.localeCompare(b.folderName));
 }
 
+async function readAllDirectoryEntries(directoryEntry: FileSystemDirectoryEntryLike) {
+  const reader = directoryEntry.createReader();
+  const entries: FileSystemEntryLike[] = [];
+
+  while (true) {
+    const batch = await new Promise<FileSystemEntryLike[]>((resolve, reject) => {
+      reader.readEntries(resolve, reject);
+    });
+
+    if (!batch.length) break;
+    entries.push(...batch);
+  }
+
+  return entries;
+}
+
+async function readEntryFiles(entry: FileSystemEntryLike, parentPath = ""): Promise<BrowserFolderFile[]> {
+  const currentPath = parentPath ? `${parentPath}/${entry.name}` : entry.name;
+
+  if (entry.isFile) {
+    const fileEntry = entry as FileSystemFileEntryLike;
+    const file = await new Promise<File>((resolve, reject) => {
+      fileEntry.file(resolve, reject);
+    });
+
+    return [attachRelativePath(file, currentPath)];
+  }
+
+  if (entry.isDirectory) {
+    const dirEntry = entry as FileSystemDirectoryEntryLike;
+    const entries = await readAllDirectoryEntries(dirEntry);
+    const nested = await Promise.all(entries.map((child) => readEntryFiles(child, currentPath)));
+    return nested.flat();
+  }
+
+  return [];
+}
+
+async function readDroppedFolderFiles(items: DataTransferItemList | null | undefined) {
+  const list = Array.from(items || []);
+  const allFiles: BrowserFolderFile[] = [];
+
+  for (const item of list) {
+    const entry = (item as any).webkitGetAsEntry?.() as FileSystemEntryLike | null;
+    if (!entry) continue;
+
+    const files = await readEntryFiles(entry);
+    allFiles.push(...files);
+  }
+
+  return normalizeSelectedFolderFiles(allFiles);
+}
+
 export default function BulkProductImagesPage() {
   const [bootLoading, setBootLoading] = useState(true);
 
@@ -221,6 +319,7 @@ export default function BulkProductImagesPage() {
 
   const [uploadMode, setUploadMode] = useState<"append" | "replace">("append");
   const [selectedFolderFiles, setSelectedFolderFiles] = useState<BrowserFolderFile[]>([]);
+  const [isDragOver, setIsDragOver] = useState(false);
 
   const [serverMessage, setServerMessage] = useState("");
   const [serverMessageType, setServerMessageType] = useState<"success" | "error" | "info">("info");
@@ -238,6 +337,11 @@ export default function BulkProductImagesPage() {
   const [singleImageFile, setSingleImageFile] = useState<File | null>(null);
   const [singleUploading, setSingleUploading] = useState(false);
 
+  const [overviewOpen, setOverviewOpen] = useState(false);
+  const [overviewLoading, setOverviewLoading] = useState(false);
+  const [overviewData, setOverviewData] = useState<OverviewResponse["overview"] | null>(null);
+  const [overviewError, setOverviewError] = useState("");
+
   const [productFolderSearch, setProductFolderSearch] = useState("");
   const [productFolderPage, setProductFolderPage] = useState(1);
   const [productFolderPageSize, setProductFolderPageSize] = useState(12);
@@ -248,6 +352,7 @@ export default function BulkProductImagesPage() {
   const [uploadFailedFolders, setUploadFailedFolders] = useState(0);
   const [currentUploadingFolderName, setCurrentUploadingFolderName] = useState("");
 
+  const folderInputRef = useRef<HTMLInputElement | null>(null);
   const uploadCancelRef = useRef(false);
   const uploadControllersRef = useRef<AbortController[]>([]);
   const longTaskActiveRef = useRef(false);
@@ -269,8 +374,7 @@ export default function BulkProductImagesPage() {
     if (!q) return uploadedProductFolders;
 
     return uploadedProductFolders.filter((folder) => {
-      const hay =
-        `${safeText(folder.name)} ${safeText(folder.path)} ${safeText(folder.slug)}`.toLowerCase();
+      const hay = `${safeText(folder.name)} ${safeText(folder.path)} ${safeText(folder.slug)}`.toLowerCase();
       return hay.includes(q);
     });
   }, [uploadedProductFolders, productFolderSearch]);
@@ -340,8 +444,22 @@ export default function BulkProductImagesPage() {
 
   function clearSelectedFolderInput() {
     setSelectedFolderFiles([]);
-    const input = document.getElementById("bulk-folder-images-input") as HTMLInputElement | null;
-    if (input) input.value = "";
+    if (folderInputRef.current) folderInputRef.current.value = "";
+  }
+
+  function handleSelectedFiles(files: BrowserFolderFile[]) {
+    const normalized = normalizeSelectedFolderFiles(files);
+    setSelectedFolderFiles(normalized);
+    resetMessages();
+    setUploadTotalFolders(0);
+    setUploadDoneFolders(0);
+    setUploadFailedFolders(0);
+    setCurrentUploadingFolderName("");
+
+    if (!normalized.length) {
+      setServerMessage("Selected folder/drop me valid images nahi mili. Sirf jpg, jpeg, png, webp allowed hain.");
+      setServerMessageType("error");
+    }
   }
 
   async function loadBootstrap() {
@@ -415,6 +533,30 @@ export default function BulkProductImagesPage() {
     }
   }
 
+  async function loadOverview() {
+    setOverviewOpen(true);
+    setOverviewLoading(true);
+    setOverviewError("");
+
+    try {
+      const res = await fetch("/api/products/bulk-images/overview", {
+        credentials: "include",
+        cache: "no-store",
+      });
+
+      const data: OverviewResponse = await res.json().catch(() => ({}));
+      if (!res.ok || !data?.ok) {
+        setOverviewError(data?.error || "Overview load failed");
+        setOverviewData(null);
+        return;
+      }
+
+      setOverviewData(data.overview || null);
+    } finally {
+      setOverviewLoading(false);
+    }
+  }
+
   async function uploadFolderRequest(group: FolderUploadGroup) {
     const controller = new AbortController();
     uploadControllersRef.current.push(controller);
@@ -428,7 +570,7 @@ export default function BulkProductImagesPage() {
       form.append("skuFolderName", group.folderName);
 
       for (const file of group.files) {
-        form.append("files", file);
+        form.append("files", file, file.name);
       }
 
       const res = await fetch("/api/products/bulk-images/upload", {
@@ -488,7 +630,7 @@ export default function BulkProductImagesPage() {
 
   async function startDirectFolderUpload() {
     if (!selectedUploadGroups.length) {
-      alert("Pehle folders select karo.");
+      alert("Pehle parent folder ya SKU folders select/drop karo.");
       return;
     }
 
@@ -516,9 +658,7 @@ export default function BulkProductImagesPage() {
         const currentIndex = nextIndex;
         nextIndex += 1;
 
-        if (currentIndex >= selectedUploadGroups.length) {
-          return;
-        }
+        if (currentIndex >= selectedUploadGroups.length) return;
 
         const group = selectedUploadGroups[currentIndex];
         setCurrentUploadingFolderName(group.folderName);
@@ -547,9 +687,7 @@ export default function BulkProductImagesPage() {
         setServerMessage(`${successCount} folders successfully upload ho gaye.`);
         setServerMessageType("success");
       } else if (successCount > 0) {
-        setServerMessage(
-          `Upload complete. Uploaded folders ${successCount}, Failed folders ${failedCount}.`
-        );
+        setServerMessage(`Upload complete. Uploaded folders ${successCount}, Failed folders ${failedCount}.`);
         setServerMessageType("info");
       } else {
         setServerMessage("Koi bhi folder successfully upload nahi ho paya.");
@@ -557,9 +695,7 @@ export default function BulkProductImagesPage() {
       }
 
       await loadFolders(currentPath);
-      if (modalOpen && modalFolder) {
-        await loadModalFiles(modalFolder.path);
-      }
+      if (modalOpen && modalFolder) await loadModalFiles(modalFolder.path);
 
       clearSelectedFolderInput();
     } finally {
@@ -690,9 +826,7 @@ export default function BulkProductImagesPage() {
         return;
       }
 
-      if (modalFolder) {
-        await loadModalFiles(modalFolder.path);
-      }
+      if (modalFolder) await loadModalFiles(modalFolder.path);
       await loadFolders(currentPath);
     } finally {
       setFileActionLoadingId("");
@@ -701,6 +835,7 @@ export default function BulkProductImagesPage() {
 
   async function renameFolder(folder: FolderItem) {
     const nextName = renameValue.trim();
+
     if (!nextName) {
       alert("New folder name required hai.");
       return;
@@ -773,9 +908,8 @@ export default function BulkProductImagesPage() {
 
   async function refreshAll() {
     await loadFolders(currentPath);
-    if (modalOpen && modalFolder) {
-      await loadModalFiles(modalFolder.path);
-    }
+    if (modalOpen && modalFolder) await loadModalFiles(modalFolder.path);
+    if (overviewOpen) await loadOverview();
   }
 
   useEffect(() => {
@@ -829,6 +963,7 @@ export default function BulkProductImagesPage() {
       }
 
       uploadCancelRef.current = true;
+
       for (const controller of uploadControllersRef.current) {
         try {
           controller.abort();
@@ -872,6 +1007,15 @@ export default function BulkProductImagesPage() {
                 <ArrowLeft size={18} />
                 Back
               </Link>
+
+              <button
+                type="button"
+                onClick={loadOverview}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-950 text-white transition font-semibold shadow-sm"
+              >
+                <BarChart3 size={18} />
+                Overview
+              </button>
 
               <button
                 type="button"
@@ -921,11 +1065,43 @@ export default function BulkProductImagesPage() {
               <div className="rounded-2xl border border-gray-200 bg-white p-4">
                 <div className="text-sm font-extrabold">Direct Image Folders Upload</div>
 
-                <label
-                  htmlFor="bulk-folder-images-input"
-                  className={`mt-3 flex min-h-[120px] w-full items-center justify-center rounded-2xl border-2 border-dashed px-4 py-6 text-center transition ${
+                <div
+                  role="button"
+                  tabIndex={0}
+                  onClick={() => {
+                    if (!isUploading) folderInputRef.current?.click();
+                  }}
+                  onKeyDown={(e) => {
+                    if ((e.key === "Enter" || e.key === " ") && !isUploading) {
+                      folderInputRef.current?.click();
+                    }
+                  }}
+                  onDragOver={(e) => {
+                    e.preventDefault();
+                    if (!isUploading) setIsDragOver(true);
+                  }}
+                  onDragLeave={() => setIsDragOver(false)}
+                  onDrop={async (e) => {
+                    e.preventDefault();
+                    setIsDragOver(false);
+
+                    if (isUploading) return;
+
+                    try {
+                      const droppedFiles = await readDroppedFolderFiles(e.dataTransfer.items);
+                      handleSelectedFiles(droppedFiles);
+                    } catch {
+                      setServerMessage(
+                        "Dropped folders read nahi ho paye. Chrome/Edge me parent folder select button use karo."
+                      );
+                      setServerMessageType("error");
+                    }
+                  }}
+                  className={`mt-3 flex min-h-[150px] w-full items-center justify-center rounded-2xl border-2 border-dashed px-4 py-6 text-center transition outline-none ${
                     isUploading
                       ? "cursor-not-allowed border-slate-300 bg-slate-100"
+                      : isDragOver
+                      ? "cursor-pointer border-blue-400 bg-blue-50"
                       : "cursor-pointer border-emerald-300 bg-emerald-50 hover:bg-emerald-100"
                   }`}
                 >
@@ -934,15 +1110,16 @@ export default function BulkProductImagesPage() {
                       <Upload size={20} />
                     </div>
                     <div className="mt-3 text-sm font-extrabold text-emerald-800">
-                      Click here to select parent folder
+                      Select Parent Folder or Drop Multiple SKU Folders
                     </div>
-                    <div className="mt-1 text-xs text-emerald-700">
-                      Parent folder ke andar SKU image folders hone chahiye
+                    <div className="mt-1 text-xs text-emerald-700 leading-5">
+                      Browser picker me ek parent folder select karo. Us parent ke andar multiple SKU folders hone chahiye.
                     </div>
                   </div>
-                </label>
+                </div>
 
                 <input
+                  ref={folderInputRef}
                   id="bulk-folder-images-input"
                   type="file"
                   multiple
@@ -950,14 +1127,9 @@ export default function BulkProductImagesPage() {
                   disabled={isUploading}
                   onChange={(e) => {
                     const files = normalizeSelectedFolderFiles(e.target.files);
-                    setSelectedFolderFiles(files);
-                    resetMessages();
-                    setUploadTotalFolders(0);
-                    setUploadDoneFolders(0);
-                    setUploadFailedFolders(0);
-                    setCurrentUploadingFolderName("");
+                    handleSelectedFiles(files);
                   }}
-                  {...({ webkitdirectory: "true", directory: "true" } as any)}
+                  {...({ webkitdirectory: "", directory: "" } as any)}
                 />
 
                 <select
@@ -982,6 +1154,32 @@ export default function BulkProductImagesPage() {
                   Concurrency: <b>{DIRECT_FOLDER_CONCURRENCY}</b>
                 </div>
 
+                {selectedUploadGroups.length ? (
+                  <div className="mt-3 rounded-xl border border-slate-200 bg-slate-50 p-3">
+                    <div className="text-xs font-extrabold text-slate-700">
+                      Detected folders preview
+                    </div>
+                    <div className="mt-2 max-h-36 overflow-auto space-y-1">
+                      {selectedUploadGroups.slice(0, 30).map((group) => (
+                        <div
+                          key={group.folderName}
+                          className="flex items-center justify-between gap-3 text-xs text-slate-600 bg-white border border-slate-100 rounded-lg px-2 py-1.5"
+                        >
+                          <span className="font-bold break-all">{group.folderName}</span>
+                          <span className="shrink-0">
+                            {group.files.length} images · {formatBytes(group.totalBytes)}
+                          </span>
+                        </div>
+                      ))}
+                      {selectedUploadGroups.length > 30 ? (
+                        <div className="text-xs font-bold text-slate-500 px-1">
+                          +{selectedUploadGroups.length - 30} more folders
+                        </div>
+                      ) : null}
+                    </div>
+                  </div>
+                ) : null}
+
                 {currentPath === "img-root" ? (
                   <div className="mt-3 rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs leading-5 text-rose-700">
                     Direct upload <b>img-root</b> me allowed nahi hai. Pehle left side se koi
@@ -999,6 +1197,18 @@ export default function BulkProductImagesPage() {
                   {isUploading ? "Uploading..." : "Start Direct Upload"}
                 </button>
 
+                {selectedFolderFiles.length ? (
+                  <button
+                    type="button"
+                    onClick={clearSelectedFolderInput}
+                    disabled={isUploading}
+                    className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-white hover:bg-gray-50 text-slate-800 border border-slate-200 transition font-extrabold disabled:opacity-60 shadow-sm"
+                  >
+                    <X size={18} />
+                    Clear Selection
+                  </button>
+                ) : null}
+
                 {isUploading ? (
                   <button
                     type="button"
@@ -1011,21 +1221,23 @@ export default function BulkProductImagesPage() {
                 ) : null}
 
                 <div className="mt-3 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs leading-5 text-amber-800">
-                  Folder structure aise rakho:
+                  Best folder structure:
                   <br />
                   <b>Parent Folder / SKU1 / image1.jpg</b>
                   <br />
                   <b>Parent Folder / SKU1 / image2.png</b>
                   <br />
                   <b>Parent Folder / SKU2 / image1.webp</b>
+                  <br />
+                  <span className="block mt-2">
+                    Chrome/Edge folder picker ek hi parent folder select karta hai. Multiple SKU folders upload ke liye un sabko ek parent folder ke andar rakho.
+                  </span>
                 </div>
               </div>
 
-              {(isUploading || uploadTotalFolders > 0) ? (
+              {isUploading || uploadTotalFolders > 0 ? (
                 <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
-                  <div className="text-sm font-extrabold text-blue-900">
-                    Upload Progress
-                  </div>
+                  <div className="text-sm font-extrabold text-blue-900">Upload Progress</div>
 
                   <div className="mt-3 h-4 w-full overflow-hidden rounded-full bg-blue-100">
                     <div
@@ -1402,9 +1614,7 @@ export default function BulkProductImagesPage() {
                           <button
                             type="button"
                             onClick={() =>
-                              setProductFolderPage((p) =>
-                                Math.min(productFolderTotalPages, p + 1)
-                              )
+                              setProductFolderPage((p) => Math.min(productFolderTotalPages, p + 1))
                             }
                             disabled={productFolderPage >= productFolderTotalPages}
                             className="px-4 py-2 rounded-xl border border-slate-200 bg-white hover:bg-gray-50 text-sm font-bold disabled:opacity-50"
@@ -1427,12 +1637,172 @@ export default function BulkProductImagesPage() {
                   <li>Har SKU/product ke liye max 8 images rahengi.</li>
                   <li>Uploaded folders count me wahi folders aayenge jo actual me complete ho chuke hain.</li>
                   <li>Process stop/cancel hone par completed folders dobara upload karne ki need nahi hogi.</li>
+                  <li>Multiple SKU folders ke liye ek parent folder select karo ya SKU folders drag/drop karo.</li>
                 </ul>
               </div>
             </div>
           </div>
         </div>
       </div>
+
+      {overviewOpen ? (
+        <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">
+          <div className="w-full max-w-6xl max-h-[92vh] rounded-3xl bg-white shadow-2xl border border-slate-200 overflow-hidden">
+            <div className="px-5 py-4 border-b border-slate-200 flex items-start justify-between gap-4 bg-slate-50">
+              <div>
+                <div className="inline-flex items-center gap-2 rounded-full bg-blue-50 border border-blue-200 px-3 py-1 text-xs font-extrabold text-blue-800">
+                  <BarChart3 size={14} />
+                  Product Images Overview
+                </div>
+                <div className="text-lg font-extrabold text-slate-900 mt-2">
+                  Category wise product image status summary
+                </div>
+                <div className="text-sm text-slate-500 mt-1">
+                  Counts are based on live products and live product image records.
+                </div>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setOverviewOpen(false)}
+                className="p-2 rounded-xl border border-slate-200 bg-white hover:bg-slate-50"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="p-5 overflow-auto max-h-[calc(92vh-92px)]">
+              {overviewLoading ? (
+                <div className="rounded-2xl border border-slate-200 bg-white p-8 text-center text-slate-600 font-bold">
+                  <LoaderCircle size={24} className="animate-spin mx-auto mb-3" />
+                  Loading overview...
+                </div>
+              ) : overviewError ? (
+                <div className="rounded-2xl border border-rose-200 bg-rose-50 p-5 text-rose-800 font-bold">
+                  {overviewError}
+                </div>
+              ) : (
+                <>
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-700 mb-5">
+                    <div className="font-extrabold text-slate-900">Overall Total</div>
+                    <div className="mt-2 grid grid-cols-1 sm:grid-cols-4 gap-3">
+                      <div className="rounded-xl bg-white border border-slate-200 p-3">
+                        Live Products: <b>{overviewData?.totalProducts ?? 0}</b>
+                      </div>
+                      <div className="rounded-xl bg-white border border-slate-200 p-3">
+                        Images Uploaded: <b>{overviewData?.totalProductsWithImages ?? 0}</b>
+                      </div>
+                      <div className="rounded-xl bg-white border border-slate-200 p-3">
+                        Products Without Images: <b>{overviewData?.totalProductsWithoutImages ?? 0}</b>
+                      </div>
+                      <div className="rounded-xl bg-white border border-slate-200 p-3">
+                        Images Without Product: <b>{overviewData?.totalImageOnlyWithoutProduct ?? 0}</b>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="space-y-4">
+                    {(overviewData?.categories || []).map((cat) => {
+                      const encodedCategory = encodeURIComponent(cat.category);
+
+                      return (
+                        <div
+                          key={cat.category}
+                          className="rounded-2xl border border-slate-200 bg-white overflow-hidden"
+                        >
+                          <div className="px-4 py-3 border-b border-slate-100 bg-slate-50">
+                            <div className="text-sm font-black text-slate-900">
+                              Category: {cat.category}
+                            </div>
+                            <div className="text-xs text-slate-500 mt-1">
+                              Total products in this category: <b>{cat.totalProducts}</b>
+                            </div>
+                          </div>
+
+                          <div className="p-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                              <div className="text-xs font-extrabold text-emerald-700 uppercase tracking-wide">
+                                Images Uploaded
+                              </div>
+                              <div className="text-3xl font-black text-emerald-900 mt-2">
+                                {cat.totalProductsWithImages}
+                              </div>
+                              <div className="text-sm text-emerald-800 mt-2">
+                                Is category ke products jinke liye images uploaded hain.
+                              </div>
+                            </div>
+
+                            <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                              <div className="text-xs font-extrabold text-amber-700 uppercase tracking-wide">
+                                Products Without Images
+                              </div>
+                              <div className="text-3xl font-black text-amber-900 mt-2">
+                                {cat.totalProductsWithoutImages}
+                              </div>
+                              <div className="text-sm text-amber-800 mt-2">
+                                Is category ke products jinki ek bhi image upload nahi hai.
+                              </div>
+
+                              <a
+                                href={`/api/products/bulk-images/overview?download=missing-products&category=${encodedCategory}`}
+                                className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-amber-100 border border-amber-200 text-amber-900 text-sm font-extrabold shadow-sm"
+                              >
+                                <Download size={16} />
+                                Download CSV
+                              </a>
+                            </div>
+
+                            <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4">
+                              <div className="text-xs font-extrabold text-rose-700 uppercase tracking-wide">
+                                Images Without Product
+                              </div>
+                              <div className="text-3xl font-black text-rose-900 mt-2">
+                                {cat.totalImageOnlyWithoutProduct}
+                              </div>
+                              <div className="text-sm text-rose-800 mt-2">
+                                Images uploaded hain but product exist nahi karta.
+                              </div>
+
+                              {cat.totalImageOnlyWithoutProduct > 0 ? (
+                                <a
+                                  href={`/api/products/bulk-images/overview?download=image-only-products&category=${encodedCategory}`}
+                                  className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-rose-100 border border-rose-200 text-rose-900 text-sm font-extrabold shadow-sm"
+                                >
+                                  <Download size={16} />
+                                  Download CSV
+                                </a>
+                              ) : null}
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  <div className="mt-5 flex items-center justify-end gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={loadOverview}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-semibold shadow-sm"
+                    >
+                      <RefreshCcw size={18} />
+                      Refresh Overview
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setOverviewOpen(false)}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-950 text-white transition font-semibold shadow-sm"
+                    >
+                      Close
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </div>
+      ) : null}
 
       {modalOpen && modalFolder ? (
         <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4">

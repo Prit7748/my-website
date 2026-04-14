@@ -25,10 +25,7 @@ export const maxDuration = 300;
 const REGION = process.env.AWS_REGION || "ap-south-1";
 const ACCESS_KEY = process.env.AWS_ACCESS_KEY_ID || "";
 const SECRET_KEY = process.env.AWS_SECRET_ACCESS_KEY || "";
-const BUCKET_IMAGES =
-  process.env.AWS_S3_BUCKET_PUBLIC ||
-  process.env.AWS_S3_BUCKET_IMAGES ||
-  "";
+const BUCKET_IMAGES = process.env.AWS_S3_BUCKET_PUBLIC || process.env.AWS_S3_BUCKET_IMAGES || "";
 
 const PUBLIC_BASE_URL =
   process.env.AWS_PUBLIC_BASE_URL ||
@@ -36,16 +33,15 @@ const PUBLIC_BASE_URL =
 
 const s3 = new S3Client({
   region: REGION,
-  credentials: {
-    accessKeyId: ACCESS_KEY,
-    secretAccessKey: SECRET_KEY,
-  },
+  credentials: { accessKeyId: ACCESS_KEY, secretAccessKey: SECRET_KEY },
 });
 
 const ALLOWED_EXT = new Set([".jpg", ".jpeg", ".png", ".webp"]);
 const MAX_IMAGES_PER_PRODUCT = 8;
-const MAX_IMAGE_SIZE_BYTES = 15 * 1024 * 1024; // 15MB
+const MAX_IMAGE_SIZE_BYTES = 15 * 1024 * 1024;
 const S3_TIMEOUT_MS = 120000;
+const HARDCOPY_CATEGORY = "Handwritten Hardcopy (Delivery)";
+const HARDCOPY_AUTO_TYPE = "solved_assignment_hardcopy";
 
 type UploadMode = "append" | "replace";
 
@@ -74,12 +70,7 @@ function safeNum(x: any, def = 0) {
 }
 
 function isFileLike(value: any): value is FileLike {
-  return Boolean(
-    value &&
-      typeof value === "object" &&
-      typeof value.name === "string" &&
-      typeof value.arrayBuffer === "function"
-  );
+  return Boolean(value && typeof value === "object" && typeof value.name === "string" && typeof value.arrayBuffer === "function");
 }
 
 function isAllowedImageName(name: string) {
@@ -103,6 +94,13 @@ function normalizeLegacyAvailability(value: string) {
   return "";
 }
 
+function buildHardcopySkuFromSourceSku(sourceSku: any) {
+  const sku = safeStr(sourceSku).toUpperCase().replace(/\s+/g, "");
+  if (!sku) return "";
+  if (sku.endsWith("A")) return `${sku.slice(0, -1)}D`;
+  return `${sku}D`;
+}
+
 function buildImageS3Key(folderPath: string, originalName: string) {
   const ext = fileExt(originalName) || ".jpg";
   const base = slugify(fileBaseName(originalName)) || "image";
@@ -111,17 +109,10 @@ function buildImageS3Key(folderPath: string, originalName: string) {
   return `uploads/products/${folder ? `${folder}/` : ""}${base}-${rand}${ext}`;
 }
 
-async function withTimeout<T>(
-  promise: Promise<T>,
-  ms: number,
-  label: string
-): Promise<T> {
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   let timeoutId: NodeJS.Timeout | null = null;
-
   const timeoutPromise = new Promise<never>((_, reject) => {
-    timeoutId = setTimeout(() => {
-      reject(new Error(`${label} timed out after ${ms}ms`));
-    }, ms);
+    timeoutId = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
   });
 
   try {
@@ -135,23 +126,11 @@ async function assertAdminWriteAccess() {
   const user = await getAuthUser();
 
   if (!user) {
-    return {
-      ok: false as const,
-      res: NextResponse.json(
-        { ok: false, error: "Not authenticated" },
-        { status: 401 }
-      ),
-    };
+    return { ok: false as const, res: NextResponse.json({ ok: false, error: "Not authenticated" }, { status: 401 }) };
   }
 
   if (!hasPermission(user, "products:write")) {
-    return {
-      ok: false as const,
-      res: NextResponse.json(
-        { ok: false, error: "Forbidden" },
-        { status: 403 }
-      ),
-    };
+    return { ok: false as const, res: NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 }) };
   }
 
   return { ok: true as const, user };
@@ -165,9 +144,7 @@ async function ensureFolder(parentPath: string, name: string, updatedBy: string)
     deletedAt: null,
   });
 
-  if (!parent) {
-    throw new Error("Parent folder not found");
-  }
+  if (!parent) throw new Error("Parent folder not found");
 
   const nextPath = buildFolderPath(parentPath, name);
 
@@ -212,37 +189,20 @@ async function findExistingLiveImageFolderForProduct(productId: string) {
     .lean();
 
   if (!folder || folder.deletedAt) return null;
-
   return folder;
 }
 
 async function uploadBufferToS3(buffer: Buffer, key: string, contentType: string) {
-  if (!ACCESS_KEY || !SECRET_KEY) {
-    throw new Error("AWS credentials missing");
-  }
-
-  if (!BUCKET_IMAGES) {
-    throw new Error("AWS_S3_BUCKET_PUBLIC or AWS_S3_BUCKET_IMAGES missing for product images");
-  }
+  if (!ACCESS_KEY || !SECRET_KEY) throw new Error("AWS credentials missing");
+  if (!BUCKET_IMAGES) throw new Error("AWS_S3_BUCKET_PUBLIC or AWS_S3_BUCKET_IMAGES missing for product images");
 
   await withTimeout(
-    s3.send(
-      new PutObjectCommand({
-        Bucket: BUCKET_IMAGES,
-        Key: key,
-        Body: buffer,
-        ContentType: contentType,
-      })
-    ),
+    s3.send(new PutObjectCommand({ Bucket: BUCKET_IMAGES, Key: key, Body: buffer, ContentType: contentType })),
     S3_TIMEOUT_MS,
     "S3 image upload"
   );
 
-  return {
-    bucket: BUCKET_IMAGES,
-    key,
-    publicUrl: `${PUBLIC_BASE_URL}/${key}`,
-  };
+  return { bucket: BUCKET_IMAGES, key, publicUrl: `${PUBLIC_BASE_URL}/${key}` };
 }
 
 async function deleteS3ObjectIfExists(s3Key: string) {
@@ -250,12 +210,7 @@ async function deleteS3ObjectIfExists(s3Key: string) {
   if (!key || !BUCKET_IMAGES) return;
 
   try {
-    await s3.send(
-      new DeleteObjectCommand({
-        Bucket: BUCKET_IMAGES,
-        Key: key,
-      })
-    );
+    await s3.send(new DeleteObjectCommand({ Bucket: BUCKET_IMAGES, Key: key }));
   } catch {
     // ignore cleanup failure
   }
@@ -264,40 +219,25 @@ async function deleteS3ObjectIfExists(s3Key: string) {
 async function softDeleteFolderImages(folderId: string) {
   await ProductImageVaultFile.updateMany(
     { folderId, deletedAt: null },
-    {
-      $set: {
-        deletedAt: new Date(),
-        updatedAt: new Date(),
-      },
-    }
+    { $set: { deletedAt: new Date(), updatedAt: new Date() } }
   );
 }
 
 async function readIncomingFiles(formData: FormData) {
-  const rawEntries = [
-    ...formData.getAll("files"),
-    ...formData.getAll("file"),
-    ...formData.getAll("images"),
-  ];
-
+  const rawEntries = [...formData.getAll("files"), ...formData.getAll("file"), ...formData.getAll("images")];
   const seen = new Set<any>();
   const files: FileLike[] = [];
 
   for (const entry of rawEntries) {
     if (!entry || seen.has(entry)) continue;
     seen.add(entry);
-    if (isFileLike(entry)) {
-      files.push(entry);
-    }
+    if (isFileLike(entry)) files.push(entry);
   }
 
   return files;
 }
 
-async function uploadNewFolderImagesAtomic(args: {
-  files: FileLike[];
-  targetFolderPath: string;
-}) {
+async function uploadNewFolderImagesAtomic(args: { files: FileLike[]; targetFolderPath: string }) {
   const uploaded: StagedUploadedImage[] = [];
 
   try {
@@ -305,9 +245,7 @@ async function uploadNewFolderImagesAtomic(args: {
       const originalName = safeStr(path.basename(file.name));
       const ext = fileExt(originalName) || ".jpg";
       const contentType = mimeFromExt(ext);
-
       const buffer = Buffer.from(await file.arrayBuffer());
-
       const s3Key = buildImageS3Key(args.targetFolderPath, originalName);
       const s3Out = await uploadBufferToS3(buffer, s3Key, contentType);
 
@@ -333,16 +271,58 @@ async function uploadNewFolderImagesAtomic(args: {
   }
 }
 
+async function syncImagesToGeneratedHardcopy(sourceProduct: any, activeUrls: string[]) {
+  const sourceSku = safeStr(sourceProduct?.sku);
+  const hardcopySku = buildHardcopySkuFromSourceSku(sourceSku);
+
+  if (!sourceSku || !hardcopySku || hardcopySku === sourceSku) {
+    return { ok: true, skipped: true, reason: "Source SKU not eligible for hardcopy image sync." };
+  }
+
+  const hardcopy: any = await Product.findOne({
+    deletedAt: null,
+    category: HARDCOPY_CATEGORY,
+    $or: [
+      { sku: hardcopySku },
+      {
+        autoGenerationType: HARDCOPY_AUTO_TYPE,
+        autoGeneratedFromSku: sourceSku.toUpperCase().replace(/\s+/g, ""),
+      },
+      {
+        autoGeneratedFromProductId: sourceProduct._id,
+      },
+    ],
+  });
+
+  if (!hardcopy) {
+    return { ok: true, skipped: true, reason: "Linked hardcopy product not found yet." };
+  }
+
+  const urls = Array.isArray(activeUrls) ? activeUrls.map((x) => safeStr(x)).filter(Boolean).slice(0, MAX_IMAGES_PER_PRODUCT) : [];
+
+  hardcopy.images = urls;
+  hardcopy.thumbnailUrl = urls[0] || "";
+  hardcopy.quickUrl = urls[1] || urls[0] || "";
+  hardcopy.lastModifiedAt = new Date();
+
+  await hardcopy.save();
+
+  return {
+    ok: true,
+    skipped: false,
+    hardcopyId: String(hardcopy._id),
+    hardcopySku: safeStr(hardcopy.sku),
+    imageCount: urls.length,
+  };
+}
+
 export async function POST(req: Request) {
   const guard = await assertAdminWriteAccess();
   if (!guard.ok) return guard.res;
 
   const contentType = safeStr(req.headers.get("content-type")).toLowerCase();
   if (!contentType.includes("multipart/form-data")) {
-    return NextResponse.json(
-      { ok: false, error: "Only multipart/form-data is supported" },
-      { status: 400 }
-    );
+    return NextResponse.json({ ok: false, error: "Only multipart/form-data is supported" }, { status: 400 });
   }
 
   try {
@@ -351,52 +331,33 @@ export async function POST(req: Request) {
     const parentPath = cleanFolderPath(String(formData.get("parentPath") || "")) || "";
     const modeRaw = safeStr(formData.get("mode")).toLowerCase();
     const mode: UploadMode = modeRaw === "replace" ? "replace" : "append";
-    const skuFolderName = safeStr(
-      formData.get("skuFolderName") ||
-        formData.get("folderName") ||
-        formData.get("sku")
-    );
+    const skuFolderName = safeStr(formData.get("skuFolderName") || formData.get("folderName") || formData.get("sku"));
 
     if (!parentPath) {
-      return NextResponse.json(
-        { ok: false, error: "parentPath required" },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "parentPath required" }, { status: 400 });
     }
 
     if (parentPath === "img-root") {
       return NextResponse.json(
-        {
-          ok: false,
-          error: "Please first open a website-created folder. Direct upload in img-root is not allowed.",
-        },
+        { ok: false, error: "Please first open a website-created folder. Direct upload in img-root is not allowed." },
         { status: 400 }
       );
     }
 
     const files = await readIncomingFiles(formData);
     if (!files.length) {
-      return NextResponse.json(
-        { ok: false, error: "At least one image file is required" },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "At least one image file is required" }, { status: 400 });
     }
 
     const sku = normalizeSkuLike(skuFolderName);
     if (!sku) {
-      return NextResponse.json(
-        { ok: false, error: "Valid SKU folder name required" },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: "Valid SKU folder name required" }, { status: 400 });
     }
 
     const invalidFile = files.find((file) => !isAllowedImageName(file.name));
     if (invalidFile) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: `Only jpg, jpeg, png, webp allowed. Invalid file: ${safeStr(invalidFile.name)}`,
-        },
+        { ok: false, error: `Only jpg, jpeg, png, webp allowed. Invalid file: ${safeStr(invalidFile.name)}` },
         { status: 400 }
       );
     }
@@ -404,10 +365,7 @@ export async function POST(req: Request) {
     const oversizeFile = files.find((file) => safeNum(file.size, 0) > MAX_IMAGE_SIZE_BYTES);
     if (oversizeFile) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: `Image too large: ${safeStr(oversizeFile.name)}. Max size is 15MB per image.`,
-        },
+        { ok: false, error: `Image too large: ${safeStr(oversizeFile.name)}. Max size is 15MB per image.` },
         { status: 400 }
       );
     }
@@ -417,15 +375,10 @@ export async function POST(req: Request) {
     const product: any = await Product.findOne({
       sku,
       deletedAt: null,
-    })
-      .select("_id sku slug images thumbnailUrl quickUrl availability")
-      .lean();
+    }).select("_id sku slug images thumbnailUrl quickUrl availability category").lean();
 
     if (!product) {
-      return NextResponse.json(
-        { ok: false, error: "SKU not found" },
-        { status: 404 }
-      );
+      return NextResponse.json({ ok: false, error: "SKU not found" }, { status: 404 });
     }
 
     const targetFolderPath = buildFolderPath(parentPath, sku);
@@ -433,10 +386,7 @@ export async function POST(req: Request) {
 
     if (existingLiveFolder && safeStr(existingLiveFolder.path) !== safeStr(targetFolderPath)) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: `This SKU already exists in another folder: ${safeStr(existingLiveFolder.path)}`,
-        },
+        { ok: false, error: `This SKU already exists in another folder: ${safeStr(existingLiveFolder.path)}` },
         { status: 409 }
       );
     }
@@ -446,18 +396,13 @@ export async function POST(req: Request) {
     const existingActiveVaultFiles: any[] = await ProductImageVaultFile.find({
       folderId: folder._id,
       deletedAt: null,
-    })
-      .sort({ sortOrder: 1, uploadedAt: 1 })
-      .lean();
+    }).sort({ sortOrder: 1, uploadedAt: 1 }).lean();
 
     const existingActiveCount = existingActiveVaultFiles.length;
 
     if (mode === "append" && existingActiveCount >= MAX_IMAGES_PER_PRODUCT) {
       return NextResponse.json(
-        {
-          ok: false,
-          error: `Max ${MAX_IMAGES_PER_PRODUCT} images already reached for this product folder`,
-        },
+        { ok: false, error: `Max ${MAX_IMAGES_PER_PRODUCT} images already reached for this product folder` },
         { status: 400 }
       );
     }
@@ -465,28 +410,16 @@ export async function POST(req: Request) {
     const uniqueByName = new Map<string, FileLike>();
     for (const file of files) {
       const key = safeStr(path.basename(file.name)).toLowerCase();
-      if (!uniqueByName.has(key)) {
-        uniqueByName.set(key, file);
-      }
+      if (!uniqueByName.has(key)) uniqueByName.set(key, file);
     }
 
     const incomingUniqueFiles = Array.from(uniqueByName.values());
-    const remainingSlots =
-      mode === "replace"
-        ? MAX_IMAGES_PER_PRODUCT
-        : Math.max(0, MAX_IMAGES_PER_PRODUCT - existingActiveCount);
-
+    const remainingSlots = mode === "replace" ? MAX_IMAGES_PER_PRODUCT : Math.max(0, MAX_IMAGES_PER_PRODUCT - existingActiveCount);
     const filesToUpload = incomingUniqueFiles.slice(0, remainingSlots);
     const skippedImages = Math.max(0, incomingUniqueFiles.length - filesToUpload.length);
 
     if (!filesToUpload.length) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error: `Max ${MAX_IMAGES_PER_PRODUCT} images allowed in one product folder`,
-        },
-        { status: 400 }
-      );
+      return NextResponse.json({ ok: false, error: `Max ${MAX_IMAGES_PER_PRODUCT} images allowed in one product folder` }, { status: 400 });
     }
 
     const uploadedImages = await uploadNewFolderImagesAtomic({
@@ -533,9 +466,7 @@ export async function POST(req: Request) {
       const activeVaultFiles: any[] = await ProductImageVaultFile.find({
         folderId: folder._id,
         deletedAt: null,
-      })
-        .sort({ sortOrder: 1, uploadedAt: 1 })
-        .lean();
+      }).sort({ sortOrder: 1, uploadedAt: 1 }).lean();
 
       const activeUrls = activeVaultFiles
         .map((x) => safeStr(x.publicUrl))
@@ -560,6 +491,8 @@ export async function POST(req: Request) {
       }
 
       await Product.updateOne({ _id: product._id }, { $set: updateData });
+
+      const imageSyncToHardcopy = await syncImagesToGeneratedHardcopy(product, activeUrls);
 
       await PdfVaultFolder.updateOne(
         { _id: folder._id },
@@ -588,6 +521,7 @@ export async function POST(req: Request) {
             totalImagesNow: activeUrls.length,
             status: "completed",
           },
+          imageSyncToHardcopy,
         },
         { status: 200 }
       );
