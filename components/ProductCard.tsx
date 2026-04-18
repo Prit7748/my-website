@@ -103,31 +103,112 @@ function schemaAvailability(v?: string) {
   return "https://schema.org/InStock";
 }
 
-async function sendWantToBuyRequest(product: ApiProduct) {
-  try {
-    const res = await fetch("/api/products/want-to-buy", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      credentials: "include",
-      body: JSON.stringify({
-        productId: safeText(product._id),
-        slug: safeText(product.slug),
-        title: safeText(product.title),
-        category: safeText(product.category),
-        availability: safeText(product.availability),
-      }),
-    });
+function isPyqCategory(input: any) {
+  const c = safeText(input).toLowerCase();
+  return (
+    c === "question papers (pyq)" ||
+    c === "question papers" ||
+    c === "question paper (pyq)" ||
+    c === "question paper" ||
+    c === "pyq" ||
+    c === "pyqs" ||
+    c === "previous year paper" ||
+    c === "previous year papers"
+  );
+}
 
-    let data: any = null;
-    try {
-      data = await res.json();
-    } catch {}
+function looksLikePyqRuntimeThumb(url: string) {
+  const u = safeText(url);
+  if (!u) return false;
+  return u.includes("/api/thumb/pyq?");
+}
 
-    if (!res.ok) throw new Error(data?.error || data?.message || "Request failed");
-    return { ok: true, data };
-  } catch (e: any) {
-    return { ok: false, error: e?.message || "Request failed" };
-  }
+function extractPyqSubjectCode(product: ApiProduct) {
+  const direct = safeText(product?.subjectCode);
+  if (direct) return direct;
+
+  const t = safeText(product?.title).toUpperCase();
+  const m = t.match(/\b([A-Z]{2,10})\s*[- ]?\s*(\d{1,6}[A-Z0-9]*)\b/);
+  if (m) return `${m[1]}-${m[2]}`;
+
+  return "";
+}
+
+function extractPyqSubjectTitle(product: ApiProduct) {
+  const lang = safeText(product?.language).toLowerCase();
+  const hi = safeText(product?.subjectTitleHi);
+  const en = safeText(product?.subjectTitleEn);
+  const direct = safeText(product?.subjectTitle);
+
+  if ((lang === "hindi" || lang.startsWith("hin")) && hi) return hi;
+  if ((lang === "english" || lang.startsWith("eng")) && en) return en;
+
+  return direct || hi || en || safeText(product?.title) || "Solved Previous Year Paper";
+}
+
+function extractPyqMedium(product: ApiProduct) {
+  return safeText(product?.language) || safeText(product?.medium) || "English";
+}
+
+function buildPyqMasterThumbUrl(product: ApiProduct) {
+  const session = safeText(product?.session) || "June, 2025";
+  const code = extractPyqSubjectCode(product) || "IGNOU";
+  const title = extractPyqSubjectTitle(product) || "Solved Previous Year Paper";
+  const course = extractCourseCodesText(product) || "IGNOU";
+  const medium = extractPyqMedium(product) || "English";
+
+  const v = [
+    "pyq-card-v2",
+    safeText(product?._id),
+    safeText(product?.slug),
+    safeText(product?.updatedAt),
+    safeText(product?.category),
+    code,
+    title,
+    course,
+    session,
+    medium,
+  ]
+    .filter(Boolean)
+    .join("|");
+
+  const qs = new URLSearchParams({
+    session,
+    code,
+    title,
+    course,
+    medium,
+    v,
+  });
+
+  return `/api/thumb/pyq?${qs.toString()}`;
+}
+
+function sendWantToBuyRequest(product: ApiProduct) {
+  return fetch("/api/products/want-to-buy", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    credentials: "include",
+    body: JSON.stringify({
+      productId: safeText(product._id),
+      slug: safeText(product.slug),
+      title: safeText(product.title),
+      category: safeText(product.category),
+      availability: safeText(product.availability),
+    }),
+  })
+    .then(async (res) => {
+      let data: any = null;
+      try {
+        data = await res.json();
+      } catch {}
+      if (!res.ok) throw new Error(data?.error || data?.message || "Request failed");
+      return { ok: true, data };
+    })
+    .catch((e: any) => ({
+      ok: false,
+      error: e?.message || "Request failed",
+    }));
 }
 
 function firstValidImage(product: ApiProduct) {
@@ -139,17 +220,34 @@ function firstValidImage(product: ApiProduct) {
     return buildHardcopyMasterThumbUrl(product);
   }
 
+  if (isPyqCategory(product?.category)) {
+    const runtimeThumbFromApi =
+      safeText(product?.thumbnailUrl) && looksLikePyqRuntimeThumb(safeText(product.thumbnailUrl))
+        ? safeText(product.thumbnailUrl)
+        : safeText(product?.thumbUrl) && looksLikePyqRuntimeThumb(safeText(product.thumbUrl))
+        ? safeText(product.thumbUrl)
+        : "";
+
+    if (runtimeThumbFromApi) return runtimeThumbFromApi;
+
+    return buildPyqMasterThumbUrl(product);
+  }
+
   const uploaded = pickSortedImagePair(product.images).all;
-  return uploaded[0] || "";
+  return uploaded[0] || safeText(product.thumbnailUrl) || safeText(product.thumbUrl) || "";
 }
 
 function secondValidImage(product: ApiProduct, fallback: string) {
-  if (isSolvedAssignmentProduct(product) || isHandwrittenHardcopyProduct(product)) {
+  if (
+    isSolvedAssignmentProduct(product) ||
+    isHandwrittenHardcopyProduct(product) ||
+    isPyqCategory(product?.category)
+  ) {
     return fallback;
   }
 
   const pair = pickSortedImagePair(product.images);
-  return pair.second || pair.first || "";
+  return pair.second || pair.first || safeText(product.quickUrl) || fallback;
 }
 
 export default function ProductCard({ product }: { product: ApiProduct }) {
@@ -181,6 +279,7 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
 
   const isHandwritten = useMemo(() => isHandwrittenHardcopyProduct(product), [product]);
   const isSolved = useMemo(() => isSolvedAssignmentProduct(product), [product]);
+  const isPyq = useMemo(() => isPyqCategory(product?.category), [product]);
 
   const imgPrimary = useMemo(() => {
     return firstValidImage(product);
@@ -233,10 +332,10 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
         (kind === "add"
           ? "Added to cart ✅"
           : kind === "remove"
-            ? "Removed from cart ❌"
-            : kind === "success"
-              ? "Request received ✅"
-              : "Updated"),
+          ? "Removed from cart ❌"
+          : kind === "success"
+          ? "Request received ✅"
+          : "Updated"),
     });
 
     toastTimer.current = setTimeout(() => {
@@ -260,7 +359,7 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
         "Request Received. We are processing your submission and will upload the product shortly. Keep an eye on our website for updates."
       );
     } else {
-      showToast("info", result.error || "Request could not be submitted. Please try again.");
+      showToast("info", (result as any).error || "Request could not be submitted. Please try again.");
     }
   }
 
@@ -334,7 +433,8 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
   }, [inCart, isWantToBuy, wantToBuySent, wantLoading]);
 
   const showPrimaryImage = !!imgPrimary && !imgBroken;
-  const showHoverImage = !!imgQuick && !isSolved && !isHandwritten && imgQuick !== imgPrimary;
+  const showHoverImage =
+    !!imgQuick && !isSolved && !isHandwritten && !isPyq && imgQuick !== imgPrimary;
 
   const showDiscountBadge = hasDiscount && !isHandwritten;
   const showTypeBadge = !isHandwritten;
@@ -363,10 +463,10 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
               toast.kind === "add"
                 ? "border-emerald-200 bg-emerald-50 text-emerald-800"
                 : toast.kind === "remove"
-                  ? "border-rose-200 bg-rose-50 text-rose-800"
-                  : toast.kind === "success"
-                    ? "border-emerald-200 bg-emerald-50 text-emerald-800"
-                    : "border-slate-200 bg-slate-50 text-slate-800"
+                ? "border-rose-200 bg-rose-50 text-rose-800"
+                : toast.kind === "success"
+                ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                : "border-slate-200 bg-slate-50 text-slate-800"
             }`}
           >
             {toast.kind === "add" ? (

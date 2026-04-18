@@ -4,6 +4,9 @@ import Product from "@/models/Product";
 import Course from "@/models/Course";
 import Session from "@/models/Session";
 import GlobalToggle from "@/models/GlobalToggle";
+import PyqThumbnailConfig, {
+  PYQ_THUMBNAIL_CONFIG_KEY,
+} from "@/models/PyqThumbnailConfig";
 import { attachResolvedOnDemandTimingToProducts } from "@/lib/onDemandTiming";
 import { categoryLabelToSessionSlugCandidates } from "@/lib/productCatalog";
 
@@ -256,6 +259,129 @@ function resolveAvailability(rawAvailability: string, onDemandSalesEnabled: bool
 }
 
 /* =========================
+   PYQ runtime thumbnail helpers
+   ========================= */
+
+function isPyqCategory(input: any) {
+  const c = safeStr(input).toLowerCase();
+  return (
+    c === "question papers (pyq)" ||
+    c === "question papers" ||
+    c === "question paper (pyq)" ||
+    c === "question paper" ||
+    c === "pyq" ||
+    c === "pyqs" ||
+    c === "previous year paper" ||
+    c === "previous year papers"
+  );
+}
+
+function extractSubjectCodeFromPyqProduct(p: any) {
+  const direct = safeStr(p?.subjectCode);
+  if (direct) return direct;
+
+  const title = safeStr(p?.title);
+  const m = title.match(/\b([A-Z]{2,10})\s*[- ]?\s*(\d{1,6}[A-Z0-9]*)\b/i);
+  if (m) return `${safeStr(m[1]).toUpperCase()}-${safeStr(m[2]).toUpperCase()}`;
+
+  return "";
+}
+
+function extractSubjectTitleFromPyqProduct(p: any) {
+  const lang = safeStr(p?.language).toLowerCase();
+  const hi = safeStr(p?.subjectTitleHi);
+  const en = safeStr(p?.subjectTitleEn);
+
+  if ((lang === "hindi" || lang.startsWith("hin")) && hi) return hi;
+  if ((lang === "english" || lang.startsWith("eng")) && en) return en;
+
+  return hi || en || "";
+}
+
+function extractCourseTextFromPyqProduct(p: any) {
+  const list = Array.isArray(p?.courseCodes)
+    ? p.courseCodes.map((x: any) => safeStr(x)).filter(Boolean)
+    : [];
+
+  if (list.length) return Array.from(new Set(list)).join(", ");
+  return "";
+}
+
+function extractMediumFromPyqProduct(p: any) {
+  return safeStr(p?.language) || "English";
+}
+
+async function getPyqTemplateVersionToken() {
+  try {
+    const doc: any = await PyqThumbnailConfig.findOne({
+      key: PYQ_THUMBNAIL_CONFIG_KEY,
+    })
+      .select("templateImageUrl updatedAt isEnabled")
+      .lean();
+
+    const isEnabled = doc?.isEnabled !== false;
+    const templateImageUrl = safeStr(doc?.templateImageUrl);
+    const updatedAt = doc?.updatedAt ? new Date(doc.updatedAt).toISOString() : "";
+
+    return [
+      "pyq-template-v4",
+      isEnabled ? "enabled" : "disabled",
+      templateImageUrl,
+      updatedAt,
+    ]
+      .filter(Boolean)
+      .join("|");
+  } catch {
+    return "pyq-template-v4-fallback";
+  }
+}
+
+function buildPyqRuntimeThumbUrl(p: any, templateVersionToken: string) {
+  const session = safeStr(p?.session) || "June, 2025";
+  const code = extractSubjectCodeFromPyqProduct(p) || "IGNOU";
+  const title = extractSubjectTitleFromPyqProduct(p) || "Solved Previous Year Paper";
+  const course = extractCourseTextFromPyqProduct(p) || "IGNOU";
+  const medium = extractMediumFromPyqProduct(p) || "English";
+
+  const v = [
+    templateVersionToken,
+    safeStr(p?._id),
+    safeStr(p?.slug),
+    safeStr(p?.updatedAt),
+    safeStr(p?.category),
+    code,
+    title,
+    course,
+    session,
+    medium,
+  ]
+    .filter(Boolean)
+    .join("|");
+
+  const qs = new URLSearchParams({
+    session,
+    code,
+    title,
+    course,
+    medium,
+    v,
+  });
+
+  return `/api/thumb/pyq?${qs.toString()}`;
+}
+
+function isRealProductImage(url: string) {
+  const u = safeStr(url).toLowerCase();
+  if (!u) return false;
+
+  if (u.includes("/api/thumb/")) return false;
+  if (u.includes("pyq-master-template")) return false;
+  if (u.includes("/uploads/site-settings/pyq-thumbnail/")) return false;
+
+  return true;
+}
+
+/* =========================
    Facet helpers
    ========================= */
 
@@ -412,6 +538,7 @@ export async function GET(req: Request) {
   await dbConnect();
 
   const onDemandSalesEnabled = await getOnDemandSalesEnabled();
+  const pyqTemplateVersionToken = await getPyqTemplateVersionToken();
 
   const projection: any = {
     title: 1,
@@ -529,11 +656,29 @@ export async function GET(req: Request) {
   const normalizedProducts = (rawProducts || []).map((p: any) => {
     const { urls, thumbUrl, quickUrl } = normalizeImagesToUrls(p.images);
 
-    const finalThumb = safeStr(p.thumbnailUrl) || thumbUrl;
-    const finalQuick = safeStr(p.quickUrl) || quickUrl;
-
     const rawAvailability = safeStr(p.availability || "");
     const effectiveAvailability = resolveAvailability(rawAvailability, onDemandSalesEnabled);
+
+    const isPyq = isPyqCategory(p.category);
+
+    let finalImages = urls;
+    let finalThumb = safeStr(p.thumbnailUrl) || thumbUrl;
+    let finalQuick = safeStr(p.quickUrl) || quickUrl;
+
+    if (isPyq) {
+      const realImages = urls.filter((u) => isRealProductImage(u));
+      const runtimeThumb = buildPyqRuntimeThumbUrl(p, pyqTemplateVersionToken);
+
+      if (realImages.length > 0) {
+        finalImages = realImages;
+        finalThumb = realImages[0] || runtimeThumb;
+        finalQuick = realImages[1] || realImages[0] || runtimeThumb;
+      } else {
+        finalImages = [runtimeThumb];
+        finalThumb = runtimeThumb;
+        finalQuick = runtimeThumb;
+      }
+    }
 
     return {
       _id: p._id,
@@ -572,7 +717,7 @@ export async function GET(req: Request) {
       rawDeliverWithinMinutes: Math.max(1, safeNum(p.deliverWithinMinutes, 20)),
       rawOnDemandNote: safeStr(p.onDemandNote),
 
-      images: urls,
+      images: finalImages,
       thumbUrl: finalThumb,
       quickUrl: finalQuick,
       thumbnailUrl: finalThumb,

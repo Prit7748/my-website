@@ -36,6 +36,7 @@ const VIDEO_EXTENSIONS = new Set([".mp4", ".webm"]);
 const HERO_IMAGE_MAX_BYTES = 8 * 1024 * 1024; // 8 MB
 const HERO_VIDEO_MAX_BYTES = 30 * 1024 * 1024; // 30 MB
 const BLOG_IMAGE_MAX_BYTES = 10 * 1024 * 1024; // 10 MB
+const PYQ_TEMPLATE_IMAGE_MAX_BYTES = 25 * 1024 * 1024; // 25 MB
 const DEFAULT_IMAGE_MAX_BYTES = 15 * 1024 * 1024; // 15 MB
 const DEFAULT_PDF_MAX_BYTES = 100 * 1024 * 1024; // 100 MB
 
@@ -102,6 +103,17 @@ function isBlogDestination(destination: string) {
   );
 }
 
+function isPyqThumbnailDestination(destination: string) {
+  const d = normalizeDestination(destination);
+  return (
+    d === "pyq-thumbnail" ||
+    d === "pyq_thumbnail" ||
+    d === "pyq-thumbnail-template" ||
+    d === "site-settings/pyq-thumbnail" ||
+    d === "site-settings/pyq-thumbnail-template"
+  );
+}
+
 function getImageContentType(ext: string, fallback: string) {
   if (fallback && fallback.startsWith("image/")) return fallback;
   if (ext === ".png") return "image/png";
@@ -135,6 +147,10 @@ function buildPublicKey(params: {
   const blogMode =
     isBlogDestination(destinationValue) || isBlogDestination(folderValue);
 
+  const pyqThumbnailMode =
+    isPyqThumbnailDestination(destinationValue) ||
+    isPyqThumbnailDestination(folderValue);
+
   if (heroSliderMode) {
     const normalizedDevice = device === "mobile" ? "mobile" : "desktop";
     const mediaType = isVideo ? "videos" : "images";
@@ -144,6 +160,7 @@ function buildPublicKey(params: {
       destinationLabel: "hero-slider",
       heroSliderMode: true,
       blogMode: false,
+      pyqThumbnailMode: false,
     };
   }
 
@@ -153,6 +170,17 @@ function buildPublicKey(params: {
       destinationLabel: "blogs",
       heroSliderMode: false,
       blogMode: true,
+      pyqThumbnailMode: false,
+    };
+  }
+
+  if (pyqThumbnailMode) {
+    return {
+      key: `uploads/site-settings/pyq-thumbnail/${outName}`,
+      destinationLabel: "pyq-thumbnail",
+      heroSliderMode: false,
+      blogMode: false,
+      pyqThumbnailMode: true,
     };
   }
 
@@ -161,6 +189,7 @@ function buildPublicKey(params: {
     destinationLabel: "default",
     heroSliderMode: false,
     blogMode: false,
+    pyqThumbnailMode: false,
   };
 }
 
@@ -171,7 +200,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
 
-  // Intentionally unchanged to avoid breaking old flows that already use this route.
   if (!hasPermission(user, "products:write")) {
     return NextResponse.json(
       { error: "Forbidden (products:write missing)" },
@@ -327,6 +355,26 @@ export async function POST(req: Request) {
           {
             error:
               "Blog image too large. Max allowed size is 10 MB. Better SEO and speed ke liye compressed WebP/AVIF preferred hai.",
+          },
+          { status: 400 }
+        );
+      }
+    } else if (publicTarget.pyqThumbnailMode) {
+      if (!isImage) {
+        return NextResponse.json(
+          {
+            error:
+              "PYQ master thumbnail upload currently supports image files only.",
+          },
+          { status: 400 }
+        );
+      }
+
+      if (bytes.length > PYQ_TEMPLATE_IMAGE_MAX_BYTES) {
+        return NextResponse.json(
+          {
+            error:
+              "PYQ master template image too large. Max allowed size is 25 MB. Better result ke liye compressed PNG/WebP/AVIF use karein.",
           },
           { status: 400 }
         );

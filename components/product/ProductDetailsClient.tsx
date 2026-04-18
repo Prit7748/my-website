@@ -41,6 +41,14 @@ import {
   Zap,
   Loader2,
 } from "lucide-react";
+import {
+  buildAssignmentMasterThumbUrl,
+  buildHardcopyMasterThumbUrl,
+  buildQuestionPaperMasterThumbUrl,
+  isHandwrittenHardcopyProduct,
+  isQuestionPaperProduct,
+  isSolvedAssignmentProduct,
+} from "@/lib/thumbUrls";
 
 type Product = {
   _id: string;
@@ -214,6 +222,22 @@ function isOnDemand(p: Product) {
   return isOnDemandAvailability(resolvedAvailability(p));
 }
 
+function buildMasterThumbFallback(product: Product) {
+  if (isSolvedAssignmentProduct(product as any)) {
+    return buildAssignmentMasterThumbUrl(product as any);
+  }
+
+  if (isHandwrittenHardcopyProduct(product as any)) {
+    return buildHardcopyMasterThumbUrl(product as any);
+  }
+
+  if (isQuestionPaperProduct(product as any)) {
+    return buildQuestionPaperMasterThumbUrl(product as any);
+  }
+
+  return "";
+}
+
 const RV_KEY = "isp_recently_viewed_v1";
 const RV_MAX = 18;
 
@@ -295,7 +319,14 @@ export default function ProductDetailsClient({
     const quick = product?.quickUrl ? [product.quickUrl] : [];
     const vid = (product as any)?.videoUrl ? [(product as any).videoUrl] : [];
     const merged = [...thumb, ...quick, ...vid, ...list].filter(Boolean);
-    return Array.from(new Set(merged));
+    const uniqueMerged = Array.from(new Set(merged));
+
+    if (uniqueMerged.length) return uniqueMerged;
+
+    const masterThumb = buildMasterThumbFallback(product);
+    if (masterThumb) return [masterThumb];
+
+    return ["/images/cover1.jpg"];
   }, [product]);
 
   useEffect(() => {
@@ -456,7 +487,7 @@ export default function ProductDetailsClient({
       id: product._id,
       title: computedTitle,
       price: Number(product.price || 0),
-      image: product.thumbnailUrl || media[0] || "/images/cover1.jpg",
+      image: heroUrl || product.thumbnailUrl || media[0] || "/images/cover1.jpg",
       quantity: qtyLocked ? 1 : quantity,
       category: safeStr(product.category),
       courseCode: (product.courseCodes?.[0] || "").toString(),
@@ -713,7 +744,7 @@ export default function ProductDetailsClient({
       price: Number(product.price || 0),
       oldPrice: product.oldPrice ? Number(product.oldPrice) : null,
       images: Array.isArray(product.images) ? product.images : [],
-      thumbUrl: product.thumbnailUrl || "",
+      thumbUrl: heroUrl || product.thumbnailUrl || "",
       quickUrl: product.quickUrl || "",
       isDigital: !!product.isDigital,
       availability:
@@ -747,6 +778,7 @@ export default function ProductDetailsClient({
     product.isDigital,
     product.effectiveAvailability,
     product.availability,
+    heroUrl,
   ]);
 
   useEffect(() => {

@@ -6,6 +6,14 @@ import ProductDetailsClient from "@/components/product/ProductDetailsClient";
 import dbConnect from "@/lib/db";
 import Product from "@/models/Product";
 import { productHref } from "@/lib/productHref";
+import {
+  buildAssignmentMasterThumbUrl,
+  buildHardcopyMasterThumbUrl,
+  buildQuestionPaperMasterThumbUrl,
+  isHandwrittenHardcopyProduct,
+  isQuestionPaperProduct,
+  isSolvedAssignmentProduct,
+} from "@/lib/thumbUrls";
 
 type ApiProduct = {
   _id: string;
@@ -44,7 +52,13 @@ type ApiProduct = {
   comingSoonSalesEnabled?: boolean;
 
   videoUrl?: string;
-  comboItems?: Array<{ title: string; slug: string; category?: string; price?: number; thumbUrl?: string }>;
+  comboItems?: Array<{
+    title: string;
+    slug: string;
+    category?: string;
+    price?: number;
+    thumbUrl?: string;
+  }>;
 };
 
 function safeText(input: unknown) {
@@ -120,7 +134,9 @@ function categoryLabelFromSlug(categorySlug: string) {
   return map[categorySlug] || categorySlug.replaceAll("-", " ");
 }
 
-function variantFromCategorySlug(categorySlug: string): "digital" | "hardcopy" | "pyq" | "projects" | "combo" {
+function variantFromCategorySlug(
+  categorySlug: string
+): "digital" | "hardcopy" | "pyq" | "projects" | "combo" {
   if (categorySlug === "handwritten-hardcopy") return "hardcopy";
   if (categorySlug === "combo") return "combo";
   if (categorySlug === "projects") return "projects";
@@ -137,6 +153,30 @@ function categorySlugFromHref(href: string, fallback = "products") {
   if (!clean.startsWith("/")) return fallback;
   const parts = clean.split("/").filter(Boolean);
   return parts[0] || fallback;
+}
+
+function buildMasterThumbnailFallback(product: ApiProduct) {
+  if (safeText(product.thumbnailUrl)) return safeText(product.thumbnailUrl);
+  if (safeText(product.quickUrl)) return safeText(product.quickUrl);
+
+  const firstImage = Array.isArray(product.images)
+    ? safeText(product.images.find((x) => safeText(x)))
+    : "";
+  if (firstImage) return firstImage;
+
+  if (isSolvedAssignmentProduct(product as any)) {
+    return buildAssignmentMasterThumbUrl(product as any);
+  }
+
+  if (isHandwrittenHardcopyProduct(product as any)) {
+    return buildHardcopyMasterThumbUrl(product as any);
+  }
+
+  if (isQuestionPaperProduct(product as any)) {
+    return buildQuestionPaperMasterThumbUrl(product as any);
+  }
+
+  return "";
 }
 
 async function fetchProduct(slug: string) {
@@ -160,14 +200,21 @@ async function fetchProduct(slug: string) {
     subjectTitleHi: safeText(doc.subjectTitleHi),
     subjectTitleEn: safeText(doc.subjectTitleEn),
 
-    courseCodes: Array.isArray(doc.courseCodes) ? doc.courseCodes.map((x: any) => safeText(x)).filter(Boolean) : [],
-    courseTitles: Array.isArray(doc.courseTitles) ? doc.courseTitles.map((x: any) => safeText(x)).filter(Boolean) : [],
+    courseCodes: Array.isArray(doc.courseCodes)
+      ? doc.courseCodes.map((x: any) => safeText(x)).filter(Boolean)
+      : [],
+    courseTitles: Array.isArray(doc.courseTitles)
+      ? doc.courseTitles.map((x: any) => safeText(x)).filter(Boolean)
+      : [],
 
     session: safeText(doc.session),
     language: safeText(doc.language),
 
     price: Number(doc.price || 0),
-    oldPrice: doc.oldPrice === undefined || doc.oldPrice === null ? null : Number(doc.oldPrice || 0),
+    oldPrice:
+      doc.oldPrice === undefined || doc.oldPrice === null
+        ? null
+        : Number(doc.oldPrice || 0),
 
     shortDesc: safeText(doc.shortDesc),
     descriptionHtml: safeText(doc.descriptionHtml),
@@ -177,7 +224,9 @@ async function fetchProduct(slug: string) {
     isDigital: Boolean(doc.isDigital ?? true),
     pdfUrl: safeText(doc.pdfUrl),
 
-    images: Array.isArray(doc.images) ? doc.images.map((x: any) => safeText(x)).filter(Boolean) : [],
+    images: Array.isArray(doc.images)
+      ? doc.images.map((x: any) => safeText(x)).filter(Boolean)
+      : [],
     thumbnailUrl: safeText(doc.thumbnailUrl),
     quickUrl: safeText(doc.quickUrl),
 
@@ -199,12 +248,17 @@ export async function generateMetadata({ params }: { params: any }): Promise<Met
   }
 
   const { product } = await fetchProduct(slug);
-  if (!product) return { title: "Product Not Found", robots: { index: false, follow: false } };
+  if (!product) {
+    return { title: "Product Not Found", robots: { index: false, follow: false } };
+  }
 
   const base = siteUrl();
   const canonicalPath = productHref({ slug: product.slug, category: product.category });
   const canonical = `${base}${canonicalPath}`;
-  const canonicalCategorySlug = categorySlugFromHref(canonicalPath, requestedCategorySlug || "products");
+  const canonicalCategorySlug = categorySlugFromHref(
+    canonicalPath,
+    requestedCategorySlug || "products"
+  );
 
   const title = safeText(product.title);
   const description = (
@@ -213,11 +267,7 @@ export async function generateMetadata({ params }: { params: any }): Promise<Met
     "IGNOU study material product."
   ).slice(0, 180);
 
-  const ogImageRaw =
-    safeText(product.thumbnailUrl) ||
-    safeText(product.quickUrl) ||
-    (Array.isArray(product.images) ? safeText(product.images[0]) : "");
-
+  const ogImageRaw = buildMasterThumbnailFallback(product);
   const ogImage = absoluteUrl(ogImageRaw);
 
   return {
@@ -253,7 +303,10 @@ export default async function Page({ params }: { params: any }) {
   if (!product) notFound();
 
   const canonicalPath = productHref({ slug: product.slug, category: product.category });
-  const expectedCategorySlug = categorySlugFromHref(canonicalPath, requestedCategorySlug || "products");
+  const expectedCategorySlug = categorySlugFromHref(
+    canonicalPath,
+    requestedCategorySlug || "products"
+  );
 
   if (!expectedCategorySlug || expectedCategorySlug === "products") {
     notFound();
@@ -273,11 +326,20 @@ export default async function Page({ params }: { params: any }) {
     stripHtml(product.descriptionHtml || "").slice(0, 220) ||
     `${categoryLabel} product for IGNOU students.`;
 
-  const images = [
-    absoluteUrl(safeText(product.thumbnailUrl)),
-    absoluteUrl(safeText(product.quickUrl)),
-    ...(Array.isArray(product.images) ? product.images.map((x) => absoluteUrl(safeText(x))) : []),
-  ].filter(Boolean);
+  const fallbackThumb = buildMasterThumbnailFallback(product);
+
+  const images = Array.from(
+    new Set(
+      [
+        absoluteUrl(fallbackThumb),
+        absoluteUrl(safeText(product.thumbnailUrl)),
+        absoluteUrl(safeText(product.quickUrl)),
+        ...(Array.isArray(product.images)
+          ? product.images.map((x) => absoluteUrl(safeText(x)))
+          : []),
+      ].filter(Boolean)
+    )
+  );
 
   const rawAvail = normAvail(product.effectiveAvailability || product.availability);
   const schemaAvailability =
@@ -316,8 +378,18 @@ export default async function Page({ params }: { params: any }) {
     "@type": "BreadcrumbList",
     itemListElement: [
       { "@type": "ListItem", position: 1, name: "Home", item: `${base}/` },
-      { "@type": "ListItem", position: 2, name: categoryLabel, item: `${base}/${expectedCategorySlug}` },
-      { "@type": "ListItem", position: 3, name: safeText(product.title), item: productUrl },
+      {
+        "@type": "ListItem",
+        position: 2,
+        name: categoryLabel,
+        item: `${base}/${expectedCategorySlug}`,
+      },
+      {
+        "@type": "ListItem",
+        position: 3,
+        name: safeText(product.title),
+        item: productUrl,
+      },
     ],
   };
 

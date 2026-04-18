@@ -3,6 +3,14 @@ import dbConnect from "@/lib/db";
 import Product from "@/models/Product";
 import GlobalToggle from "@/models/GlobalToggle";
 import { resolveOnDemandTimingForProduct } from "@/lib/onDemandTiming";
+import {
+  buildAssignmentMasterThumbUrl,
+  buildHardcopyMasterThumbUrl,
+  buildQuestionPaperMasterThumbUrl,
+  isHandwrittenHardcopyProduct,
+  isQuestionPaperProduct,
+  isSolvedAssignmentProduct,
+} from "@/lib/thumbUrls";
 
 export const runtime = "nodejs";
 
@@ -82,6 +90,22 @@ function normalizeImagesToUrls(images: any) {
     thumbUrl: urls[0] || "",
     quickUrl: urls[1] || urls[0] || "",
   };
+}
+
+function buildMasterThumbnailFallback(product: any) {
+  if (isSolvedAssignmentProduct(product)) {
+    return buildAssignmentMasterThumbUrl(product);
+  }
+
+  if (isHandwrittenHardcopyProduct(product)) {
+    return buildHardcopyMasterThumbUrl(product);
+  }
+
+  if (isQuestionPaperProduct(product)) {
+    return buildQuestionPaperMasterThumbUrl(product);
+  }
+
+  return "";
 }
 
 async function getOnDemandSalesEnabled() {
@@ -196,9 +220,24 @@ export async function GET(
     });
 
     const { urls, thumbUrl, quickUrl } = normalizeImagesToUrls(p.images);
+    const masterThumbFallback = buildMasterThumbnailFallback({
+      _id: p._id ? String(p._id) : "",
+      id: p._id ? String(p._id) : "",
+      slug: safeStr(p.slug),
+      title: safeStr(p.title),
+      category: safeStr(p.category),
+      subjectCode: safeStr(p.subjectCode),
+      subjectTitleHi: safeStr(p.subjectTitleHi),
+      subjectTitleEn: safeStr(p.subjectTitleEn),
+      courseCodes: Array.isArray(p.courseCodes) ? p.courseCodes : [],
+      session: safeStr(p.session),
+      updatedAt: p.updatedAt || "",
+      language: safeStr(p.language),
+      images: urls,
+    });
 
-    const finalThumb = safeStr(p.thumbnailUrl) || thumbUrl;
-    const finalQuick = safeStr(p.quickUrl) || quickUrl;
+    const finalThumb = safeStr(p.thumbnailUrl) || thumbUrl || masterThumbFallback;
+    const finalQuick = safeStr(p.quickUrl) || quickUrl || finalThumb;
 
     return NextResponse.json(
       {

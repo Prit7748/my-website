@@ -1,8 +1,9 @@
-const THUMB_GLOBAL_VERSION = "thumb-2026-03-30-v1";
+const THUMB_GLOBAL_VERSION = "thumb-2026-04-15-v2";
 
 const THUMB_KIND_VERSION = {
   assignment: "a1",
   hardcopy: "h1",
+  pyq: "q2",
   pyqCombo: "p2",
 } as const;
 
@@ -13,7 +14,7 @@ function safeText(x: any) {
 function stableHash(input: string) {
   let hash = 2166136261;
 
-  for (let i = 0; i < input.length; i++) {
+  for (let i = 0; i < input.length; i += 1) {
     hash ^= input.charCodeAt(i);
     hash = Math.imul(hash, 16777619);
   }
