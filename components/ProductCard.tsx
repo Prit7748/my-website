@@ -436,8 +436,8 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
   const showHoverImage =
     !!imgQuick && !isSolved && !isHandwritten && !isPyq && imgQuick !== imgPrimary;
 
-  const showDiscountBadge = hasDiscount && !isHandwritten;
-  const showTypeBadge = !isHandwritten;
+  const showDiscountBadge = hasDiscount && !isHandwritten && !isPyq;
+  const showTypeBadge = !isHandwritten && !isPyq;
 
   return (
     <article

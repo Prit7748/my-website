@@ -24,6 +24,7 @@ import {
   PackageCheck,
   PenBox,
   Images,
+  BookOpenCheck,
 } from "lucide-react";
 
 export default function SiteSettingsPage() {
@@ -71,6 +72,21 @@ export default function SiteSettingsPage() {
                 <div>
                   <div className="font-extrabold">Hero Slider</div>
                   <div className="text-xs text-slate-600 mt-1">Desktop + Mobile, order, active</div>
+                </div>
+              </div>
+            </Link>
+
+            <Link
+              href="/admin/site-settings/pyq-thumbnail"
+              className="rounded-2xl border border-indigo-200 bg-indigo-50 hover:bg-white transition p-5 shadow-sm"
+            >
+              <div className="flex items-center gap-3">
+                <BookOpenCheck className="text-indigo-700" />
+                <div>
+                  <div className="font-extrabold text-indigo-900">PYQ Master Thumbnail</div>
+                  <div className="text-xs text-indigo-700 mt-1">
+                    Blank template image set karo for runtime PYQ thumbnail generation
+                  </div>
                 </div>
               </div>
             </Link>
