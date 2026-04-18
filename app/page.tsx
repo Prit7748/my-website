@@ -47,6 +47,7 @@ import { productHref } from "@/lib/productHref";
 import {
   buildAssignmentMasterThumbUrl,
   buildHardcopyMasterThumbUrl,
+  buildQuestionPaperMasterThumbUrl,
 } from "@/lib/thumbUrls";
 import type { NoticeItem } from "@/components/NotificationTicker";
 
@@ -165,6 +166,20 @@ function isHardcopyCategory(category: any) {
   return safeStr(category).toLowerCase() === HANDWRITTEN_HARDCOPY_CATEGORY.toLowerCase();
 }
 
+function isQuestionPaperCategory(category: any) {
+  const c = safeStr(category).toLowerCase();
+  return (
+    c === "question papers (pyq)" ||
+    c === "question papers" ||
+    c === "question paper (pyq)" ||
+    c === "question paper" ||
+    c === "pyq" ||
+    c === "pyqs" ||
+    c === "previous year paper" ||
+    c === "previous year papers"
+  );
+}
+
 function buildDynamicProductThumb(product: any) {
   if (isSolvedAssignmentCategory(product?.category)) {
     return buildAssignmentMasterThumbUrl(product);
@@ -172,6 +187,10 @@ function buildDynamicProductThumb(product: any) {
 
   if (isHardcopyCategory(product?.category)) {
     return buildHardcopyMasterThumbUrl(product);
+  }
+
+  if (isQuestionPaperCategory(product?.category)) {
+    return buildQuestionPaperMasterThumbUrl(product);
   }
 
   return "";
@@ -184,6 +203,10 @@ function resolveLatestProductImage(product: any) {
 
   if (isHardcopyCategory(product?.category)) {
     return buildHardcopyMasterThumbUrl(product);
+  }
+
+  if (isQuestionPaperCategory(product?.category)) {
+    return buildQuestionPaperMasterThumbUrl(product);
   }
 
   return (
