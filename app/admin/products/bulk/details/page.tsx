@@ -1,3 +1,4 @@
+//app/admin/products/bulk/details/page.tsx//
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";

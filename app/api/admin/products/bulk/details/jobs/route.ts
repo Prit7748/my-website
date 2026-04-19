@@ -1,3 +1,4 @@
+//app/api/admin/products/bulk/details/jobs/route.ts//
 import { NextResponse } from "next/server";
 import * as XLSX from "xlsx";
 

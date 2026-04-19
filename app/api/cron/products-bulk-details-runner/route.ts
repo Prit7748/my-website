@@ -1,3 +1,4 @@
+//app/api/cron/products-bulk-details-runner/route.ts//
 import { NextRequest, NextResponse } from "next/server";
 
 import dbConnect from "@/lib/db";

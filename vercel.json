@@ -5,7 +5,7 @@
       "schedule": "* * * * *"
     },
     {
-      "path": "/api/cron/purge-trash",
+      "path": "/api/cron/purge-trash", 
       "schedule": "10 3 * * *"
     }
   ]
