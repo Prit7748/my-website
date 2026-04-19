@@ -1,4 +1,3 @@
-//app/api/cron/products-bulk-details-runner/route.ts//
 import { NextRequest, NextResponse } from "next/server";
 
 import dbConnect from "@/lib/db";
@@ -8,6 +7,7 @@ import {
   claimBulkUploadJobBatch,
   completeBulkUploadJobBatch,
   failBulkUploadJob,
+  getBulkUploadJob,
   isFinalBulkJobStatus,
   toPlainBulkJob,
 } from "@/lib/bulkUploadJob";
@@ -17,9 +17,17 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 300;
 
-const MAX_ROW_STEPS_PER_RUN = 200;
-const SOFT_TIME_BUDGET_MS = 240000;
+/**
+ * Goal:
+ * - keep row-by-row processing
+ * - improve throughput by processing many rows in one runner hit
+ * - auto-recover stale processing locks
+ * - reduce chances of job stopping midway
+ */
+const MAX_ROW_STEPS_PER_RUN = 1000;
+const SOFT_TIME_BUDGET_MS = 210000; // keep safely below common 5 min scheduler overlap
 const CLAIM_LOCK_MS = 120000;
+const STALE_HEARTBEAT_MS = 10 * 60 * 1000;
 
 function safeStr(x: any) {
   return String(x ?? "").trim();
@@ -73,6 +81,36 @@ async function assertRunnerAccess(req: NextRequest) {
   };
 }
 
+async function recoverStaleProductDetailLocks() {
+  await dbConnect();
+
+  const now = new Date();
+  const staleBefore = new Date(now.getTime() - STALE_HEARTBEAT_MS);
+
+  const result = await BulkUploadJob.updateMany(
+    {
+      jobType: "product_details",
+      status: "processing_batch",
+      $or: [
+        { lockToken: "" },
+        { lockToken: null },
+        { lockExpiresAt: null },
+        { lockExpiresAt: { $lte: now } },
+        { lastHeartbeatAt: { $lte: staleBefore } },
+      ],
+    },
+    {
+      $set: {
+        status: "running",
+        lockToken: "",
+        lockExpiresAt: null,
+      },
+    }
+  );
+
+  return safeNum((result as any)?.modifiedCount || 0, 0);
+}
+
 async function findEligibleJobs(limit = 25) {
   await dbConnect();
 
@@ -120,6 +158,8 @@ async function processSingleRowForJob(jobDoc: any) {
       ok: false as const,
       skipped: true,
       reason: safeStr(claim.error || "Job could not be locked"),
+      jobId,
+      createdBy,
     };
   }
 
@@ -132,6 +172,8 @@ async function processSingleRowForJob(jobDoc: any) {
       ok: false as const,
       skipped: true,
       reason: "No pending rows left",
+      jobId,
+      createdBy,
     };
   }
 
@@ -193,78 +235,161 @@ async function processSingleRowForJob(jobDoc: any) {
   }
 }
 
+function isRunnerTimeAvailable(startedAtMs: number) {
+  return Date.now() - startedAtMs < SOFT_TIME_BUDGET_MS;
+}
+
+async function processJobRepeatedlyUntilBlocked(params: {
+  job: any;
+  startedAtMs: number;
+  stats: {
+    rowStepsCompleted: number;
+    rowStepsFailed: number;
+    rowStepsSkipped: number;
+  };
+  touchedJobIds: Set<string>;
+  finishedJobs: any[];
+  failureNotes: string[];
+}) {
+  const { job, startedAtMs, stats, touchedJobIds, finishedJobs, failureNotes } = params;
+
+  let noProgressInRow = 0;
+
+  while (
+    isRunnerTimeAvailable(startedAtMs) &&
+    stats.rowStepsCompleted + stats.rowStepsFailed + stats.rowStepsSkipped < MAX_ROW_STEPS_PER_RUN
+  ) {
+    const latestJob = await getBulkUploadJob(safeStr(job?._id), safeStr(job?.createdBy));
+    if (!latestJob) break;
+
+    const latestStatus = safeStr((latestJob as any)?.status);
+    const latestTotal = safeNum((latestJob as any)?.progress?.totalItems, 0);
+    const latestProcessed = safeNum((latestJob as any)?.progress?.processedItems, 0);
+
+    if (isFinalBulkJobStatus(latestStatus)) {
+      finishedJobs.push(toPlainBulkJob(latestJob));
+      break;
+    }
+
+    if (latestTotal <= 0 || latestProcessed >= latestTotal) {
+      break;
+    }
+
+    const result = await processSingleRowForJob(latestJob);
+
+    if (result.skipped) {
+      stats.rowStepsSkipped += 1;
+
+      const reason = safeStr(result.reason);
+      if (reason && !failureNotes.includes(reason)) {
+        failureNotes.push(reason);
+      }
+
+      noProgressInRow += 1;
+
+      // if repeatedly locked or no-progress, leave this job for next scheduler hit
+      if (noProgressInRow >= 2) {
+        break;
+      }
+
+      continue;
+    }
+
+    noProgressInRow = 0;
+
+    if (result.ok) {
+      stats.rowStepsCompleted += 1;
+      if (result.jobId) touchedJobIds.add(result.jobId);
+
+      const updated = result.updatedJob;
+      const status = safeStr(updated?.status);
+      if (isFinalBulkJobStatus(status)) {
+        finishedJobs.push(toPlainBulkJob(updated));
+        break;
+      }
+
+      continue;
+    }
+
+    stats.rowStepsFailed += 1;
+    if (result.jobId) touchedJobIds.add(result.jobId);
+
+    const reason = safeStr(result.reason);
+    if (reason && !failureNotes.includes(reason)) {
+      failureNotes.push(reason);
+    }
+
+    const failedStatus = safeStr(result.failedJob?.status);
+    if (isFinalBulkJobStatus(failedStatus)) {
+      finishedJobs.push(toPlainBulkJob(result.failedJob));
+    }
+
+    break;
+  }
+}
+
 async function runRunner(req: NextRequest) {
   const access = await assertRunnerAccess(req);
   if (!access.ok) return access.res;
 
   const startedAtMs = Date.now();
 
-  let rowStepsCompleted = 0;
-  let rowStepsFailed = 0;
-  let rowStepsSkipped = 0;
+  const staleRecoveredCount = await recoverStaleProductDetailLocks();
+
+  const stats = {
+    rowStepsCompleted: 0,
+    rowStepsFailed: 0,
+    rowStepsSkipped: 0,
+  };
 
   const touchedJobIds = new Set<string>();
   const finishedJobs: any[] = [];
   const failureNotes: string[] = [];
 
-  while (rowStepsCompleted + rowStepsFailed + rowStepsSkipped < MAX_ROW_STEPS_PER_RUN) {
-    const elapsed = Date.now() - startedAtMs;
-    if (elapsed >= SOFT_TIME_BUDGET_MS) {
-      break;
-    }
+  let sweepCount = 0;
+
+  while (
+    isRunnerTimeAvailable(startedAtMs) &&
+    stats.rowStepsCompleted + stats.rowStepsFailed + stats.rowStepsSkipped < MAX_ROW_STEPS_PER_RUN
+  ) {
+    sweepCount += 1;
 
     const jobs = await findEligibleJobs(25);
     if (!jobs.length) {
       break;
     }
 
-    let processedOneStep = false;
+    let anyJobProgressedThisSweep = false;
 
     for (const job of jobs) {
-      const elapsedInner = Date.now() - startedAtMs;
-      if (elapsedInner >= SOFT_TIME_BUDGET_MS) {
-        break;
+      const beforeCount =
+        stats.rowStepsCompleted + stats.rowStepsFailed + stats.rowStepsSkipped;
+
+      await processJobRepeatedlyUntilBlocked({
+        job,
+        startedAtMs,
+        stats,
+        touchedJobIds,
+        finishedJobs,
+        failureNotes,
+      });
+
+      const afterCount =
+        stats.rowStepsCompleted + stats.rowStepsFailed + stats.rowStepsSkipped;
+
+      if (afterCount > beforeCount) {
+        anyJobProgressedThisSweep = true;
       }
 
-      const result = await processSingleRowForJob(job);
-
-      if (result.skipped) {
-        rowStepsSkipped += 1;
-        continue;
-      }
-
-      processedOneStep = true;
-
-      if (result.ok) {
-        rowStepsCompleted += 1;
-        if (result.jobId) touchedJobIds.add(result.jobId);
-
-        const updated = result.updatedJob;
-        const status = safeStr(updated?.status);
-        if (isFinalBulkJobStatus(status)) {
-          finishedJobs.push(toPlainBulkJob(updated));
-        }
-      } else {
-        rowStepsFailed += 1;
-        if (result.jobId) touchedJobIds.add(result.jobId);
-
-        const reason = safeStr(result.reason);
-        if (reason) {
-          failureNotes.push(reason);
-        }
-
-        const failedStatus = safeStr(result.failedJob?.status);
-        if (isFinalBulkJobStatus(failedStatus)) {
-          finishedJobs.push(toPlainBulkJob(result.failedJob));
-        }
-      }
-
-      if (rowStepsCompleted + rowStepsFailed + rowStepsSkipped >= MAX_ROW_STEPS_PER_RUN) {
+      if (
+        !isRunnerTimeAvailable(startedAtMs) ||
+        afterCount >= MAX_ROW_STEPS_PER_RUN
+      ) {
         break;
       }
     }
 
-    if (!processedOneStep) {
+    if (!anyJobProgressedThisSweep) {
       break;
     }
   }
@@ -277,19 +402,19 @@ async function runRunner(req: NextRequest) {
       mode: access.mode,
       actor: access.actor,
       message:
-        rowStepsCompleted || rowStepsFailed
+        stats.rowStepsCompleted || stats.rowStepsFailed
           ? "Product details background runner executed."
           : "No eligible product details job found for processing.",
       stats: {
-        rowStepsCompleted,
-        rowStepsFailed,
-        rowStepsSkipped,
+        ...stats,
         touchedJobs: touchedJobIds.size,
         remainingActiveJobs: remainingJobs.length,
         elapsedMs: Date.now() - startedAtMs,
         maxRowStepsPerRun: MAX_ROW_STEPS_PER_RUN,
         softTimeBudgetMs: SOFT_TIME_BUDGET_MS,
         processingMode: "row_by_row",
+        staleRecoveredCount,
+        sweepCount,
       },
       touchedJobIds: Array.from(touchedJobIds),
       finishedJobs,

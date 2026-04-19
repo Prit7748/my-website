@@ -70,8 +70,22 @@ type SyncQueueItem = {
   after?: any | null;
 };
 
+type MasterDataCache = {
+  loadedAt: number;
+  subjects: any[];
+  courses: any[];
+  sessions: any[];
+  subjectMap: Map<string, any>;
+  courseMap: Map<string, any>;
+  sessionAllowedByCategory: Map<string, Set<string>>;
+};
+
 const MANUAL_HARDCOPY_BULK_BLOCK_MESSAGE =
   "Handwritten Hardcopy (Delivery) category ka manual bulk upload disabled hai. Ye products ab Solved Assignments se automatically generate honge.";
+
+const MASTER_CACHE_TTL_MS = 2 * 60 * 1000;
+
+let masterDataCache: MasterDataCache | null = null;
 
 function safeStr(x: any) {
   return String(x ?? "").trim();
@@ -587,35 +601,9 @@ async function syncGeneratedHardcopiesForBulkChanges(changes: SyncQueueItem[]) {
   };
 }
 
-export async function processBulkDetailsJobBatch(args: {
-  job: any;
-  batchNumber: number;
-  fromIndex: number;
-  toIndex: number;
-}) {
-  await dbConnect();
-
-  const job = args.job;
-  const config = normalizeBulkDetailsConfig(job?.config || {});
-  validateBulkDetailsConfig(config);
-
-  const rows: PreparedBulkDetailsRow[] = Array.isArray(job?.input?.rows) ? job.input.rows : [];
-  const batchRows = rows.slice(args.fromIndex, args.toIndex + 1);
-
-  const currentSummary = job?.summary || {};
-
-  const comboSyncQueue: SyncQueueItem[] = [];
-  const hardcopySyncQueue: SyncQueueItem[] = [];
-
-  const [subjects, courses, sessions] = await Promise.all([
-    Subject.find({ isActive: { $ne: false } }).lean(),
-    Course.find({ isActive: { $ne: false } }).lean(),
-    Session.find({ isActive: { $ne: false } })
-      .select("name slug code title label categories")
-      .lean(),
-  ]);
-
+function buildSubjectMap(subjects: any[]) {
   const subjectMap = new Map<string, any>();
+
   for (const s of subjects as any[]) {
     const subjectKeys = uniqueStrings([
       normalizeSubjectCodeLoose(String(s?.code || "")),
@@ -630,7 +618,12 @@ export async function processBulkDetailsJobBatch(args: {
     }
   }
 
+  return subjectMap;
+}
+
+function buildCourseMap(courses: any[]) {
   const courseMap = new Map<string, any>();
+
   for (const c of courses as any[]) {
     const courseKeys = uniqueStrings([
       normalizeCourseCodeLoose(String(c?.code || "")),
@@ -645,7 +638,53 @@ export async function processBulkDetailsJobBatch(args: {
     }
   }
 
-  const categoryCandidates = categoryLabelToSessionSlugCandidates(config.category);
+  return courseMap;
+}
+
+async function getMasterDataCache(forceRefresh = false) {
+  const now = Date.now();
+
+  if (
+    !forceRefresh &&
+    masterDataCache &&
+    now - masterDataCache.loadedAt < MASTER_CACHE_TTL_MS
+  ) {
+    return masterDataCache;
+  }
+
+  await dbConnect();
+
+  const [subjects, courses, sessions] = await Promise.all([
+    Subject.find({ isActive: { $ne: false } }).lean(),
+    Course.find({ isActive: { $ne: false } }).lean(),
+    Session.find({ isActive: { $ne: false } })
+      .select("name slug code title label categories")
+      .lean(),
+  ]);
+
+  masterDataCache = {
+    loadedAt: now,
+    subjects: Array.isArray(subjects) ? subjects : [],
+    courses: Array.isArray(courses) ? courses : [],
+    sessions: Array.isArray(sessions) ? sessions : [],
+    subjectMap: buildSubjectMap(Array.isArray(subjects) ? subjects : []),
+    courseMap: buildCourseMap(Array.isArray(courses) ? courses : []),
+    sessionAllowedByCategory: new Map<string, Set<string>>(),
+  };
+
+  return masterDataCache;
+}
+
+function getSessionAllowedForCategory(
+  cache: MasterDataCache,
+  category: string
+) {
+  const categoryKey = safeStr(category);
+
+  const existing = cache.sessionAllowedByCategory.get(categoryKey);
+  if (existing) return existing;
+
+  const categoryCandidates = categoryLabelToSessionSlugCandidates(categoryKey);
   const categoryCandidatesNormalized = new Set(
     categoryCandidates.flatMap((candidate) => {
       const cc = safeStr(candidate);
@@ -656,7 +695,7 @@ export async function processBulkDetailsJobBatch(args: {
 
   const sessionAllowed = new Set<string>();
 
-  for (const s of sessions as any[]) {
+  for (const s of cache.sessions as any[]) {
     const cats = Array.isArray(s?.categories)
       ? s.categories.map((x: any) => safeStr(x)).filter(Boolean)
       : [];
@@ -685,6 +724,35 @@ export async function processBulkDetailsJobBatch(args: {
       }
     }
   }
+
+  cache.sessionAllowedByCategory.set(categoryKey, sessionAllowed);
+  return sessionAllowed;
+}
+
+export async function processBulkDetailsJobBatch(args: {
+  job: any;
+  batchNumber: number;
+  fromIndex: number;
+  toIndex: number;
+}) {
+  await dbConnect();
+
+  const job = args.job;
+  const config = normalizeBulkDetailsConfig(job?.config || {});
+  validateBulkDetailsConfig(config);
+
+  const rows: PreparedBulkDetailsRow[] = Array.isArray(job?.input?.rows) ? job.input.rows : [];
+  const batchRows = rows.slice(args.fromIndex, args.toIndex + 1);
+
+  const currentSummary = job?.summary || {};
+
+  const comboSyncQueue: SyncQueueItem[] = [];
+  const hardcopySyncQueue: SyncQueueItem[] = [];
+
+  const master = await getMasterDataCache(false);
+  const subjectMap = master.subjectMap;
+  const courseMap = master.courseMap;
+  const sessionAllowed = getSessionAllowedForCategory(master, config.category);
 
   const isDigitalForCategory = deriveIsDigitalFromCategory(config.category);
   const allTemplates = [
