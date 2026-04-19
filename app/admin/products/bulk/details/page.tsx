@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
-import * as XLSX from "xlsx";
 import {
   ArrowLeft,
   CheckCircle2,
@@ -17,52 +16,11 @@ import {
   PauseCircle,
   LoaderCircle,
   Settings2,
+  Server,
+  FileUp,
+  Activity,
 } from "lucide-react";
 import { CATEGORY_CONFIG, PHYSICAL_CATEGORY } from "@/lib/productCatalog";
-
-type PreparedBulkDetailsRow = {
-  rowNumber: number;
-  A: string; // unique_id / sku
-  B: string; // subject_code
-  C: string; // session
-  D: string; // language
-  E: string; // course_code
-};
-
-type DirectFailureRow = {
-  itemIndex?: number;
-  rowNumber?: number;
-  batchNumber?: number;
-  identifier?: string;
-  sku?: string;
-  status?: string;
-  reason?: string;
-  raw?: any;
-};
-
-type DirectUploadResponse = {
-  ok?: boolean;
-  error?: string;
-  message?: string;
-  summary?: {
-    totalRows?: number;
-    validRows?: number;
-    createdRows?: number;
-    updatedRows?: number;
-    skippedRows?: number;
-    failedRows?: number;
-    processedRows?: number;
-    doneRows?: number;
-    duplicateStrategy?: string;
-    dryRun?: boolean;
-    category?: string;
-    comboSync?: any;
-    hardcopySync?: any;
-  };
-  failuresCount?: number;
-  failures?: DirectFailureRow[];
-  failureCsv?: string;
-};
 
 type DefaultTemplateItem = {
   category: string;
@@ -91,6 +49,93 @@ type DefaultTemplatesApiResponse = {
     updatedAt?: string | null;
     createdAt?: string | null;
   };
+};
+
+type BulkJobFailureRow = {
+  itemIndex?: number;
+  rowNumber?: number;
+  batchNumber?: number;
+  identifier?: string;
+  sku?: string;
+  fileName?: string;
+  status?: string;
+  reason?: string;
+  createdAt?: string | null;
+};
+
+type BulkJobProgress = {
+  totalItems?: number;
+  processedItems?: number;
+  successItems?: number;
+  failedItems?: number;
+  skippedItems?: number;
+  validItems?: number;
+  batchSize?: number;
+  batchCount?: number;
+  currentBatchNumber?: number;
+  lastProcessedIndex?: number;
+  progressPercent?: number;
+};
+
+type BulkJobLastBatch = {
+  batchNumber?: number;
+  fromIndex?: number;
+  toIndex?: number;
+  attempted?: number;
+  success?: number;
+  failed?: number;
+  skipped?: number;
+  startedAt?: string | null;
+  endedAt?: string | null;
+  note?: string;
+} | null;
+
+type BulkJob = {
+  _id: string;
+  jobType?: string;
+  jobLabel?: string;
+  status?: string;
+  createdBy?: string;
+  meta?: Record<string, any>;
+  config?: Record<string, any>;
+  summary?: Record<string, any>;
+  progress?: BulkJobProgress;
+  lastBatch?: BulkJobLastBatch;
+  failuresCount?: number;
+  recentFailures?: BulkJobFailureRow[];
+  resultMessage?: string;
+  downloadFileName?: string;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  failedAt?: string | null;
+  cancelledAt?: string | null;
+  lastHeartbeatAt?: string | null;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+};
+
+type ActiveJobResponse = {
+  ok?: boolean;
+  error?: string;
+  message?: string;
+  hasActiveJob?: boolean;
+  activeJob?: BulkJob | null;
+  latestJob?: BulkJob | null;
+  job?: BulkJob | null;
+};
+
+type CreateJobResponse = {
+  ok?: boolean;
+  error?: string;
+  message?: string;
+  job?: BulkJob | null;
+};
+
+type CancelJobResponse = {
+  ok?: boolean;
+  error?: string;
+  message?: string;
+  job?: BulkJob | null;
 };
 
 const DEFAULT_NOTE =
@@ -122,8 +167,7 @@ BHIC132HIN202526,BHIC 132,2025-2026,Hindi,BAHIH
 BEGC101ENG202526,BEGC 101,2025-2026,English,BAEGH
 BPSC101ENG202526,BPSC 101,2025-2026,English,"BAPSH, BAG"`;
 
-const DIRECT_UPLOAD_CONCURRENCY = 1;
-const REQUEST_TIMEOUT_MS = 120000;
+const POLL_INTERVAL_MS = 5000;
 
 function notifyLongTaskStart() {
   if (typeof window !== "undefined") {
@@ -160,179 +204,6 @@ function safeBool(x: any, def = false) {
   return def;
 }
 
-function csvCell(input: any) {
-  const raw = safeStr(input).replace(/\r?\n/g, " ");
-  const escaped = raw.replace(/"/g, '""');
-  return `"${escaped}"`;
-}
-
-function buildFailureCsv(rows: DirectFailureRow[]) {
-  const header = [
-    "Row Number",
-    "Unique Id",
-    "Subject Code",
-    "Session",
-    "Language",
-    "Course Code",
-    "Status",
-    "Reason",
-  ];
-
-  const body = rows.map((row) => {
-    const raw = row?.raw || {};
-    return [
-      csvCell(row?.rowNumber),
-      csvCell(raw?.unique_id || raw?.A || ""),
-      csvCell(raw?.subject_code || raw?.B || ""),
-      csvCell(raw?.session || raw?.C || ""),
-      csvCell(raw?.language || raw?.D || ""),
-      csvCell(raw?.course_code || raw?.E || ""),
-      csvCell(row?.status || ""),
-      csvCell(row?.reason || ""),
-    ].join(",");
-  });
-
-  return [header.map(csvCell).join(","), ...body].join("\n");
-}
-
-function rowLooksLikeHeader(row: string[]) {
-  const joined = row.map((x) => safeStr(x).toLowerCase()).join(",");
-  return (
-    joined.includes("unique_id") ||
-    joined.includes("subject_code") ||
-    joined.includes("session") ||
-    joined.includes("language") ||
-    joined.includes("course_code")
-  );
-}
-
-function parseCsv(text: string) {
-  const cleaned = String(text ?? "").replace(/^\uFEFF/, "");
-  const rows: string[][] = [];
-  let row: string[] = [];
-  let cell = "";
-  let inQuotes = false;
-
-  for (let i = 0; i < cleaned.length; i++) {
-    const ch = cleaned[i];
-    const next = cleaned[i + 1];
-
-    if (ch === '"') {
-      if (inQuotes && next === '"') {
-        cell += '"';
-        i++;
-      } else {
-        inQuotes = !inQuotes;
-      }
-      continue;
-    }
-
-    if (ch === "," && !inQuotes) {
-      row.push(cell);
-      cell = "";
-      continue;
-    }
-
-    if ((ch === "\n" || ch === "\r") && !inQuotes) {
-      if (ch === "\r" && next === "\n") i++;
-      row.push(cell);
-      rows.push(row);
-      row = [];
-      cell = "";
-      continue;
-    }
-
-    cell += ch;
-  }
-
-  if (cell.length > 0 || row.length > 0) {
-    row.push(cell);
-    rows.push(row);
-  }
-
-  return rows
-    .map((r) => r.map((c) => safeStr(c)))
-    .filter((r) => r.some((c) => c !== ""));
-}
-
-function prepareBulkDetailsRows(csvText: string) {
-  let parsedRows = parseCsv(csvText);
-
-  if (!parsedRows.length) {
-    throw new Error("CSV empty hai");
-  }
-
-  const hasHeader = parsedRows.length > 0 && rowLooksLikeHeader(parsedRows[0]);
-  if (hasHeader) {
-    parsedRows = parsedRows.slice(1);
-  }
-
-  return parsedRows.map((raw, i) => {
-    const cols = [...raw];
-    while (cols.length < 5) cols.push("");
-
-    return {
-      rowNumber: hasHeader ? i + 2 : i + 1,
-      A: safeStr(cols[0]),
-      B: safeStr(cols[1]),
-      C: safeStr(cols[2]),
-      D: safeStr(cols[3]),
-      E: safeStr(cols[4]),
-    } as PreparedBulkDetailsRow;
-  });
-}
-
-function buildFailureFromRow(
-  row: PreparedBulkDetailsRow,
-  status: string,
-  reason: string
-): DirectFailureRow {
-  return {
-    rowNumber: row.rowNumber,
-    identifier: safeStr(row.A),
-    sku: safeStr(row.A),
-    status,
-    reason,
-    raw: {
-      unique_id: safeStr(row.A),
-      subject_code: safeStr(row.B),
-      session: safeStr(row.C),
-      language: safeStr(row.D),
-      course_code: safeStr(row.E),
-      A: safeStr(row.A),
-      B: safeStr(row.B),
-      C: safeStr(row.C),
-      D: safeStr(row.D),
-      E: safeStr(row.E),
-    },
-  };
-}
-
-async function readRowsFromFile(file: File) {
-  const lowerName = safeStr(file.name).toLowerCase();
-
-  if (lowerName.endsWith(".csv")) {
-    const text = await file.text();
-    return prepareBulkDetailsRows(text);
-  }
-
-  if (lowerName.endsWith(".xlsx") || lowerName.endsWith(".xls")) {
-    const buffer = await file.arrayBuffer();
-    const workbook = XLSX.read(buffer, { type: "array" });
-    const firstSheetName = workbook.SheetNames?.[0];
-
-    if (!firstSheetName) {
-      throw new Error("Excel sheet not found");
-    }
-
-    const sheet = workbook.Sheets[firstSheetName];
-    const csvText = XLSX.utils.sheet_to_csv(sheet);
-    return prepareBulkDetailsRows(csvText);
-  }
-
-  throw new Error("Only CSV or Excel allowed");
-}
-
 async function safeReadJson(res: Response) {
   const text = await res.text();
   if (!text) return { ok: false, error: "Server returned empty response" };
@@ -342,9 +213,62 @@ async function safeReadJson(res: Response) {
   } catch {
     return {
       ok: false,
-      error: text.slice(0, 400) || "Invalid server response",
+      error: text.slice(0, 500) || "Invalid server response",
     };
   }
+}
+
+function formatDateTime(input?: string | null) {
+  if (!input) return "—";
+  const d = new Date(input);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString("en-IN");
+}
+
+function isFinalJobStatus(status: string) {
+  const s = safeStr(status);
+  return (
+    s === "completed" ||
+    s === "completed_with_errors" ||
+    s === "failed" ||
+    s === "cancelled"
+  );
+}
+
+function statusPillClasses(status: string) {
+  const s = safeStr(status);
+
+  if (s === "completed") {
+    return "bg-emerald-50 text-emerald-700 border-emerald-200";
+  }
+
+  if (s === "completed_with_errors") {
+    return "bg-amber-50 text-amber-700 border-amber-200";
+  }
+
+  if (s === "failed" || s === "cancelled") {
+    return "bg-rose-50 text-rose-700 border-rose-200";
+  }
+
+  if (s === "running" || s === "processing_batch" || s === "queued") {
+    return "bg-blue-50 text-blue-700 border-blue-200";
+  }
+
+  return "bg-slate-50 text-slate-700 border-slate-200";
+}
+
+function humanJobStatus(status: string) {
+  const s = safeStr(status);
+
+  if (s === "completed") return "Completed";
+  if (s === "completed_with_errors") return "Completed with errors";
+  if (s === "failed") return "Failed";
+  if (s === "cancelled") return "Cancelled";
+  if (s === "processing_batch") return "Processing";
+  if (s === "running") return "Running";
+  if (s === "queued") return "Queued";
+
+  return s || "Unknown";
 }
 
 function normalizeTemplateItem(input: any, category: string): DefaultTemplateItem {
@@ -456,6 +380,40 @@ function buildFallbackTemplateMap(): Record<string, DefaultTemplateItem> {
   };
 }
 
+function csvCell(input: any) {
+  const raw = safeStr(input).replace(/\r?\n/g, " ");
+  const escaped = raw.replace(/"/g, '""');
+  return `"${escaped}"`;
+}
+
+function buildRecentFailuresCsv(rows: BulkJobFailureRow[]) {
+  const header = [
+    "Item Index",
+    "Row Number",
+    "Batch Number",
+    "Identifier",
+    "SKU",
+    "Status",
+    "Reason",
+    "Created At",
+  ];
+
+  const body = rows.map((row) =>
+    [
+      csvCell(row?.itemIndex),
+      csvCell(row?.rowNumber),
+      csvCell(row?.batchNumber),
+      csvCell(row?.identifier),
+      csvCell(row?.sku),
+      csvCell(row?.status),
+      csvCell(row?.reason),
+      csvCell(row?.createdAt),
+    ].join(",")
+  );
+
+  return [header.map(csvCell).join(","), ...body].join("\n");
+}
+
 export default function BulkDetailsPage() {
   const allowedCategories = useMemo(
     () =>
@@ -467,6 +425,8 @@ export default function BulkDetailsPage() {
 
   const fallbackTemplateMap = useMemo(() => buildFallbackTemplateMap(), []);
   const initialDefaultsAppliedRef = useRef(false);
+  const longTaskActiveRef = useRef(false);
+  const pollTimerRef = useRef<number | null>(null);
 
   const [uploadFile, setUploadFile] = useState<File | null>(null);
 
@@ -475,23 +435,15 @@ export default function BulkDetailsPage() {
     "success" | "error" | "info"
   >("info");
 
-  const [isUploading, setIsUploading] = useState(false);
-  const [isStopping, setIsStopping] = useState(false);
+  const [isSubmittingJob, setIsSubmittingJob] = useState(false);
+  const [isCancellingJob, setIsCancellingJob] = useState(false);
+  const [isRefreshingJob, setIsRefreshingJob] = useState(false);
   const [defaultsHydrated, setDefaultsHydrated] = useState(false);
 
-  const [totalEntries, setTotalEntries] = useState(0);
-  const [uploadedEntries, setUploadedEntries] = useState(0);
-  const [processedEntries, setProcessedEntries] = useState(0);
-  const [skippedEntries, setSkippedEntries] = useState(0);
-  const [failedEntries, setFailedEntries] = useState(0);
-
-  const [failureRows, setFailureRows] = useState<DirectFailureRow[]>([]);
   const [defaultTemplateMap, setDefaultTemplateMap] =
     useState<Record<string, DefaultTemplateItem>>(fallbackTemplateMap);
 
-  const stopRequestedRef = useRef(false);
-  const activeControllersRef = useRef<Set<AbortController>>(new Set());
-  const longTaskActiveRef = useRef(false);
+  const [currentJob, setCurrentJob] = useState<BulkJob | null>(null);
 
   const [form, setForm] = useState({
     category: "Solved Assignments",
@@ -535,10 +487,13 @@ export default function BulkDetailsPage() {
 
   async function loadDefaultTemplates() {
     try {
-      const res = await fetch("/api/admin/products/bulk/details/default-templates", {
-        credentials: "include",
-        cache: "no-store",
-      });
+      const res = await fetch(
+        "/api/admin/products/bulk/details/default-templates",
+        {
+          credentials: "include",
+          cache: "no-store",
+        }
+      );
 
       const data = (await safeReadJson(res)) as DefaultTemplatesApiResponse;
 
@@ -595,37 +550,15 @@ export default function BulkDetailsPage() {
     }
   }
 
-  const canSubmit = useMemo(() => {
-    return (
-      form.category.trim() &&
-      form.titleTemplate.trim() &&
-      (form.csvText.trim() || uploadFile)
-    );
-  }, [form, uploadFile]);
-
-  const uploadedPercent = useMemo(() => {
-    if (!totalEntries) return 0;
-    return Math.min(100, Math.round((uploadedEntries / totalEntries) * 100));
-  }, [uploadedEntries, totalEntries]);
-
-  function fillSample() {
-    setForm((p) => ({ ...p, csvText: SAMPLE_CSV }));
-    setUploadFile(null);
-    setServerMessage("");
-  }
-
   function resetMessages() {
     setServerMessage("");
     setServerMessageType("info");
   }
 
-  function resetProgress() {
-    setTotalEntries(0);
-    setUploadedEntries(0);
-    setProcessedEntries(0);
-    setSkippedEntries(0);
-    setFailedEntries(0);
-    setFailureRows([]);
+  function fillSample() {
+    setForm((p) => ({ ...p, csvText: SAMPLE_CSV }));
+    setUploadFile(null);
+    resetMessages();
   }
 
   function resetFileInput() {
@@ -634,258 +567,6 @@ export default function BulkDetailsPage() {
       "bulk-details-file-input"
     ) as HTMLInputElement | null;
     if (input) input.value = "";
-  }
-
-  function downloadFailedCsv() {
-    if (!failureRows.length) {
-      alert("No failed/skipped rows available.");
-      return;
-    }
-
-    const csv = buildFailureCsv(failureRows);
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = "bulk-product-details-failed-rows.csv";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  }
-
-  async function uploadSingleRow(row: PreparedBulkDetailsRow) {
-    const controller = new AbortController();
-    activeControllersRef.current.add(controller);
-
-    const timeout = setTimeout(() => {
-      controller.abort();
-    }, REQUEST_TIMEOUT_MS);
-
-    try {
-      const res = await fetch("/api/admin/products/bulk/details/upload", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        signal: controller.signal,
-        body: JSON.stringify({
-          dryRun: false,
-          category: form.category,
-          titleTemplate: form.titleTemplate,
-          importantNoteTemplate: form.importantNoteTemplate,
-          shortDescTemplate: form.shortDescTemplate,
-          longDescTemplate: form.longDescTemplate,
-          slugTemplate: form.slugTemplate,
-          metaTitleTemplate: form.metaTitleTemplate,
-          metaDescriptionTemplate: form.metaDescriptionTemplate,
-          publishNow: form.publishNow,
-          duplicateStrategy: form.duplicateStrategy,
-          rows: [row],
-        }),
-      });
-
-      const data = (await safeReadJson(res)) as DirectUploadResponse;
-
-      if (!res.ok || !data?.ok) {
-        throw new Error(data?.error || data?.message || "Row upload failed");
-      }
-
-      return data;
-    } finally {
-      clearTimeout(timeout);
-      activeControllersRef.current.delete(controller);
-    }
-  }
-
-  async function startDirectUpload() {
-    if (!canSubmit) {
-      alert("Category, Title Template aur CSV/Excel data required hai.");
-      return;
-    }
-
-    if (form.category === PHYSICAL_CATEGORY) {
-      alert(
-        "Handwritten Hardcopy (Delivery) category ka manual bulk upload disabled hai. Ye products auto-generate honge."
-      );
-      return;
-    }
-
-    setIsUploading(true);
-    setIsStopping(false);
-    stopRequestedRef.current = false;
-    resetMessages();
-    resetProgress();
-
-    try {
-      let parsedRows: PreparedBulkDetailsRow[] = [];
-
-      if (uploadFile) {
-        parsedRows = await readRowsFromFile(uploadFile);
-      } else {
-        parsedRows = prepareBulkDetailsRows(form.csvText);
-      }
-
-      if (!parsedRows.length) {
-        throw new Error("No valid rows found");
-      }
-
-      const seenSku = new Set<string>();
-      const uploadQueue: PreparedBulkDetailsRow[] = [];
-      const initialFailures: DirectFailureRow[] = [];
-
-      for (const row of parsedRows) {
-        const sku = safeStr(row.A).toUpperCase();
-        if (!sku) {
-          initialFailures.push(
-            buildFailureFromRow(row, "failed", "Unique Id / SKU missing")
-          );
-          continue;
-        }
-
-        if (seenSku.has(sku)) {
-          initialFailures.push(
-            buildFailureFromRow(
-              row,
-              "skipped",
-              "Duplicate SKU repeated inside same upload. Only first occurrence processed."
-            )
-          );
-          continue;
-        }
-
-        seenSku.add(sku);
-        uploadQueue.push(row);
-      }
-
-      setTotalEntries(parsedRows.length);
-      setSkippedEntries(
-        initialFailures.filter((x) => safeStr(x.status) === "skipped").length
-      );
-      setFailedEntries(
-        initialFailures.filter((x) => safeStr(x.status) === "failed").length
-      );
-      setProcessedEntries(initialFailures.length);
-      setFailureRows(initialFailures);
-
-      let nextIndex = 0;
-      let createdOrUpdated = 0;
-      let failedCount = initialFailures.filter(
-        (x) => safeStr(x.status) === "failed"
-      ).length;
-      let skippedCount = initialFailures.filter(
-        (x) => safeStr(x.status) === "skipped"
-      ).length;
-      let processedCount = initialFailures.length;
-      const collectedFailures = [...initialFailures];
-
-      async function worker() {
-        while (true) {
-          if (stopRequestedRef.current) return;
-
-          const currentIndex = nextIndex;
-          nextIndex += 1;
-
-          if (currentIndex >= uploadQueue.length) {
-            return;
-          }
-
-          const row = uploadQueue[currentIndex];
-
-          try {
-            const data = await uploadSingleRow(row);
-
-            const doneRows =
-              safeNum(data?.summary?.createdRows, 0) +
-              safeNum(data?.summary?.updatedRows, 0);
-            const skippedRows = safeNum(data?.summary?.skippedRows, 0);
-            const failedRowsCount = safeNum(data?.summary?.failedRows, 0);
-            const serverFailures = Array.isArray(data?.failures) ? data.failures : [];
-
-            createdOrUpdated += doneRows;
-            skippedCount += skippedRows;
-            failedCount += failedRowsCount;
-            processedCount += 1;
-
-            if (serverFailures.length) {
-              collectedFailures.push(...serverFailures);
-              setFailureRows([...collectedFailures]);
-            }
-
-            setUploadedEntries(createdOrUpdated);
-            setSkippedEntries(skippedCount);
-            setFailedEntries(failedCount);
-            setProcessedEntries(processedCount);
-          } catch (error: any) {
-            const reason = safeStr(error?.message || "Row upload failed");
-            const fallbackFailure = buildFailureFromRow(row, "failed", reason);
-
-            collectedFailures.push(fallbackFailure);
-            failedCount += 1;
-            processedCount += 1;
-
-            setFailureRows([...collectedFailures]);
-            setFailedEntries(failedCount);
-            setProcessedEntries(processedCount);
-          }
-        }
-      }
-
-      const workers = Array.from(
-        { length: Math.max(1, DIRECT_UPLOAD_CONCURRENCY) },
-        () => worker()
-      );
-
-      await Promise.all(workers);
-
-      if (stopRequestedRef.current) {
-        setServerMessage(
-          `Upload stopped. Uploaded ${createdOrUpdated}/${parsedRows.length} entries. Skipped ${skippedCount}, Failed ${failedCount}.`
-        );
-        setServerMessageType("info");
-        return;
-      }
-
-      if (createdOrUpdated > 0 && failedCount === 0 && skippedCount === 0) {
-        setServerMessage(
-          `${createdOrUpdated} entries successfully upload ho gayi.`
-        );
-        setServerMessageType("success");
-      } else if (createdOrUpdated > 0) {
-        setServerMessage(
-          `Upload complete. Uploaded ${createdOrUpdated}/${parsedRows.length}. Skipped ${skippedCount}, Failed ${failedCount}.`
-        );
-        setServerMessageType("info");
-      } else {
-        setServerMessage(
-          `Koi bhi entry successfully upload nahi ho paayi. Skipped ${skippedCount}, Failed ${failedCount}.`
-        );
-        setServerMessageType("error");
-      }
-    } catch (error: any) {
-      const errMsg = safeStr(error?.message || "Direct upload failed");
-      setServerMessage(errMsg);
-      setServerMessageType("error");
-    } finally {
-      setIsUploading(false);
-      setIsStopping(false);
-    }
-  }
-
-  function stopCurrentUpload() {
-    if (!isUploading) return;
-
-    stopRequestedRef.current = true;
-    setIsStopping(true);
-
-    for (const controller of activeControllersRef.current) {
-      try {
-        controller.abort();
-      } catch {
-        // ignore
-      }
-    }
-
-    activeControllersRef.current.clear();
   }
 
   function resetFormToCurrentCategoryDefaults() {
@@ -907,35 +588,274 @@ export default function BulkDetailsPage() {
     });
   }
 
+  const canSubmit = useMemo(() => {
+    return (
+      safeStr(form.category) &&
+      safeStr(form.titleTemplate) &&
+      (safeStr(form.csvText) || uploadFile)
+    );
+  }, [form, uploadFile]);
+
+  const activeJobExists = useMemo(() => {
+    return currentJob ? !isFinalJobStatus(safeStr(currentJob.status)) : false;
+  }, [currentJob]);
+
+  const canStartNewJob = useMemo(() => {
+    return !isSubmittingJob && !activeJobExists && canSubmit;
+  }, [isSubmittingJob, activeJobExists, canSubmit]);
+
+  const jobProgressPercent = useMemo(() => {
+    const fromApi = safeNum(currentJob?.progress?.progressPercent, -1);
+    if (fromApi >= 0) return Math.max(0, Math.min(100, fromApi));
+
+    const total = safeNum(currentJob?.progress?.totalItems, 0);
+    const processed = safeNum(currentJob?.progress?.processedItems, 0);
+    if (!total) return 0;
+    return Math.min(100, Math.round((processed / total) * 100));
+  }, [currentJob]);
+
+  async function fetchCurrentJob(showSpinner = false) {
+    if (showSpinner) setIsRefreshingJob(true);
+
+    try {
+      const res = await fetch(
+        "/api/admin/products/bulk/details/jobs/active",
+        {
+          credentials: "include",
+          cache: "no-store",
+        }
+      );
+
+      const data = (await safeReadJson(res)) as ActiveJobResponse;
+
+      if (!res.ok || !data?.ok) return;
+
+      setCurrentJob(data?.job || null);
+    } catch {
+      // ignore
+    } finally {
+      if (showSpinner) setIsRefreshingJob(false);
+    }
+  }
+
+  async function createBulkDetailsJob() {
+    if (!canSubmit) {
+      alert("Category, Title Template aur CSV/Excel data required hai.");
+      return;
+    }
+
+    if (form.category === PHYSICAL_CATEGORY) {
+      alert(
+        "Handwritten Hardcopy (Delivery) category ka manual bulk upload disabled hai. Ye products auto-generate honge."
+      );
+      return;
+    }
+
+    if (activeJobExists) {
+      alert(
+        "Ek bulk product details job already chal rahi hai. Pehle usko complete ya cancel hone do."
+      );
+      return;
+    }
+
+    setIsSubmittingJob(true);
+    resetMessages();
+
+    try {
+      let res: Response;
+
+      if (uploadFile) {
+        const fd = new FormData();
+        fd.append("file", uploadFile);
+        fd.append("dryRun", "false");
+        fd.append("category", form.category);
+        fd.append("titleTemplate", form.titleTemplate);
+        fd.append("importantNoteTemplate", form.importantNoteTemplate);
+        fd.append("shortDescTemplate", form.shortDescTemplate);
+        fd.append("longDescTemplate", form.longDescTemplate);
+        fd.append("slugTemplate", form.slugTemplate);
+        fd.append("metaTitleTemplate", form.metaTitleTemplate);
+        fd.append("metaDescriptionTemplate", form.metaDescriptionTemplate);
+        fd.append("publishNow", String(form.publishNow));
+        fd.append("duplicateStrategy", form.duplicateStrategy);
+
+        res = await fetch("/api/admin/products/bulk/details/jobs", {
+          method: "POST",
+          credentials: "include",
+          body: fd,
+        });
+      } else {
+        res = await fetch("/api/admin/products/bulk/details/jobs", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "include",
+          body: JSON.stringify({
+            dryRun: false,
+            category: form.category,
+            titleTemplate: form.titleTemplate,
+            importantNoteTemplate: form.importantNoteTemplate,
+            shortDescTemplate: form.shortDescTemplate,
+            longDescTemplate: form.longDescTemplate,
+            slugTemplate: form.slugTemplate,
+            metaTitleTemplate: form.metaTitleTemplate,
+            metaDescriptionTemplate: form.metaDescriptionTemplate,
+            publishNow: form.publishNow,
+            duplicateStrategy: form.duplicateStrategy,
+            csvText: form.csvText,
+          }),
+        });
+      }
+
+      const data = (await safeReadJson(res)) as CreateJobResponse;
+
+      if (!res.ok || !data?.ok || !data?.job) {
+        throw new Error(
+          safeStr(data?.error || data?.message || "Failed to create bulk job")
+        );
+      }
+
+      setCurrentJob(data.job);
+      setServerMessage(
+        "Bulk job create ho gayi hai. Excel/CSV save ho chuki hai. Ab products backend me row-by-row create/update hote rahenge."
+      );
+      setServerMessageType("success");
+
+      resetFileInput();
+      setForm((prev) => ({ ...prev, csvText: "" }));
+
+      await fetchCurrentJob(false);
+    } catch (error: any) {
+      const errMsg = safeStr(error?.message || "Failed to create bulk job");
+      setServerMessage(errMsg);
+      setServerMessageType("error");
+    } finally {
+      setIsSubmittingJob(false);
+    }
+  }
+
+  async function cancelCurrentJob() {
+    const jobId = safeStr(currentJob?._id);
+    if (!jobId) return;
+
+    const ok = window.confirm(
+      "Kya aap current bulk product details job ko cancel karna chahte hain?"
+    );
+    if (!ok) return;
+
+    setIsCancellingJob(true);
+    resetMessages();
+
+    try {
+      const res = await fetch(`/api/admin/bulk-jobs/${encodeURIComponent(jobId)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({ action: "cancel" }),
+      });
+
+      const data = (await safeReadJson(res)) as CancelJobResponse;
+
+      if (!res.ok || !data?.ok) {
+        throw new Error(safeStr(data?.error || data?.message || "Cancel failed"));
+      }
+
+      setCurrentJob(data?.job || null);
+      setServerMessage("Current bulk job cancelled.");
+      setServerMessageType("info");
+    } catch (error: any) {
+      setServerMessage(safeStr(error?.message || "Cancel failed"));
+      setServerMessageType("error");
+    } finally {
+      setIsCancellingJob(false);
+    }
+  }
+
+  function downloadRecentFailuresCsv() {
+    const rows = Array.isArray(currentJob?.recentFailures)
+      ? currentJob?.recentFailures
+      : [];
+
+    if (!rows.length) {
+      alert("Abhi download ke liye recent failures available nahi hain.");
+      return;
+    }
+
+    const csv = buildRecentFailuresCsv(rows);
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = "bulk-product-details-recent-failures.csv";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
   useEffect(() => {
     loadDefaultTemplates();
+    fetchCurrentJob(true);
   }, []);
 
   useEffect(() => {
-    if (isUploading && !longTaskActiveRef.current) {
+    const active = isSubmittingJob || isCancellingJob || isRefreshingJob;
+
+    if (active && !longTaskActiveRef.current) {
       notifyLongTaskStart();
       longTaskActiveRef.current = true;
     }
 
-    if (!isUploading && longTaskActiveRef.current) {
+    if (!active && longTaskActiveRef.current) {
       notifyLongTaskEnd();
       longTaskActiveRef.current = false;
     }
-  }, [isUploading]);
+  }, [isSubmittingJob, isCancellingJob, isRefreshingJob]);
+
+  useEffect(() => {
+    if (pollTimerRef.current) {
+      window.clearInterval(pollTimerRef.current);
+      pollTimerRef.current = null;
+    }
+
+    pollTimerRef.current = window.setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      fetchCurrentJob(false);
+    }, POLL_INTERVAL_MS);
+
+    return () => {
+      if (pollTimerRef.current) {
+        window.clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const onFocus = () => {
+      fetchCurrentJob(false);
+    };
+
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") {
+        fetchCurrentJob(false);
+      }
+    };
+
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibilityChange);
+
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, []);
 
   useEffect(() => {
     return () => {
-      stopRequestedRef.current = true;
-
-      for (const controller of activeControllersRef.current) {
-        try {
-          controller.abort();
-        } catch {
-          // ignore
-        }
+      if (pollTimerRef.current) {
+        window.clearInterval(pollTimerRef.current);
+        pollTimerRef.current = null;
       }
-
-      activeControllersRef.current.clear();
 
       if (longTaskActiveRef.current) {
         notifyLongTaskEnd();
@@ -944,17 +864,26 @@ export default function BulkDetailsPage() {
     };
   }, []);
 
+  const summary = currentJob?.summary || {};
+  const progress = currentJob?.progress || {};
+  const lastBatch = currentJob?.lastBatch || null;
+  const recentFailures = Array.isArray(currentJob?.recentFailures)
+    ? currentJob.recentFailures
+    : [];
+
   return (
     <main className="min-h-screen bg-[#F8FAFC] text-slate-900">
       <div className="max-w-7xl mx-auto px-4 py-8">
         <div className="rounded-3xl bg-white border border-gray-200 p-6 shadow-sm">
           <div className="flex items-start justify-between gap-4 flex-wrap">
             <div>
-              <h1 className="text-2xl font-extrabold">Bulk Product Details Upload</h1>
+              <h1 className="text-2xl font-extrabold">
+                Bulk Product Details Upload
+              </h1>
               <p className="text-sm text-slate-600 mt-1">
-                Ab ye page simple direct upload flow par kaam karega. Har row direct final
-                create/update hogi. Uploaded count me sirf wahi entries aayengi jo actual me
-                save ho chuki hongi.
+                Excel/CSV upload hone ke baad job database me save rahegi.
+                Processing backend me row-by-row continue hogi. Relogin ke baad ya
+                dusre device par bhi progress dikh sakti hai.
               </p>
             </div>
 
@@ -966,6 +895,19 @@ export default function BulkDetailsPage() {
                 <Settings2 size={18} />
                 Default Details Pattern
               </Link>
+
+              <button
+                type="button"
+                onClick={() => fetchCurrentJob(true)}
+                disabled={isRefreshingJob}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-semibold shadow-sm disabled:opacity-60"
+              >
+                <RefreshCcw
+                  size={18}
+                  className={isRefreshingJob ? "animate-spin" : ""}
+                />
+                Refresh Status
+              </button>
 
               <Link
                 href="/admin"
@@ -989,7 +931,8 @@ export default function BulkDetailsPage() {
                   <br />
                   Final price <b>Product Pricing rules</b> se aayega.
                   <br />
-                  Final availability current product file state se auto derive hoti rahegi.
+                  Final availability current product file state se auto derive hoti
+                  rahegi.
                 </div>
               </div>
             </div>
@@ -998,9 +941,12 @@ export default function BulkDetailsPage() {
           <div className="mt-4 rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <div>
-                <div className="text-sm font-extrabold text-emerald-900">Sample CSV rows</div>
+                <div className="text-sm font-extrabold text-emerald-900">
+                  Sample CSV rows
+                </div>
                 <div className="text-sm text-emerald-800 mt-1">
-                  Minimum required columns: SKU, Subject Code, Session, Language, Course Code.
+                  Minimum required columns: SKU, Subject Code, Session, Language,
+                  Course Code.
                 </div>
               </div>
               <button
@@ -1019,15 +965,22 @@ export default function BulkDetailsPage() {
           </div>
 
           <div className="mt-6 rounded-2xl border border-blue-200 bg-blue-50 p-4">
-            <div className="text-sm font-extrabold text-blue-900">CSV / Excel format</div>
+            <div className="text-sm font-extrabold text-blue-900">
+              CSV / Excel format
+            </div>
             <div className="text-sm text-blue-800 mt-2 leading-6">
-              File me required columns ye hain: <b>Unique Id, Subject Code, Session, Language, Course Code</b>.
+              File me required columns ye hain:{" "}
+              <b>
+                Unique Id, Subject Code, Session, Language, Course Code
+              </b>
+              .
               <br />
               {TOKEN_HELP.map((x) => (
                 <div key={x}>{x}</div>
               ))}
               <div className="mt-2 font-semibold">
-                Note: %F me sirf usi language ka subject title aayega jo row me diya gaya hai.
+                Note: %F me sirf usi language ka subject title aayega jo row me
+                diya gaya hai.
               </div>
             </div>
           </div>
@@ -1055,39 +1008,268 @@ export default function BulkDetailsPage() {
             </div>
           ) : null}
 
-          {isUploading ? (
-            <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4">
-              <div className="flex items-center gap-2 text-sm font-semibold text-amber-900">
-                <LoaderCircle size={18} className="animate-spin" />
-                Direct bulk details upload chal raha hai.
+          <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-5">
+            <div className="flex items-center justify-between gap-4 flex-wrap">
+              <div className="flex items-center gap-3">
+                <div className="h-11 w-11 rounded-2xl bg-sky-100 text-sky-700 flex items-center justify-center">
+                  <Server size={20} />
+                </div>
+                <div>
+                  <div className="text-sm font-extrabold">Current Job Status</div>
+                  <div className="text-xs text-slate-500 mt-1">
+                    Ye status database se aa raha hai. Isliye same progress dusre
+                    device par bhi show ho sakti hai.
+                  </div>
+                </div>
               </div>
 
-              <div className="mt-4 h-4 w-full overflow-hidden rounded-full bg-amber-100">
+              {currentJob ? (
                 <div
-                  className="h-full rounded-full bg-amber-600 transition-all"
-                  style={{ width: `${uploadedPercent}%` }}
-                />
-              </div>
-
-              <div className="mt-3 text-sm text-amber-900 leading-7">
-                Total Entries: <b>{totalEntries}</b>
-                <br />
-                Uploaded Entries: <b>{uploadedEntries}</b>
-              </div>
-
-              <div className="mt-2 text-xs text-amber-800 leading-6">
-                Processed: <b>{processedEntries}</b> / <b>{totalEntries}</b>
-                <br />
-                Skipped: <b>{skippedEntries}</b> | Failed: <b>{failedEntries}</b>
-              </div>
+                  className={`inline-flex items-center gap-2 px-3 py-2 rounded-full border text-xs font-extrabold ${statusPillClasses(
+                    safeStr(currentJob.status)
+                  )}`}
+                >
+                  <Activity size={14} />
+                  {humanJobStatus(safeStr(currentJob.status))}
+                </div>
+              ) : (
+                <div className="inline-flex items-center gap-2 px-3 py-2 rounded-full border text-xs font-extrabold bg-slate-50 text-slate-700 border-slate-200">
+                  <Info size={14} />
+                  No job found
+                </div>
+              )}
             </div>
-          ) : null}
+
+            {currentJob ? (
+              <>
+                <div className="mt-4 h-4 w-full overflow-hidden rounded-full bg-slate-100">
+                  <div
+                    className={`h-full rounded-full transition-all ${
+                      isFinalJobStatus(safeStr(currentJob.status))
+                        ? safeStr(currentJob.status) === "completed"
+                          ? "bg-emerald-600"
+                          : safeStr(currentJob.status) === "completed_with_errors"
+                          ? "bg-amber-600"
+                          : "bg-rose-600"
+                        : "bg-sky-600"
+                    }`}
+                    style={{ width: `${jobProgressPercent}%` }}
+                  />
+                </div>
+
+                <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                    <div className="text-xs uppercase tracking-wide font-extrabold text-slate-500">
+                      Job ID
+                    </div>
+                    <div className="mt-2 text-sm font-bold break-all">
+                      {currentJob._id}
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                    <div className="text-xs uppercase tracking-wide font-extrabold text-slate-500">
+                      Progress
+                    </div>
+                    <div className="mt-2 text-sm font-bold">
+                      {safeNum(progress.processedItems)} /{" "}
+                      {safeNum(progress.totalItems)}
+                    </div>
+                    <div className="mt-1 text-xs text-slate-500">
+                      {jobProgressPercent}% complete
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                    <div className="text-xs uppercase tracking-wide font-extrabold text-slate-500">
+                      Current Row
+                    </div>
+                    <div className="mt-2 text-sm font-bold">
+                      {safeNum(progress.lastProcessedIndex, -1) + 1}
+                    </div>
+                    <div className="mt-1 text-xs text-slate-500">
+                      Backend row-by-row process kar raha hai
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                    <div className="text-xs uppercase tracking-wide font-extrabold text-slate-500">
+                      Last heartbeat
+                    </div>
+                    <div className="mt-2 text-sm font-bold">
+                      {formatDateTime(currentJob.lastHeartbeatAt)}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
+                  <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                    <div className="text-xs uppercase tracking-wide font-extrabold text-emerald-700">
+                      Created
+                    </div>
+                    <div className="mt-2 text-sm font-bold text-slate-900">
+                      {safeNum(summary.createdRows)}
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
+                    <div className="text-xs uppercase tracking-wide font-extrabold text-blue-700">
+                      Updated
+                    </div>
+                    <div className="mt-2 text-sm font-bold text-slate-900">
+                      {safeNum(summary.updatedRows)}
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                    <div className="text-xs uppercase tracking-wide font-extrabold text-amber-700">
+                      Skipped
+                    </div>
+                    <div className="mt-2 text-sm font-bold text-slate-900">
+                      {safeNum(summary.skippedRows)}
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4">
+                    <div className="text-xs uppercase tracking-wide font-extrabold text-rose-700">
+                      Failed
+                    </div>
+                    <div className="mt-2 text-sm font-bold text-slate-900">
+                      {safeNum(summary.failedRows)}
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-indigo-200 bg-indigo-50 p-4">
+                    <div className="text-xs uppercase tracking-wide font-extrabold text-indigo-700">
+                      Validated
+                    </div>
+                    <div className="mt-2 text-sm font-bold text-slate-900">
+                      {safeNum(summary.validRows)}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                    <div className="text-sm font-extrabold">Job Meta</div>
+                    <div className="mt-3 text-sm text-slate-700 leading-7">
+                      Category: <b>{safeStr(summary.category || form.category || "-")}</b>
+                      <br />
+                      Duplicate Strategy:{" "}
+                      <b>{safeStr(summary.duplicateStrategy || "-")}</b>
+                      <br />
+                      Dry Run: <b>{safeBool(summary.dryRun) ? "Yes" : "No"}</b>
+                      <br />
+                      Started: <b>{formatDateTime(currentJob.startedAt)}</b>
+                      <br />
+                      Completed: <b>{formatDateTime(currentJob.completedAt)}</b>
+                      <br />
+                      Result: <b>{safeStr(currentJob.resultMessage || "—")}</b>
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                    <div className="text-sm font-extrabold">Last Processing Note</div>
+                    <div className="mt-3 text-sm text-slate-700 leading-7">
+                      Last Row Index: <b>{safeNum(progress.lastProcessedIndex, -1)}</b>
+                      <br />
+                      Attempted: <b>{safeNum(lastBatch?.attempted)}</b>
+                      <br />
+                      Success: <b>{safeNum(lastBatch?.success)}</b>
+                      <br />
+                      Failed: <b>{safeNum(lastBatch?.failed)}</b>
+                      <br />
+                      Skipped: <b>{safeNum(lastBatch?.skipped)}</b>
+                      <br />
+                      Started At: <b>{formatDateTime(lastBatch?.startedAt)}</b>
+                      <br />
+                      Ended At: <b>{formatDateTime(lastBatch?.endedAt)}</b>
+                      <br />
+                      Note: <b>{safeStr(lastBatch?.note || "—")}</b>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-4 flex items-center gap-3 flex-wrap">
+                  {!isFinalJobStatus(safeStr(currentJob.status)) ? (
+                    <button
+                      type="button"
+                      onClick={cancelCurrentJob}
+                      disabled={isCancellingJob}
+                      className="inline-flex items-center gap-2 px-4 py-3 rounded-2xl bg-rose-600 hover:bg-rose-700 text-white transition font-extrabold disabled:opacity-60"
+                    >
+                      <PauseCircle size={18} />
+                      {isCancellingJob ? "Cancelling..." : "Cancel Current Job"}
+                    </button>
+                  ) : null}
+
+                  <button
+                    type="button"
+                    onClick={downloadRecentFailuresCsv}
+                    disabled={!recentFailures.length}
+                    className="inline-flex items-center gap-2 px-4 py-3 rounded-2xl bg-white hover:bg-gray-50 border border-gray-200 transition font-extrabold disabled:opacity-60"
+                  >
+                    <Download size={18} />
+                    Download Recent Failures CSV
+                  </button>
+                </div>
+
+                {recentFailures.length ? (
+                  <div className="mt-4 rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                    <div className="text-sm font-extrabold text-amber-900">
+                      Recent Failures / Skips ({recentFailures.length})
+                    </div>
+
+                    <div className="mt-3 overflow-x-auto">
+                      <table className="min-w-full text-sm">
+                        <thead>
+                          <tr className="text-left text-amber-900">
+                            <th className="py-2 pr-4">Row</th>
+                            <th className="py-2 pr-4">SKU</th>
+                            <th className="py-2 pr-4">Status</th>
+                            <th className="py-2 pr-4">Reason</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {recentFailures.slice(-10).map((row, idx) => (
+                            <tr
+                              key={`${row.rowNumber}-${row.sku}-${idx}`}
+                              className="border-t border-amber-200 align-top"
+                            >
+                              <td className="py-2 pr-4 whitespace-nowrap">
+                                {safeNum(row.rowNumber)}
+                              </td>
+                              <td className="py-2 pr-4 whitespace-nowrap">
+                                {safeStr(row.sku || row.identifier || "-")}
+                              </td>
+                              <td className="py-2 pr-4 whitespace-nowrap font-semibold">
+                                {safeStr(row.status || "-")}
+                              </td>
+                              <td className="py-2 pr-4 min-w-[320px]">
+                                {safeStr(row.reason || "-")}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                ) : null}
+              </>
+            ) : (
+              <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-sm text-slate-600">
+                Abhi tak koi bulk product details job nahi mili.
+              </div>
+            )}
+          </div>
 
           <div className="mt-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="lg:col-span-2 space-y-4">
               <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5">
                 <div className="flex items-center justify-between gap-3 flex-wrap mb-3">
-                  <div className="text-sm font-extrabold">Static Template Details</div>
+                  <div className="text-sm font-extrabold">
+                    Static Template Details
+                  </div>
 
                   <Link
                     href="/admin/products/bulk/details/default-patterns"
@@ -1098,12 +1280,14 @@ export default function BulkDetailsPage() {
                   </Link>
                 </div>
 
-                <label className="text-xs font-bold text-slate-500 uppercase ml-1">Category</label>
+                <label className="text-xs font-bold text-slate-500 uppercase ml-1">
+                  Category
+                </label>
                 <select
                   className="w-full mt-1 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none"
                   value={form.category}
                   onChange={(e) => applyCategoryDefaults(e.target.value)}
-                  disabled={isUploading}
+                  disabled={isSubmittingJob || activeJobExists}
                 >
                   {allowedCategories.map((c) => (
                     <option key={c} value={c}>
@@ -1113,92 +1297,122 @@ export default function BulkDetailsPage() {
                 </select>
 
                 <div className="mt-2 text-xs text-slate-500 leading-5">
-                  Selected category ke saved default templates yahan auto-fill hote hain.
-                  Manual changes upload se pehle ab bhi allowed hain.
+                  Selected category ke saved default templates yahan auto-fill hote
+                  hain. Manual changes upload se pehle ab bhi allowed hain.
                   {!defaultsHydrated ? " Default settings load ho rahi hain..." : ""}
                 </div>
 
-                <label className="text-xs font-bold text-slate-500 uppercase ml-1 mt-4 block">Title Template</label>
+                <label className="text-xs font-bold text-slate-500 uppercase ml-1 mt-4 block">
+                  Title Template
+                </label>
                 <input
                   className="w-full mt-1 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none"
                   value={form.titleTemplate}
-                  onChange={(e) => setForm((p) => ({ ...p, titleTemplate: e.target.value }))}
-                  disabled={isUploading}
+                  onChange={(e) =>
+                    setForm((p) => ({ ...p, titleTemplate: e.target.value }))
+                  }
+                  disabled={isSubmittingJob || activeJobExists}
                 />
 
-                <label className="text-xs font-bold text-slate-500 uppercase ml-1 mt-4 block">Important Note Template</label>
+                <label className="text-xs font-bold text-slate-500 uppercase ml-1 mt-4 block">
+                  Important Note Template
+                </label>
                 <textarea
                   className="w-full mt-1 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none min-h-[90px]"
                   value={form.importantNoteTemplate}
                   onChange={(e) =>
-                    setForm((p) => ({ ...p, importantNoteTemplate: e.target.value }))
+                    setForm((p) => ({
+                      ...p,
+                      importantNoteTemplate: e.target.value,
+                    }))
                   }
-                  disabled={isUploading}
+                  disabled={isSubmittingJob || activeJobExists}
                 />
 
-                <label className="text-xs font-bold text-slate-500 uppercase ml-1 mt-4 block">Short Description Template</label>
+                <label className="text-xs font-bold text-slate-500 uppercase ml-1 mt-4 block">
+                  Short Description Template
+                </label>
                 <textarea
                   className="w-full mt-1 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none min-h-[90px]"
                   value={form.shortDescTemplate}
                   onChange={(e) =>
                     setForm((p) => ({ ...p, shortDescTemplate: e.target.value }))
                   }
-                  disabled={isUploading}
+                  disabled={isSubmittingJob || activeJobExists}
                 />
 
-                <label className="text-xs font-bold text-slate-500 uppercase ml-1 mt-4 block">Long Description Template</label>
+                <label className="text-xs font-bold text-slate-500 uppercase ml-1 mt-4 block">
+                  Long Description Template
+                </label>
                 <textarea
                   className="w-full mt-1 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none min-h-[140px]"
                   value={form.longDescTemplate}
                   onChange={(e) =>
                     setForm((p) => ({ ...p, longDescTemplate: e.target.value }))
                   }
-                  disabled={isUploading}
+                  disabled={isSubmittingJob || activeJobExists}
                 />
 
-                <label className="text-xs font-bold text-slate-500 uppercase ml-1 mt-4 block">Slug Template (optional)</label>
+                <label className="text-xs font-bold text-slate-500 uppercase ml-1 mt-4 block">
+                  Slug Template (optional)
+                </label>
                 <input
                   className="w-full mt-1 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none"
                   placeholder="Leave blank for auto slug"
                   value={form.slugTemplate}
-                  onChange={(e) => setForm((p) => ({ ...p, slugTemplate: e.target.value }))}
-                  disabled={isUploading}
+                  onChange={(e) =>
+                    setForm((p) => ({ ...p, slugTemplate: e.target.value }))
+                  }
+                  disabled={isSubmittingJob || activeJobExists}
                 />
 
-                <label className="text-xs font-bold text-slate-500 uppercase ml-1 mt-4 block">Meta Title Template</label>
+                <label className="text-xs font-bold text-slate-500 uppercase ml-1 mt-4 block">
+                  Meta Title Template
+                </label>
                 <input
                   className="w-full mt-1 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none"
                   value={form.metaTitleTemplate}
                   onChange={(e) =>
                     setForm((p) => ({ ...p, metaTitleTemplate: e.target.value }))
                   }
-                  disabled={isUploading}
+                  disabled={isSubmittingJob || activeJobExists}
                 />
 
-                <label className="text-xs font-bold text-slate-500 uppercase ml-1 mt-4 block">Meta Description Template</label>
+                <label className="text-xs font-bold text-slate-500 uppercase ml-1 mt-4 block">
+                  Meta Description Template
+                </label>
                 <textarea
                   className="w-full mt-1 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none min-h-[110px]"
                   value={form.metaDescriptionTemplate}
                   onChange={(e) =>
-                    setForm((p) => ({ ...p, metaDescriptionTemplate: e.target.value }))
+                    setForm((p) => ({
+                      ...p,
+                      metaDescriptionTemplate: e.target.value,
+                    }))
                   }
-                  disabled={isUploading}
+                  disabled={isSubmittingJob || activeJobExists}
                 />
 
                 <div className="mt-4 flex items-center gap-3">
                   <input
                     type="checkbox"
                     checked={form.publishNow}
-                    onChange={(e) => setForm((p) => ({ ...p, publishNow: e.target.checked }))}
+                    onChange={(e) =>
+                      setForm((p) => ({ ...p, publishNow: e.target.checked }))
+                    }
                     className="h-4 w-4"
-                    disabled={isUploading}
+                    disabled={isSubmittingJob || activeJobExists}
                   />
-                  <div className="font-bold text-sm">Publish now (otherwise draft)</div>
+                  <div className="font-bold text-sm">
+                    Publish now (otherwise draft)
+                  </div>
                 </div>
               </div>
 
               <div className="rounded-2xl border border-gray-200 bg-white p-5">
-                <div className="text-sm font-extrabold mb-3">CSV / Excel Input</div>
+                <div className="text-sm font-extrabold mb-3">
+                  CSV / Excel Input
+                </div>
 
                 <label className="text-xs font-bold text-slate-500 uppercase ml-1">
                   Upload CSV / Excel file
@@ -1208,7 +1422,7 @@ export default function BulkDetailsPage() {
                   type="file"
                   accept=".csv,.xlsx,.xls,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                   className="w-full mt-1 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none"
-                  disabled={isUploading}
+                  disabled={isSubmittingJob || activeJobExists}
                   onChange={(e) => {
                     const file = e.target.files?.[0] || null;
                     setUploadFile(file);
@@ -1229,7 +1443,7 @@ export default function BulkDetailsPage() {
                   className="w-full mt-1 px-4 py-3 rounded-xl border border-gray-200 bg-gray-50 outline-none min-h-[260px] font-mono text-sm"
                   placeholder={SAMPLE_CSV}
                   value={form.csvText}
-                  disabled={isUploading}
+                  disabled={isSubmittingJob || activeJobExists}
                   onChange={(e) => {
                     setUploadFile(null);
                     setForm((p) => ({ ...p, csvText: e.target.value }));
@@ -1240,7 +1454,9 @@ export default function BulkDetailsPage() {
 
             <div className="space-y-4">
               <div className="rounded-2xl border border-gray-200 bg-white p-5">
-                <div className="text-sm font-extrabold mb-3">Duplicate Product Handling</div>
+                <div className="text-sm font-extrabold mb-3">
+                  Duplicate Product Handling
+                </div>
 
                 <div className="space-y-3">
                   <label className="flex items-start gap-3 rounded-xl border border-gray-200 p-3 cursor-pointer hover:bg-gray-50">
@@ -1249,14 +1465,17 @@ export default function BulkDetailsPage() {
                       name="duplicateStrategy"
                       value="ignore"
                       checked={form.duplicateStrategy === "ignore"}
-                      onChange={() => setForm((p) => ({ ...p, duplicateStrategy: "ignore" }))}
+                      onChange={() =>
+                        setForm((p) => ({ ...p, duplicateStrategy: "ignore" }))
+                      }
                       className="mt-1 h-4 w-4"
-                      disabled={isUploading}
+                      disabled={isSubmittingJob || activeJobExists}
                     />
                     <div>
                       <div className="font-bold text-sm">Ignore duplicate row</div>
                       <div className="text-xs text-slate-500 mt-1">
-                        Same SKU ya same generated slug mile to old product same rahega, new row skip ho jayegi.
+                        Same SKU ya same generated slug mile to old product same
+                        rahega, new row skip ho jayegi.
                       </div>
                     </div>
                   </label>
@@ -1267,17 +1486,27 @@ export default function BulkDetailsPage() {
                       name="duplicateStrategy"
                       value="replace"
                       checked={form.duplicateStrategy === "replace"}
-                      onChange={() => setForm((p) => ({ ...p, duplicateStrategy: "replace" }))}
+                      onChange={() =>
+                        setForm((p) => ({ ...p, duplicateStrategy: "replace" }))
+                      }
                       className="mt-1 h-4 w-4"
-                      disabled={isUploading}
+                      disabled={isSubmittingJob || activeJobExists}
                     />
                     <div>
-                      <div className="font-bold text-sm">Replace existing product</div>
+                      <div className="font-bold text-sm">
+                        Replace existing product
+                      </div>
                       <div className="text-xs text-slate-500 mt-1">
-                        Same SKU ya same generated slug mile to old product ki details new uploaded data se update ho jayengi.
+                        Same SKU ya same generated slug mile to old product ki
+                        details new uploaded data se update ho jayengi.
                       </div>
                     </div>
                   </label>
+                </div>
+
+                <div className="mt-4 rounded-xl border border-sky-200 bg-sky-50 p-3 text-xs leading-5 text-sky-800">
+                  Processing row-by-row hi hogi. Excel upload ek baar hoga, uske baad
+                  backend me rows single-single process hoti rahengi.
                 </div>
               </div>
 
@@ -1286,42 +1515,24 @@ export default function BulkDetailsPage() {
 
                 <button
                   type="button"
-                  disabled={isUploading || !canSubmit}
-                  onClick={startDirectUpload}
+                  disabled={!canStartNewJob}
+                  onClick={createBulkDetailsJob}
                   className="w-full inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-slate-900 hover:bg-slate-950 text-white transition font-extrabold disabled:opacity-60"
                 >
-                  <Play size={18} />
-                  {isUploading ? "Uploading..." : "Start Direct Upload"}
-                </button>
-
-                {isUploading ? (
-                  <button
-                    type="button"
-                    onClick={stopCurrentUpload}
-                    className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-rose-600 hover:bg-rose-700 text-white transition font-extrabold"
-                  >
-                    <PauseCircle size={18} />
-                    {isStopping ? "Stopping..." : "Stop Upload"}
-                  </button>
-                ) : null}
-
-                <button
-                  type="button"
-                  disabled={isUploading || !failureRows.length}
-                  onClick={downloadFailedCsv}
-                  className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-white hover:bg-gray-50 border border-gray-200 transition font-extrabold disabled:opacity-60"
-                >
-                  <Download size={18} />
-                  Download Failed / Skipped CSV
+                  {isSubmittingJob ? (
+                    <LoaderCircle size={18} className="animate-spin" />
+                  ) : (
+                    <Play size={18} />
+                  )}
+                  {isSubmittingJob ? "Creating Job..." : "Start Background Upload"}
                 </button>
 
                 <button
                   type="button"
-                  disabled={isUploading}
+                  disabled={isSubmittingJob || activeJobExists}
                   onClick={() => {
                     resetFileInput();
                     resetMessages();
-                    resetProgress();
                     resetFormToCurrentCategoryDefaults();
                   }}
                   className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-white hover:bg-gray-50 border border-gray-200 transition font-extrabold disabled:opacity-60"
@@ -1331,7 +1542,8 @@ export default function BulkDetailsPage() {
                 </button>
 
                 <div className="mt-4 text-[11px] text-slate-500 leading-5">
-                  Is direct flow me uploaded count me sirf actual saved rows hi count hongi.
+                  New job start karne ke baad aap page close, logout ya device change
+                  kar sakte ho. Progress database me save rahegi.
                 </div>
               </div>
 
@@ -1349,7 +1561,7 @@ export default function BulkDetailsPage() {
                   <br />
                   Session selected category ke master sessions me valid hona chahiye.
                   <br />
-                  Failed ya skipped rows ki list CSV me download ho sakti hai.
+                  Failed ya skipped rows current job report me dikhengi.
                 </div>
               </div>
 
@@ -1359,13 +1571,31 @@ export default function BulkDetailsPage() {
                   Current progress summary
                 </div>
                 <div className="text-sm text-blue-800 mt-2 leading-6">
-                  Total Entries: <b>{totalEntries}</b>
+                  Total Entries: <b>{safeNum(progress.totalItems)}</b>
                   <br />
-                  Uploaded Entries: <b>{uploadedEntries}</b>
+                  Processed Entries: <b>{safeNum(progress.processedItems)}</b>
                   <br />
-                  Skipped Entries: <b>{skippedEntries}</b>
+                  Success Entries: <b>{safeNum(progress.successItems)}</b>
                   <br />
-                  Failed Entries: <b>{failedEntries}</b>
+                  Skipped Entries: <b>{safeNum(progress.skippedItems)}</b>
+                  <br />
+                  Failed Entries: <b>{safeNum(progress.failedItems)}</b>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4">
+                <div className="inline-flex items-center gap-2 text-sm font-extrabold text-sky-900">
+                  <FileUp size={16} />
+                  Background flow
+                </div>
+                <div className="text-sm text-sky-800 mt-2 leading-6">
+                  Step 1: Excel/CSV upload/save
+                  <br />
+                  Step 2: Job database me create
+                  <br />
+                  Step 3: Backend row-by-row processing continue
+                  <br />
+                  Step 4: Progress aur report same page par persist
                 </div>
               </div>
             </div>

@@ -4,6 +4,7 @@ import * as XLSX from "xlsx";
 import { getAuthUser, hasPermission } from "@/lib/auth";
 import {
   createBulkUploadJob,
+  getLatestActiveBulkUploadJob,
   toPlainBulkJob,
 } from "@/lib/bulkUploadJob";
 import {
@@ -13,22 +14,21 @@ import {
 } from "@/lib/bulkProductDetailsJob";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+const MAX_UPLOAD_FILE_BYTES = 6 * 1024 * 1024;
+const MAX_ROWS_PER_JOB = 10000;
+const ROW_BY_ROW_BATCH_SIZE = 1;
 
 function safeStr(x: any) {
   return String(x ?? "").trim();
 }
 
-function safeNum(x: any, def = 0) {
-  const n = Number(x);
-  return Number.isFinite(n) ? n : def;
-}
-
-function clamp(n: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, n));
-}
-
-function badRequest(message: string) {
-  return NextResponse.json({ ok: false, error: message }, { status: 400 });
+function badRequest(message: string, extra?: Record<string, any>) {
+  return NextResponse.json(
+    { ok: false, error: message, ...(extra || {}) },
+    { status: 400 }
+  );
 }
 
 async function assertAdminWriteAccess() {
@@ -57,69 +57,109 @@ async function assertAdminWriteAccess() {
   return { ok: true as const, user };
 }
 
+async function parseInputFromMultipart(req: Request) {
+  const formData = await req.formData();
+  const file = formData.get("file") as File | null;
+
+  if (!file) {
+    throw new Error("File required");
+  }
+
+  if (file.size > MAX_UPLOAD_FILE_BYTES) {
+    throw new Error("File exceeds 6MB limit");
+  }
+
+  const rawInput: any = {
+    dryRun: formData.get("dryRun") === "true",
+    category: String(formData.get("category") || ""),
+    titleTemplate: String(formData.get("titleTemplate") || ""),
+    importantNoteTemplate: String(formData.get("importantNoteTemplate") || ""),
+    shortDescTemplate: String(formData.get("shortDescTemplate") || ""),
+    longDescTemplate: String(formData.get("longDescTemplate") || ""),
+    slugTemplate: String(formData.get("slugTemplate") || ""),
+    metaTitleTemplate: String(formData.get("metaTitleTemplate") || ""),
+    metaDescriptionTemplate: String(formData.get("metaDescriptionTemplate") || ""),
+    publishNow: formData.get("publishNow") === "true",
+    duplicateStrategy: String(formData.get("duplicateStrategy") || "ignore"),
+    csvText: "",
+  };
+
+  const lowerName = safeStr(file.name).toLowerCase();
+  const buffer = Buffer.from(await file.arrayBuffer());
+
+  if (lowerName.endsWith(".xlsx") || lowerName.endsWith(".xls")) {
+    const workbook = XLSX.read(buffer, { type: "buffer" });
+    const firstSheetName = workbook.SheetNames?.[0];
+
+    if (!firstSheetName) {
+      throw new Error("Excel sheet not found");
+    }
+
+    const sheet = workbook.Sheets[firstSheetName];
+    rawInput.csvText = XLSX.utils.sheet_to_csv(sheet);
+  } else if (lowerName.endsWith(".csv")) {
+    rawInput.csvText = buffer.toString("utf8");
+  } else {
+    throw new Error("Only CSV or Excel allowed");
+  }
+
+  return rawInput;
+}
+
+async function parseInputFromJson(req: Request) {
+  let body: any = {};
+
+  try {
+    body = await req.json();
+  } catch {
+    throw new Error("Invalid JSON body");
+  }
+
+  return {
+    dryRun: body?.dryRun === true,
+    category: safeStr(body?.category),
+    titleTemplate: safeStr(body?.titleTemplate),
+    importantNoteTemplate: safeStr(body?.importantNoteTemplate),
+    shortDescTemplate: safeStr(body?.shortDescTemplate),
+    longDescTemplate: safeStr(body?.longDescTemplate),
+    slugTemplate: safeStr(body?.slugTemplate),
+    metaTitleTemplate: safeStr(body?.metaTitleTemplate),
+    metaDescriptionTemplate: safeStr(body?.metaDescriptionTemplate),
+    publishNow: body?.publishNow === true,
+    duplicateStrategy: safeStr(body?.duplicateStrategy || "ignore"),
+    csvText: safeStr(body?.csvText),
+  };
+}
+
 export async function POST(req: Request) {
   const guard = await assertAdminWriteAccess();
   if (!guard.ok) return guard.res;
 
   try {
-    let rawInput: any = {};
-    let csvTextFromFile = "";
+    const createdBy = safeStr(guard.user.email);
 
-    const contentType = req.headers.get("content-type") || "";
+    const existingActiveJob = await getLatestActiveBulkUploadJob({
+      createdBy,
+      jobType: "product_details",
+    });
 
-    if (contentType.includes("multipart/form-data")) {
-      const formData = await req.formData();
-      const file = formData.get("file") as File | null;
-
-      if (!file) {
-        return badRequest("File required");
-      }
-
-      if (file.size > 6 * 1024 * 1024) {
-        return badRequest("File exceeds 6MB limit");
-      }
-
-      const lowerName = safeStr(file.name).toLowerCase();
-      const buffer = Buffer.from(await file.arrayBuffer());
-
-      if (lowerName.endsWith(".xlsx") || lowerName.endsWith(".xls")) {
-        const workbook = XLSX.read(buffer, { type: "buffer" });
-        const firstSheetName = workbook.SheetNames?.[0];
-
-        if (!firstSheetName) {
-          return badRequest("Excel sheet not found");
-        }
-
-        const sheet = workbook.Sheets[firstSheetName];
-        csvTextFromFile = XLSX.utils.sheet_to_csv(sheet);
-      } else if (lowerName.endsWith(".csv")) {
-        csvTextFromFile = buffer.toString("utf8");
-      } else {
-        return badRequest("Only CSV or Excel allowed");
-      }
-
-      rawInput = {
-        dryRun: formData.get("dryRun") === "true",
-        category: String(formData.get("category") || ""),
-        titleTemplate: String(formData.get("titleTemplate") || ""),
-        importantNoteTemplate: String(formData.get("importantNoteTemplate") || ""),
-        shortDescTemplate: String(formData.get("shortDescTemplate") || ""),
-        longDescTemplate: String(formData.get("longDescTemplate") || ""),
-        slugTemplate: String(formData.get("slugTemplate") || ""),
-        metaTitleTemplate: String(formData.get("metaTitleTemplate") || ""),
-        metaDescriptionTemplate: String(formData.get("metaDescriptionTemplate") || ""),
-        publishNow: formData.get("publishNow") === "true",
-        duplicateStrategy: String(formData.get("duplicateStrategy") || "ignore"),
-        batchSize: Number(formData.get("batchSize") || 500),
-        csvText: csvTextFromFile,
-      };
-    } else {
-      try {
-        rawInput = await req.json();
-      } catch {
-        return badRequest("Invalid JSON body");
-      }
+    if (existingActiveJob) {
+      return NextResponse.json(
+        {
+          ok: false,
+          error:
+            "Ek bulk product details job already chal rahi hai. Nayi job start karne se pehle current job complete ya cancel karo.",
+          activeJob: toPlainBulkJob(existingActiveJob),
+        },
+        { status: 409 }
+      );
     }
+
+    const contentType = safeStr(req.headers.get("content-type")).toLowerCase();
+
+    const rawInput = contentType.includes("multipart/form-data")
+      ? await parseInputFromMultipart(req)
+      : await parseInputFromJson(req);
 
     let config: any;
     let rows: any[] = [];
@@ -128,43 +168,44 @@ export async function POST(req: Request) {
       config = normalizeBulkDetailsConfig(rawInput);
       validateBulkDetailsConfig(config);
 
-      const csvText = safeStr(rawInput?.csvText || csvTextFromFile);
+      const csvText = safeStr(rawInput?.csvText);
       if (!csvText) {
         return badRequest("CSV text required");
       }
 
       rows = prepareBulkDetailsRows(csvText);
+
       if (!rows.length) {
         return badRequest("No valid rows found");
       }
 
-      if (rows.length > 10000) {
-        return badRequest("For safety, one job currently supports max 10000 rows");
+      if (rows.length > MAX_ROWS_PER_JOB) {
+        return badRequest(
+          `For safety, one job currently supports max ${MAX_ROWS_PER_JOB} rows`
+        );
       }
     } catch (error: any) {
       return badRequest(safeStr(error?.message || "Invalid bulk details input"));
     }
 
-    const batchSize = clamp(
-      Math.trunc(safeNum(rawInput?.batchSize, 500)),
-      50,
-      1000
-    );
-
     const created = await createBulkUploadJob({
       jobType: "product_details",
-      createdBy: safeStr(guard.user.email),
+      createdBy,
       jobLabel: config.dryRun
-        ? "Bulk Product Details Validation"
-        : "Bulk Product Details Upload",
-      batchSize,
+        ? "Bulk Product Details Validation (Row-by-Row)"
+        : "Bulk Product Details Upload (Row-by-Row)",
+      batchSize: ROW_BY_ROW_BATCH_SIZE,
       totalItems: rows.length,
       meta: {
         dryRun: config.dryRun,
         category: config.category,
         duplicateStrategy: config.duplicateStrategy,
+        processingMode: "row_by_row",
       },
-      config,
+      config: {
+        ...config,
+        processingMode: "row_by_row",
+      },
       input: {
         rows,
       },
@@ -178,6 +219,7 @@ export async function POST(req: Request) {
         duplicateStrategy: config.duplicateStrategy,
         dryRun: config.dryRun,
         category: config.category,
+        processingMode: "row_by_row",
         comboSync: {
           attempted: 0,
           succeeded: 0,
@@ -201,7 +243,8 @@ export async function POST(req: Request) {
     return NextResponse.json(
       {
         ok: true,
-        message: "Bulk details job created successfully.",
+        message:
+          "Bulk details job created successfully. Processing backend me row-by-row continue hogi.",
         job: toPlainBulkJob(created),
       },
       { status: 201 }
