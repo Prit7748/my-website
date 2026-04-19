@@ -1,4 +1,3 @@
-//app/api/admin/products/bulk/details/jobs/route.ts//
 import { NextResponse } from "next/server";
 import * as XLSX from "xlsx";
 
@@ -16,10 +15,12 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+export const maxDuration = 60;
 
 const MAX_UPLOAD_FILE_BYTES = 6 * 1024 * 1024;
 const MAX_ROWS_PER_JOB = 10000;
 const ROW_BY_ROW_BATCH_SIZE = 1;
+const RUNNER_KICK_TIMEOUT_MS = 12000;
 
 function safeStr(x: any) {
   return String(x ?? "").trim();
@@ -132,6 +133,97 @@ async function parseInputFromJson(req: Request) {
   };
 }
 
+function getBaseUrlFromRequest(req: Request) {
+  const configured =
+    safeStr(process.env.APP_BASE_URL) ||
+    safeStr(process.env.NEXT_PUBLIC_APP_URL) ||
+    safeStr(process.env.NEXTAUTH_URL);
+
+  if (configured) {
+    return configured.replace(/\/+$/, "");
+  }
+
+  try {
+    const url = new URL(req.url);
+    return `${url.protocol}//${url.host}`;
+  } catch {
+    return "";
+  }
+}
+
+async function kickRunnerOnce(params: {
+  req: Request;
+  jobId: string;
+}) {
+  const cronSecret = safeStr(process.env.CRON_SECRET);
+  const baseUrl = getBaseUrlFromRequest(params.req);
+
+  if (!baseUrl) {
+    return {
+      ok: false as const,
+      skipped: true,
+      reason: "Runner kick skipped: base URL not available",
+    };
+  }
+
+  if (!cronSecret) {
+    return {
+      ok: false as const,
+      skipped: true,
+      reason: "Runner kick skipped: CRON_SECRET missing",
+    };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), RUNNER_KICK_TIMEOUT_MS);
+
+  try {
+    const res = await fetch(`${baseUrl}/api/cron/products-bulk-details-runner`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${cronSecret}`,
+        "x-bulk-job-id": safeStr(params.jobId),
+      },
+      signal: controller.signal,
+      cache: "no-store",
+    });
+
+    const text = await res.text();
+    let data: any = null;
+
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = null;
+    }
+
+    if (!res.ok) {
+      return {
+        ok: false as const,
+        skipped: false,
+        reason:
+          safeStr(data?.error) ||
+          safeStr(text) ||
+          `Runner kick failed with status ${res.status}`,
+      };
+    }
+
+    return {
+      ok: true as const,
+      skipped: false,
+      response: data,
+    };
+  } catch (error: any) {
+    return {
+      ok: false as const,
+      skipped: false,
+      reason: safeStr(error?.message || "Runner kick failed"),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function POST(req: Request) {
   const guard = await assertAdminWriteAccess();
   if (!guard.ok) return guard.res;
@@ -202,6 +294,7 @@ export async function POST(req: Request) {
         category: config.category,
         duplicateStrategy: config.duplicateStrategy,
         processingMode: "row_by_row",
+        runnerKickRequestedAt: new Date(),
       },
       config: {
         ...config,
@@ -241,12 +334,44 @@ export async function POST(req: Request) {
         : "bulk-product-details-upload-failures",
     });
 
+    const createdPlainJob = toPlainBulkJob(created);
+
+    const runnerKick = await kickRunnerOnce({
+      req,
+      jobId: safeStr(created?._id),
+    });
+
+    const messageParts = [
+      "Bulk details job created successfully.",
+      "Processing backend me row-by-row continue hogi.",
+    ];
+
+    if (runnerKick.ok) {
+      messageParts.push("Initial runner kick successful.");
+    } else if (runnerKick.skipped) {
+      messageParts.push(safeStr(runnerKick.reason));
+    } else {
+      messageParts.push(
+        `Initial runner kick failed: ${safeStr(runnerKick.reason)}`
+      );
+    }
+
     return NextResponse.json(
       {
         ok: true,
-        message:
-          "Bulk details job created successfully. Processing backend me row-by-row continue hogi.",
-        job: toPlainBulkJob(created),
+        message: messageParts.join(" "),
+        job: createdPlainJob,
+        runnerKick: runnerKick.ok
+          ? {
+              ok: true,
+              stats: runnerKick.response?.stats || null,
+              message: safeStr(runnerKick.response?.message || ""),
+            }
+          : {
+              ok: false,
+              skipped: Boolean(runnerKick.skipped),
+              reason: safeStr(runnerKick.reason || ""),
+            },
       },
       { status: 201 }
     );

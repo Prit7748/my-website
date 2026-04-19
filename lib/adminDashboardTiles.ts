@@ -11,6 +11,7 @@ export type AdminDashboardTileKey =
   | "blogs"
   | "admin-management"
   | "site-settings"
+  | "notifications"
   | "subjects"
   | "courses"
   | "users"
@@ -146,6 +147,12 @@ export const ADMIN_DASHBOARD_TILES: AdminDashboardTileConfig[] = [
     defaultTitle: "Site Settings",
     description: "Hero, FAQ, Social links, Testimonials",
     href: "/admin/site-settings",
+  },
+  {
+    key: "notifications",
+    defaultTitle: "Notifications",
+    description: "Post-upload sync tasks, alerts, pending admin actions",
+    href: "/admin/notifications",
   },
   {
     key: "subjects",

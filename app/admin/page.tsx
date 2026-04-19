@@ -28,6 +28,7 @@ import {
   TrendingUp,
   Clock3,
   FileSpreadsheet,
+  BellRing,
 } from "lucide-react";
 import {
   ADMIN_DASHBOARD_TILE_STORAGE_KEY,
@@ -136,6 +137,7 @@ const DEFAULT_TILE_TONES: Record<AdminDashboardTileKey, NonDefaultTone> = {
   blogs: "gray",
   "admin-management": "gray",
   "site-settings": "gray",
+  notifications: "amber",
   subjects: "gray",
   courses: "gray",
   users: "gray",
@@ -256,6 +258,7 @@ export default function AdminPage() {
           setComingSoonEnabled(Boolean(cfg.enabled));
         }
       } catch {
+        // ignore
       } finally {
         setCsLoading(false);
       }
@@ -635,6 +638,15 @@ export default function AdminPage() {
         "/admin/site-settings",
         Settings,
         "Hero, FAQ, Social links, Testimonials"
+      );
+    }
+
+    if (tile.key === "notifications") {
+      return renderBasicTile(
+        tile,
+        "/admin/notifications",
+        BellRing,
+        "Post-upload sync tasks, alerts, pending admin actions"
       );
     }
 
