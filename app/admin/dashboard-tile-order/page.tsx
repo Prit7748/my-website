@@ -33,6 +33,7 @@ import {
   Users,
   Type,
   Palette,
+  BellRing,
 } from "lucide-react";
 import {
   ADMIN_DASHBOARD_TILE_STORAGE_KEY,
@@ -151,6 +152,7 @@ const DEFAULT_TILE_TONES: Record<AdminDashboardTileKey, NonDefaultTone> = {
   blogs: "gray",
   "admin-management": "gray",
   "site-settings": "gray",
+  notifications: "amber",
   subjects: "gray",
   courses: "gray",
   users: "gray",
@@ -799,6 +801,20 @@ export default function DashboardTileOrderPage() {
             <div className={`font-extrabold ${tone.title}`}>{getDisplayTitle(row)}</div>
             <div className="text-xs text-slate-600 mt-1">
               Hero, FAQ, Social links, Testimonials
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    if (row.key === "notifications") {
+      return (
+        <div className="flex items-center gap-3">
+          <BellRing className={tone.icon} />
+          <div>
+            <div className={`font-extrabold ${tone.title}`}>{getDisplayTitle(row)}</div>
+            <div className="text-xs text-slate-600 mt-1">
+              Post-upload sync tasks, alerts, pending admin actions
             </div>
           </div>
         </div>
