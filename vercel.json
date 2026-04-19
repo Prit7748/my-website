@@ -1,7 +1,11 @@
 {
   "crons": [
     {
-      "path": "/api/cron/purge-trash",
+      "path": "/api/cron/products-bulk-details-runner",
+      "schedule": "* * * * *"
+    },
+    {
+      "path": "/api/cron/purge-trash", 
       "schedule": "10 3 * * *"
     }
   ]
