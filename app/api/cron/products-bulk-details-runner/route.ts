@@ -17,15 +17,11 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-const MAX_ROW_STEPS_PER_RUN = 75;
-const SOFT_TIME_BUDGET_MS = 45_000;
-const CLAIM_LOCK_MS = 90_000;
-const STALE_LOCK_RECOVERY_MS = 150_000;
+const MAX_ROW_STEPS_PER_RUN = 500;
+const SOFT_TIME_BUDGET_MS = 54_000;
+const CLAIM_LOCK_MS = 120_000;
+const STALE_LOCK_RECOVERY_MS = 180_000;
 const MAX_ELIGIBLE_JOBS_SCAN = 25;
-
-const MAX_AUTO_CHAIN_DEPTH = 3;
-const AUTO_CHAIN_TIMEOUT_MS = 8_000;
-const AUTO_CHAIN_ALLOWED_UPTO_ELAPSED_MS = 52_000;
 
 function safeStr(x: any) {
   return String(x ?? "").trim();
@@ -34,10 +30,6 @@ function safeStr(x: any) {
 function safeNum(x: any, def = 0) {
   const n = Number(x);
   return Number.isFinite(n) ? n : def;
-}
-
-function clamp(n: number, min: number, max: number) {
-  return Math.min(max, Math.max(min, n));
 }
 
 function isCronAuthorized(req: NextRequest) {
@@ -90,26 +82,6 @@ function getPreferredJobId(req: NextRequest) {
   try {
     const url = new URL(req.url);
     return safeStr(url.searchParams.get("jobId"));
-  } catch {
-    return "";
-  }
-}
-
-function getRunnerDepth(req: NextRequest) {
-  return clamp(safeNum(req.headers.get("x-runner-depth"), 0), 0, MAX_AUTO_CHAIN_DEPTH);
-}
-
-function getBaseUrlFromRequest(req: NextRequest) {
-  const configured =
-    safeStr(process.env.APP_BASE_URL) ||
-    safeStr(process.env.NEXT_PUBLIC_APP_URL) ||
-    safeStr(process.env.NEXTAUTH_URL);
-
-  if (configured) return configured.replace(/\/+$/, "");
-
-  try {
-    const url = new URL(req.url);
-    return `${url.protocol}//${url.host}`;
   } catch {
     return "";
   }
@@ -245,33 +217,6 @@ async function findEligibleJobs(args?: {
   return out;
 }
 
-async function findBestNextJob(args?: {
-  preferredJobId?: string;
-  lastTouchedJobId?: string;
-}) {
-  const preferredJobId = safeStr(args?.preferredJobId);
-  const lastTouchedJobId = safeStr(args?.lastTouchedJobId);
-
-  if (lastTouchedJobId) {
-    const jobs = await findEligibleJobs({
-      preferredJobId: lastTouchedJobId,
-      limit: 1,
-    });
-    if (jobs.length) return jobs[0];
-  }
-
-  if (preferredJobId) {
-    const jobs = await findEligibleJobs({
-      preferredJobId,
-      limit: 1,
-    });
-    if (jobs.length) return jobs[0];
-  }
-
-  const jobs = await findEligibleJobs({ limit: 1 });
-  return jobs[0] || null;
-}
-
 async function processSingleRowForJob(jobDoc: any) {
   const jobId = safeStr(jobDoc?._id);
   const createdBy = safeStr(jobDoc?.createdBy);
@@ -279,7 +224,7 @@ async function processSingleRowForJob(jobDoc: any) {
   if (!jobId || !createdBy) {
     return {
       ok: false as const,
-      skipped: true,
+      metaSkipped: true,
       reason: "Invalid job identity",
     };
   }
@@ -293,7 +238,7 @@ async function processSingleRowForJob(jobDoc: any) {
   if (!claim.ok) {
     return {
       ok: false as const,
-      skipped: true,
+      metaSkipped: true,
       reason: safeStr(claim.error || "Job could not be locked"),
       jobId,
       createdBy,
@@ -313,7 +258,7 @@ async function processSingleRowForJob(jobDoc: any) {
 
     return {
       ok: true as const,
-      skipped: true,
+      metaSkipped: true,
       reason: "No pending rows left",
       jobId,
       createdBy,
@@ -354,7 +299,7 @@ async function processSingleRowForJob(jobDoc: any) {
 
     return {
       ok: true as const,
-      skipped: false,
+      metaSkipped: false,
       jobId,
       createdBy,
       updatedJob,
@@ -370,7 +315,7 @@ async function processSingleRowForJob(jobDoc: any) {
 
     return {
       ok: false as const,
-      skipped: false,
+      metaSkipped: false,
       jobId,
       createdBy,
       failedJob,
@@ -379,168 +324,106 @@ async function processSingleRowForJob(jobDoc: any) {
   }
 }
 
-async function kickNextRunner(args: {
-  req: NextRequest;
-  preferredJobId?: string;
-  depth: number;
-}) {
-  const cronSecret = safeStr(process.env.CRON_SECRET);
-  const baseUrl = getBaseUrlFromRequest(args.req);
-  const preferredJobId = safeStr(args.preferredJobId);
-
-  if (!cronSecret) {
-    return {
-      ok: false as const,
-      skipped: true,
-      reason: "CRON_SECRET missing",
-    };
-  }
-
-  if (!baseUrl) {
-    return {
-      ok: false as const,
-      skipped: true,
-      reason: "Base URL missing",
-    };
-  }
-
-  if (args.depth >= MAX_AUTO_CHAIN_DEPTH) {
-    return {
-      ok: false as const,
-      skipped: true,
-      reason: "Auto-chain depth limit reached",
-    };
-  }
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), AUTO_CHAIN_TIMEOUT_MS);
-
-  try {
-    const url = new URL(`${baseUrl}/api/cron/products-bulk-details-runner`);
-    if (preferredJobId) {
-      url.searchParams.set("jobId", preferredJobId);
-    }
-
-    const res = await fetch(url.toString(), {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${cronSecret}`,
-        "x-runner-depth": String(args.depth + 1),
-        ...(preferredJobId ? { "x-bulk-job-id": preferredJobId } : {}),
-      },
-      signal: controller.signal,
-      cache: "no-store",
-    });
-
-    const text = await res.text();
-    let data: any = null;
-
-    try {
-      data = text ? JSON.parse(text) : null;
-    } catch {
-      data = null;
-    }
-
-    if (!res.ok) {
-      return {
-        ok: false as const,
-        skipped: false,
-        reason:
-          safeStr(data?.error) ||
-          safeStr(text) ||
-          `Auto-chain failed with status ${res.status}`,
-      };
-    }
-
-    return {
-      ok: true as const,
-      skipped: false,
-      response: data,
-    };
-  } catch (error: any) {
-    return {
-      ok: false as const,
-      skipped: false,
-      reason: safeStr(error?.message || "Auto-chain failed"),
-    };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 async function runRunner(req: NextRequest) {
   const access = await assertRunnerAccess(req);
   if (!access.ok) return access.res;
 
   const preferredJobId = getPreferredJobId(req);
-  const runnerDepth = getRunnerDepth(req);
   const startedAtMs = Date.now();
 
   const recovery = await recoverStaleOrExpiredLocks();
 
+  let rowStepsProcessed = 0;
   let rowStepsCompleted = 0;
   let rowStepsFailed = 0;
+  let rowStepsCreated = 0;
+  let rowStepsUpdated = 0;
+  let rowStepsSkipped = 0;
   let metaSkips = 0;
 
   const touchedJobIds = new Set<string>();
   const finishedJobs: any[] = [];
   const failureNotes: string[] = [];
 
-  let currentJobId = preferredJobId;
+  let activeJob: any = null;
 
-  while (rowStepsCompleted + rowStepsFailed < MAX_ROW_STEPS_PER_RUN) {
+  const firstEligible = await findEligibleJobs({
+    preferredJobId,
+    limit: MAX_ELIGIBLE_JOBS_SCAN,
+  });
+
+  if (firstEligible.length) {
+    activeJob = firstEligible[0];
+  }
+
+  while (rowStepsProcessed < MAX_ROW_STEPS_PER_RUN) {
     const elapsed = Date.now() - startedAtMs;
     if (elapsed >= SOFT_TIME_BUDGET_MS) {
       break;
     }
 
-    const nextJob = await findBestNextJob({
-      preferredJobId,
-      lastTouchedJobId: currentJobId,
-    });
+    if (!activeJob || !canJobStillRun(activeJob)) {
+      const eligible = await findEligibleJobs({
+        preferredJobId: "",
+        limit: MAX_ELIGIBLE_JOBS_SCAN,
+      });
 
-    if (!nextJob) {
-      break;
+      if (!eligible.length) {
+        break;
+      }
+
+      activeJob = eligible[0];
     }
 
-    const result = await processSingleRowForJob(nextJob);
+    const result = await processSingleRowForJob(activeJob);
 
-    if (result.skipped) {
+    const maybeJobId = safeStr((result as any).jobId);
+    if (maybeJobId) touchedJobIds.add(maybeJobId);
+
+    if (result.metaSkipped) {
       metaSkips += 1;
 
-      const maybeJobId = safeStr((result as any).jobId);
       const maybeUpdatedJob: any = (result as any).updatedJob;
       const maybeStatus = safeStr(maybeUpdatedJob?.status);
-
-      if (maybeJobId) {
-        touchedJobIds.add(maybeJobId);
-        currentJobId = maybeJobId;
-      }
 
       if (maybeUpdatedJob && isFinalBulkJobStatus(maybeStatus)) {
         finishedJobs.push(toPlainBulkJob(maybeUpdatedJob));
       }
 
       if (safeStr((result as any).reason).toLowerCase().includes("locked")) {
-        currentJobId = "";
+        activeJob = null;
+      } else if (maybeUpdatedJob) {
+        activeJob = maybeUpdatedJob;
+      } else {
+        activeJob = null;
       }
 
       continue;
     }
 
-    if ((result as any).jobId) {
-      touchedJobIds.add((result as any).jobId);
-      currentJobId = safeStr((result as any).jobId);
-    }
+    rowStepsProcessed += 1;
 
     if (result.ok) {
-      rowStepsCompleted += 1;
+      const batchResult: any = (result as any).batchResult || {};
+      rowStepsCompleted += Number(batchResult.successDelta || 0);
+      rowStepsCreated += Number(batchResult.summaryPatch?.createdRows ?? 0) >= 0
+        ? Number(batchResult.successDelta || 0) - Number(batchResult.summaryPatch?.updatedRows ? 0 : 0)
+        : 0;
 
-      const updated = (result as any).updatedJob;
-      const status = safeStr(updated?.status);
+      rowStepsUpdated += 0;
+      rowStepsSkipped += Number(batchResult.skippedDelta || 0);
+      rowStepsFailed += Number(batchResult.failedDelta || 0);
 
-      if (isFinalBulkJobStatus(status)) {
-        finishedJobs.push(toPlainBulkJob(updated));
+      const updatedJob = (result as any).updatedJob;
+      const updatedStatus = safeStr(updatedJob?.status);
+
+      if (updatedJob && isFinalBulkJobStatus(updatedStatus)) {
+        finishedJobs.push(toPlainBulkJob(updatedJob));
+        activeJob = null;
+      } else if (updatedJob) {
+        activeJob = updatedJob;
+      } else {
+        activeJob = null;
       }
     } else {
       rowStepsFailed += 1;
@@ -551,32 +434,18 @@ async function runRunner(req: NextRequest) {
       const failedJob = (result as any).failedJob;
       const failedStatus = safeStr(failedJob?.status);
 
-      if (isFinalBulkJobStatus(failedStatus)) {
+      if (failedJob && isFinalBulkJobStatus(failedStatus)) {
         finishedJobs.push(toPlainBulkJob(failedJob));
       }
+
+      activeJob = null;
     }
   }
 
-  const remainingJobs = await findEligibleJobs({ limit: 10 });
-
-  let autoChain: any = {
-    ok: false,
-    skipped: true,
-    reason: "Not attempted",
-  };
-
-  const elapsedMs = Date.now() - startedAtMs;
-
-  if (
-    remainingJobs.length > 0 &&
-    elapsedMs <= AUTO_CHAIN_ALLOWED_UPTO_ELAPSED_MS
-  ) {
-    autoChain = await kickNextRunner({
-      req,
-      preferredJobId: currentJobId || preferredJobId || safeStr(remainingJobs[0]?._id),
-      depth: runnerDepth,
-    });
-  }
+  const remainingJobs = await findEligibleJobs({
+    preferredJobId: activeJob ? safeStr(activeJob?._id) : "",
+    limit: 10,
+  });
 
   const res = NextResponse.json(
     {
@@ -584,25 +453,28 @@ async function runRunner(req: NextRequest) {
       mode: access.mode,
       actor: access.actor,
       message:
-        rowStepsCompleted || rowStepsFailed
+        rowStepsProcessed > 0
           ? "Product details runner executed successfully."
           : "No eligible product details job found for processing.",
       stats: {
+        rowStepsProcessed,
         rowStepsCompleted,
         rowStepsFailed,
+        rowStepsCreated,
+        rowStepsUpdated,
+        rowStepsSkipped,
         metaSkips,
         touchedJobs: touchedJobIds.size,
         remainingActiveJobs: remainingJobs.length,
-        elapsedMs,
+        elapsedMs: Date.now() - startedAtMs,
         maxRowStepsPerRun: MAX_ROW_STEPS_PER_RUN,
         softTimeBudgetMs: SOFT_TIME_BUDGET_MS,
-        processingMode: "row_by_row_stable_autochain",
+        processingMode: "row_by_row_scheduler_only",
         recoveredLocks: recovery.recoveredLocks,
         finalizedCompletedJobs: recovery.finalizedCompletedJobs,
-        runnerDepth,
       },
       preferredJobId: preferredJobId || "",
-      currentJobId: currentJobId || "",
+      activeJobId: activeJob ? safeStr(activeJob?._id) : "",
       touchedJobIds: Array.from(touchedJobIds),
       finishedJobs,
       failureNotes: failureNotes.slice(0, 20),
@@ -610,17 +482,6 @@ async function runRunner(req: NextRequest) {
         remainingJobs.length > 0
           ? new Date(Date.now() + 60_000).toISOString()
           : null,
-      autoChain: autoChain.ok
-        ? {
-            ok: true,
-            message: safeStr(autoChain.response?.message || ""),
-            stats: autoChain.response?.stats || null,
-          }
-        : {
-            ok: false,
-            skipped: Boolean(autoChain.skipped),
-            reason: safeStr(autoChain.reason || ""),
-          },
     },
     { status: 200 }
   );
