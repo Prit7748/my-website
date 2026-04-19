@@ -7,6 +7,7 @@ import {
   claimBulkUploadJobBatch,
   completeBulkUploadJobBatch,
   failBulkUploadJob,
+  finalizeBulkUploadJob,
   isFinalBulkJobStatus,
   toPlainBulkJob,
 } from "@/lib/bulkUploadJob";
@@ -14,52 +15,17 @@ import { processBulkDetailsJobBatch } from "@/lib/bulkProductDetailsJob";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 300;
+export const maxDuration = 60;
 
-const MAX_ROW_STEPS_PER_RUN = 200;
-const SOFT_TIME_BUDGET_MS = 240000;
-const CLAIM_LOCK_MS = 120000;
-const MAX_RECENT_EVENTS = 20;
+const MAX_ROW_STEPS_PER_RUN = 75;
+const SOFT_TIME_BUDGET_MS = 45_000;
+const CLAIM_LOCK_MS = 90_000;
+const STALE_LOCK_RECOVERY_MS = 150_000;
+const MAX_ELIGIBLE_JOBS_SCAN = 25;
 
-type TaskStatus =
-  | "idle"
-  | "pending"
-  | "needs_attention"
-  | "running"
-  | "completed"
-  | "disabled";
-
-type AutoMode = "auto" | "manual" | "hybrid";
-
-type RecentEvent = {
-  id: string;
-  level: "info" | "success" | "warning" | "error";
-  title: string;
-  message: string;
-  createdAt: string;
-};
-
-type PostSyncTaskState = {
-  status?: TaskStatus;
-  desiredMode?: AutoMode;
-  requestedAt?: string | null;
-  requestedBy?: string;
-  lastStartedAt?: string | null;
-  lastCompletedAt?: string | null;
-  lastMessage?: string;
-  nextCursor?: number;
-  nextSkip?: number;
-  sourceJobCompletedAt?: string | null;
-  stats?: Record<string, any>;
-};
-
-type PostUploadSyncState = {
-  availability?: PostSyncTaskState;
-  combo?: PostSyncTaskState;
-  hardcopy?: PostSyncTaskState;
-  fullSync?: PostSyncTaskState;
-  recentEvents?: RecentEvent[];
-};
+const MAX_AUTO_CHAIN_DEPTH = 3;
+const AUTO_CHAIN_TIMEOUT_MS = 8_000;
+const AUTO_CHAIN_ALLOWED_UPTO_ELAPSED_MS = 52_000;
 
 function safeStr(x: any) {
   return String(x ?? "").trim();
@@ -70,18 +36,8 @@ function safeNum(x: any, def = 0) {
   return Number.isFinite(n) ? n : def;
 }
 
-function createEvent(
-  level: RecentEvent["level"],
-  title: string,
-  message: string
-): RecentEvent {
-  return {
-    id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
-    level,
-    title: safeStr(title),
-    message: safeStr(message),
-    createdAt: new Date().toISOString(),
-  };
+function clamp(n: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, n));
 }
 
 function isCronAuthorized(req: NextRequest) {
@@ -127,195 +83,193 @@ async function assertRunnerAccess(req: NextRequest) {
   };
 }
 
-function normalizeCategory(input: any) {
-  return safeStr(input).toLowerCase().replace(/\s+/g, " ").trim();
-}
+function getPreferredJobId(req: NextRequest) {
+  const fromHeader = safeStr(req.headers.get("x-bulk-job-id"));
+  if (fromHeader) return fromHeader;
 
-function isSolvedAssignmentsCategory(input: any) {
-  const c = normalizeCategory(input);
-  return c === "solved assignments" || c === "solved-assignments";
-}
-
-function getJobCategory(job: any) {
-  return (
-    safeStr(job?.summary?.category) ||
-    safeStr(job?.config?.category) ||
-    safeStr(job?.meta?.category)
-  );
-}
-
-function getJobCompletionTimestamp(job: any) {
-  return safeStr(job?.completedAt || job?.updatedAt || "");
-}
-
-function getPostUploadSyncState(job: any): PostUploadSyncState {
-  const state = job?.summary?.postUploadSync;
-  if (state && typeof state === "object" && !Array.isArray(state)) {
-    return state as PostUploadSyncState;
+  try {
+    const url = new URL(req.url);
+    return safeStr(url.searchParams.get("jobId"));
+  } catch {
+    return "";
   }
-  return {};
 }
 
-function buildTaskState(params: {
-  prev?: PostSyncTaskState;
-  desiredMode: AutoMode;
-  status: TaskStatus;
-  message: string;
-  sourceJobCompletedAt: string;
-  nextCursor?: number;
-  nextSkip?: number;
-}) {
-  const prev = params.prev || {};
-  return {
-    desiredMode: prev.desiredMode || params.desiredMode,
-    requestedAt: prev.requestedAt || null,
-    requestedBy: safeStr(prev.requestedBy || ""),
-    lastStartedAt: prev.lastStartedAt || null,
-    lastCompletedAt: prev.lastCompletedAt || null,
-    lastMessage: params.message,
-    status: params.status,
-    nextCursor:
-      typeof params.nextCursor === "number"
-        ? params.nextCursor
-        : typeof prev.nextCursor === "number"
-        ? prev.nextCursor
-        : 0,
-    nextSkip:
-      typeof params.nextSkip === "number"
-        ? params.nextSkip
-        : typeof prev.nextSkip === "number"
-        ? prev.nextSkip
-        : 0,
-    sourceJobCompletedAt: params.sourceJobCompletedAt,
-    stats:
-      prev.stats && typeof prev.stats === "object" && !Array.isArray(prev.stats)
-        ? prev.stats
-        : {},
-  } satisfies PostSyncTaskState;
+function getRunnerDepth(req: NextRequest) {
+  return clamp(safeNum(req.headers.get("x-runner-depth"), 0), 0, MAX_AUTO_CHAIN_DEPTH);
 }
 
-async function stampPostUploadSyncState(jobDoc: any) {
-  const status = safeStr(jobDoc?.status);
-  if (status !== "completed" && status !== "completed_with_errors") {
-    return jobDoc;
+function getBaseUrlFromRequest(req: NextRequest) {
+  const configured =
+    safeStr(process.env.APP_BASE_URL) ||
+    safeStr(process.env.NEXT_PUBLIC_APP_URL) ||
+    safeStr(process.env.NEXTAUTH_URL);
+
+  if (configured) return configured.replace(/\/+$/, "");
+
+  try {
+    const url = new URL(req.url);
+    return `${url.protocol}//${url.host}`;
+  } catch {
+    return "";
   }
+}
 
+function canJobStillRun(job: any) {
+  const status = safeStr(job?.status);
+  if (isFinalBulkJobStatus(status)) return false;
+
+  const totalItems = safeNum(job?.progress?.totalItems, 0);
+  const processedItems = safeNum(job?.progress?.processedItems, 0);
+
+  if (totalItems <= 0) return false;
+  if (processedItems >= totalItems) return false;
+
+  return true;
+}
+
+async function recoverStaleOrExpiredLocks() {
   await dbConnect();
 
-  const freshJob: any = await BulkUploadJob.findById(jobDoc?._id);
-  if (!freshJob) return jobDoc;
+  const now = new Date();
+  const staleCutoff = new Date(now.getTime() - STALE_LOCK_RECOVERY_MS);
 
-  const completedAt = getJobCompletionTimestamp(freshJob);
-  if (!completedAt) return freshJob;
-
-  const latestCategory = getJobCategory(freshJob);
-  const hardcopyRelevant = isSolvedAssignmentsCategory(latestCategory);
-
-  const summary =
-    freshJob.summary &&
-    typeof freshJob.summary === "object" &&
-    !Array.isArray(freshJob.summary)
-      ? { ...freshJob.summary }
-      : {};
-
-  const currentState = getPostUploadSyncState(freshJob);
-  const availabilityPrev = currentState.availability || {};
-  const comboPrev = currentState.combo || {};
-  const hardcopyPrev = currentState.hardcopy || {};
-  const fullSyncPrev = currentState.fullSync || {};
-
-  const alreadyStamped =
-    safeStr(availabilityPrev.sourceJobCompletedAt) === completedAt &&
-    safeStr(comboPrev.sourceJobCompletedAt) === completedAt &&
-    safeStr(fullSyncPrev.sourceJobCompletedAt) === completedAt &&
-    (hardcopyRelevant
-      ? safeStr(hardcopyPrev.sourceJobCompletedAt) === completedAt
-      : true);
-
-  if (alreadyStamped) {
-    return freshJob;
-  }
-
-  const recentEvents = Array.isArray(currentState.recentEvents)
-    ? [...currentState.recentEvents]
-    : [];
-
-  recentEvents.unshift(
-    createEvent(
-      "success",
-      "Bulk upload completed",
-      "Latest bulk product details upload complete ho gayi. Post-upload sync tasks refresh kar di gayi hain."
-    )
-  );
-
-  const nextState: PostUploadSyncState = {
-    availability: buildTaskState({
-      prev: availabilityPrev,
-      desiredMode: "hybrid",
-      status: "pending",
-      message:
-        "Latest bulk upload completed. Availability sync ab pending hai.",
-      sourceJobCompletedAt: completedAt,
-      nextCursor: 0,
-    }),
-    combo: buildTaskState({
-      prev: comboPrev,
-      desiredMode: "hybrid",
-      status: "pending",
-      message: "Latest bulk upload completed. Combo sync ab pending hai.",
-      sourceJobCompletedAt: completedAt,
-    }),
-    hardcopy: buildTaskState({
-      prev: hardcopyPrev,
-      desiredMode: "hybrid",
-      status: hardcopyRelevant ? "pending" : "disabled",
-      message: hardcopyRelevant
-        ? "Latest bulk upload completed. Hardcopy sync ab pending hai."
-        : "Latest bulk upload hardcopy-relevant category ki nahi hai.",
-      sourceJobCompletedAt: completedAt,
-      nextSkip: 0,
-    }),
-    fullSync: buildTaskState({
-      prev: fullSyncPrev,
-      desiredMode: "manual",
-      status: "pending",
-      message:
-        "Latest bulk upload completed. Run Full Sync action available hai.",
-      sourceJobCompletedAt: completedAt,
-    }),
-    recentEvents: recentEvents.slice(0, MAX_RECENT_EVENTS),
-  };
-
-  summary.postUploadSync = nextState;
-  freshJob.summary = summary;
-  freshJob.markModified("summary");
-
-  await freshJob.save();
-  return freshJob;
-}
-
-async function findEligibleJobs(limit = 25) {
-  await dbConnect();
-
-  const docs: any[] = await BulkUploadJob.find({
+  const candidates: any[] = await BulkUploadJob.find({
     jobType: "product_details",
     status: { $in: ["queued", "running", "processing_batch"] },
+    $or: [
+      { lockExpiresAt: { $ne: null, $lte: now } },
+      {
+        status: "processing_batch",
+        lockToken: { $ne: "" },
+        $or: [
+          { lastHeartbeatAt: null },
+          { lastHeartbeatAt: { $lte: staleCutoff } },
+        ],
+      },
+    ],
+  })
+    .sort({ createdAt: 1, _id: 1 })
+    .limit(MAX_ELIGIBLE_JOBS_SCAN);
+
+  let recoveredLocks = 0;
+  let finalizedCompletedJobs = 0;
+
+  for (const job of candidates) {
+    const jobId = safeStr(job?._id);
+    const createdBy = safeStr(job?.createdBy);
+    const totalItems = safeNum(job?.progress?.totalItems, 0);
+    const processedItems = safeNum(job?.progress?.processedItems, 0);
+
+    if (!jobId || !createdBy) continue;
+
+    if (totalItems > 0 && processedItems >= totalItems) {
+      try {
+        await finalizeBulkUploadJob({
+          jobId,
+          createdBy,
+          message: "Bulk job completed successfully.",
+        });
+        finalizedCompletedJobs += 1;
+        continue;
+      } catch {
+        // ignore
+      }
+    }
+
+    await BulkUploadJob.updateOne(
+      { _id: job._id },
+      {
+        $set: {
+          status: safeStr(job?.status) === "queued" ? "queued" : "running",
+          lockToken: "",
+          lockExpiresAt: null,
+          lastHeartbeatAt: now,
+        },
+      }
+    );
+
+    recoveredLocks += 1;
+  }
+
+  return {
+    recoveredLocks,
+    finalizedCompletedJobs,
+  };
+}
+
+async function findEligibleJobs(args?: {
+  preferredJobId?: string;
+  limit?: number;
+}) {
+  await dbConnect();
+
+  const preferredJobId = safeStr(args?.preferredJobId);
+  const limit = Math.max(1, Math.trunc(safeNum(args?.limit, MAX_ELIGIBLE_JOBS_SCAN)));
+
+  const out: any[] = [];
+  const seen = new Set<string>();
+
+  if (preferredJobId) {
+    const preferred: any = await BulkUploadJob.findOne({
+      _id: preferredJobId,
+      jobType: "product_details",
+      status: { $in: ["queued", "running", "processing_batch"] },
+    });
+
+    if (preferred && canJobStillRun(preferred)) {
+      out.push(preferred);
+      seen.add(String(preferred._id));
+    }
+  }
+
+  const others: any[] = await BulkUploadJob.find({
+    jobType: "product_details",
+    status: { $in: ["queued", "running", "processing_batch"] },
+    ...(seen.size ? { _id: { $nin: Array.from(seen) } } : {}),
   })
     .sort({ createdAt: 1, _id: 1 })
     .limit(limit);
 
-  return docs.filter((job: any) => {
-    const status = safeStr(job?.status);
-    if (isFinalBulkJobStatus(status)) return false;
+  for (const job of others) {
+    const id = String(job?._id || "");
+    if (!id || seen.has(id)) continue;
+    if (!canJobStillRun(job)) continue;
 
-    const totalItems = safeNum(job?.progress?.totalItems, 0);
-    const processedItems = safeNum(job?.progress?.processedItems, 0);
+    out.push(job);
+    seen.add(id);
 
-    if (totalItems <= 0) return false;
-    if (processedItems >= totalItems) return false;
+    if (out.length >= limit) break;
+  }
 
-    return true;
-  });
+  return out;
+}
+
+async function findBestNextJob(args?: {
+  preferredJobId?: string;
+  lastTouchedJobId?: string;
+}) {
+  const preferredJobId = safeStr(args?.preferredJobId);
+  const lastTouchedJobId = safeStr(args?.lastTouchedJobId);
+
+  if (lastTouchedJobId) {
+    const jobs = await findEligibleJobs({
+      preferredJobId: lastTouchedJobId,
+      limit: 1,
+    });
+    if (jobs.length) return jobs[0];
+  }
+
+  if (preferredJobId) {
+    const jobs = await findEligibleJobs({
+      preferredJobId,
+      limit: 1,
+    });
+    if (jobs.length) return jobs[0];
+  }
+
+  const jobs = await findEligibleJobs({ limit: 1 });
+  return jobs[0] || null;
 }
 
 async function processSingleRowForJob(jobDoc: any) {
@@ -341,6 +295,8 @@ async function processSingleRowForJob(jobDoc: any) {
       ok: false as const,
       skipped: true,
       reason: safeStr(claim.error || "Job could not be locked"),
+      jobId,
+      createdBy,
     };
   }
 
@@ -349,10 +305,19 @@ async function processSingleRowForJob(jobDoc: any) {
   const processedItems = safeNum(lockedJob?.progress?.processedItems, 0);
 
   if (totalItems <= 0 || processedItems >= totalItems) {
+    const finalJob = await finalizeBulkUploadJob({
+      jobId,
+      createdBy,
+      message: "Bulk job completed successfully.",
+    });
+
     return {
-      ok: false as const,
+      ok: true as const,
       skipped: true,
       reason: "No pending rows left",
+      jobId,
+      createdBy,
+      updatedJob: finalJob,
     };
   }
 
@@ -387,14 +352,12 @@ async function processSingleRowForJob(jobDoc: any) {
       summaryPatch: batchResult.summaryPatch,
     });
 
-    const stampedJob = await stampPostUploadSyncState(updatedJob);
-
     return {
       ok: true as const,
       skipped: false,
       jobId,
       createdBy,
-      updatedJob: stampedJob,
+      updatedJob,
       batchResult,
     };
   } catch (error: any) {
@@ -416,110 +379,254 @@ async function processSingleRowForJob(jobDoc: any) {
   }
 }
 
+async function kickNextRunner(args: {
+  req: NextRequest;
+  preferredJobId?: string;
+  depth: number;
+}) {
+  const cronSecret = safeStr(process.env.CRON_SECRET);
+  const baseUrl = getBaseUrlFromRequest(args.req);
+  const preferredJobId = safeStr(args.preferredJobId);
+
+  if (!cronSecret) {
+    return {
+      ok: false as const,
+      skipped: true,
+      reason: "CRON_SECRET missing",
+    };
+  }
+
+  if (!baseUrl) {
+    return {
+      ok: false as const,
+      skipped: true,
+      reason: "Base URL missing",
+    };
+  }
+
+  if (args.depth >= MAX_AUTO_CHAIN_DEPTH) {
+    return {
+      ok: false as const,
+      skipped: true,
+      reason: "Auto-chain depth limit reached",
+    };
+  }
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AUTO_CHAIN_TIMEOUT_MS);
+
+  try {
+    const url = new URL(`${baseUrl}/api/cron/products-bulk-details-runner`);
+    if (preferredJobId) {
+      url.searchParams.set("jobId", preferredJobId);
+    }
+
+    const res = await fetch(url.toString(), {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${cronSecret}`,
+        "x-runner-depth": String(args.depth + 1),
+        ...(preferredJobId ? { "x-bulk-job-id": preferredJobId } : {}),
+      },
+      signal: controller.signal,
+      cache: "no-store",
+    });
+
+    const text = await res.text();
+    let data: any = null;
+
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = null;
+    }
+
+    if (!res.ok) {
+      return {
+        ok: false as const,
+        skipped: false,
+        reason:
+          safeStr(data?.error) ||
+          safeStr(text) ||
+          `Auto-chain failed with status ${res.status}`,
+      };
+    }
+
+    return {
+      ok: true as const,
+      skipped: false,
+      response: data,
+    };
+  } catch (error: any) {
+    return {
+      ok: false as const,
+      skipped: false,
+      reason: safeStr(error?.message || "Auto-chain failed"),
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function runRunner(req: NextRequest) {
   const access = await assertRunnerAccess(req);
   if (!access.ok) return access.res;
 
+  const preferredJobId = getPreferredJobId(req);
+  const runnerDepth = getRunnerDepth(req);
   const startedAtMs = Date.now();
+
+  const recovery = await recoverStaleOrExpiredLocks();
 
   let rowStepsCompleted = 0;
   let rowStepsFailed = 0;
-  let rowStepsSkipped = 0;
+  let metaSkips = 0;
 
   const touchedJobIds = new Set<string>();
   const finishedJobs: any[] = [];
   const failureNotes: string[] = [];
 
-  while (rowStepsCompleted + rowStepsFailed + rowStepsSkipped < MAX_ROW_STEPS_PER_RUN) {
+  let currentJobId = preferredJobId;
+
+  while (rowStepsCompleted + rowStepsFailed < MAX_ROW_STEPS_PER_RUN) {
     const elapsed = Date.now() - startedAtMs;
     if (elapsed >= SOFT_TIME_BUDGET_MS) {
       break;
     }
 
-    const jobs = await findEligibleJobs(25);
-    if (!jobs.length) {
+    const nextJob = await findBestNextJob({
+      preferredJobId,
+      lastTouchedJobId: currentJobId,
+    });
+
+    if (!nextJob) {
       break;
     }
 
-    let processedOneStep = false;
+    const result = await processSingleRowForJob(nextJob);
 
-    for (const job of jobs) {
-      const elapsedInner = Date.now() - startedAtMs;
-      if (elapsedInner >= SOFT_TIME_BUDGET_MS) {
-        break;
+    if (result.skipped) {
+      metaSkips += 1;
+
+      const maybeJobId = safeStr((result as any).jobId);
+      const maybeUpdatedJob: any = (result as any).updatedJob;
+      const maybeStatus = safeStr(maybeUpdatedJob?.status);
+
+      if (maybeJobId) {
+        touchedJobIds.add(maybeJobId);
+        currentJobId = maybeJobId;
       }
 
-      const result = await processSingleRowForJob(job);
-
-      if (result.skipped) {
-        rowStepsSkipped += 1;
-        continue;
+      if (maybeUpdatedJob && isFinalBulkJobStatus(maybeStatus)) {
+        finishedJobs.push(toPlainBulkJob(maybeUpdatedJob));
       }
 
-      processedOneStep = true;
-
-      if (result.ok) {
-        rowStepsCompleted += 1;
-        if (result.jobId) touchedJobIds.add(result.jobId);
-
-        const updated = result.updatedJob;
-        const status = safeStr(updated?.status);
-        if (isFinalBulkJobStatus(status)) {
-          finishedJobs.push(toPlainBulkJob(updated));
-        }
-      } else {
-        rowStepsFailed += 1;
-        if (result.jobId) touchedJobIds.add(result.jobId);
-
-        const reason = safeStr(result.reason);
-        if (reason) {
-          failureNotes.push(reason);
-        }
-
-        const failedStatus = safeStr(result.failedJob?.status);
-        if (isFinalBulkJobStatus(failedStatus)) {
-          finishedJobs.push(toPlainBulkJob(result.failedJob));
-        }
+      if (safeStr((result as any).reason).toLowerCase().includes("locked")) {
+        currentJobId = "";
       }
 
-      if (rowStepsCompleted + rowStepsFailed + rowStepsSkipped >= MAX_ROW_STEPS_PER_RUN) {
-        break;
-      }
+      continue;
     }
 
-    if (!processedOneStep) {
-      break;
+    if ((result as any).jobId) {
+      touchedJobIds.add((result as any).jobId);
+      currentJobId = safeStr((result as any).jobId);
+    }
+
+    if (result.ok) {
+      rowStepsCompleted += 1;
+
+      const updated = (result as any).updatedJob;
+      const status = safeStr(updated?.status);
+
+      if (isFinalBulkJobStatus(status)) {
+        finishedJobs.push(toPlainBulkJob(updated));
+      }
+    } else {
+      rowStepsFailed += 1;
+
+      const reason = safeStr((result as any).reason);
+      if (reason) failureNotes.push(reason);
+
+      const failedJob = (result as any).failedJob;
+      const failedStatus = safeStr(failedJob?.status);
+
+      if (isFinalBulkJobStatus(failedStatus)) {
+        finishedJobs.push(toPlainBulkJob(failedJob));
+      }
     }
   }
 
-  const remainingJobs = await findEligibleJobs(10);
+  const remainingJobs = await findEligibleJobs({ limit: 10 });
 
-  return NextResponse.json(
+  let autoChain: any = {
+    ok: false,
+    skipped: true,
+    reason: "Not attempted",
+  };
+
+  const elapsedMs = Date.now() - startedAtMs;
+
+  if (
+    remainingJobs.length > 0 &&
+    elapsedMs <= AUTO_CHAIN_ALLOWED_UPTO_ELAPSED_MS
+  ) {
+    autoChain = await kickNextRunner({
+      req,
+      preferredJobId: currentJobId || preferredJobId || safeStr(remainingJobs[0]?._id),
+      depth: runnerDepth,
+    });
+  }
+
+  const res = NextResponse.json(
     {
       ok: true,
       mode: access.mode,
       actor: access.actor,
       message:
         rowStepsCompleted || rowStepsFailed
-          ? "Product details background runner executed."
+          ? "Product details runner executed successfully."
           : "No eligible product details job found for processing.",
       stats: {
         rowStepsCompleted,
         rowStepsFailed,
-        rowStepsSkipped,
+        metaSkips,
         touchedJobs: touchedJobIds.size,
         remainingActiveJobs: remainingJobs.length,
-        elapsedMs: Date.now() - startedAtMs,
+        elapsedMs,
         maxRowStepsPerRun: MAX_ROW_STEPS_PER_RUN,
         softTimeBudgetMs: SOFT_TIME_BUDGET_MS,
-        processingMode: "row_by_row",
+        processingMode: "row_by_row_stable_autochain",
+        recoveredLocks: recovery.recoveredLocks,
+        finalizedCompletedJobs: recovery.finalizedCompletedJobs,
+        runnerDepth,
       },
+      preferredJobId: preferredJobId || "",
+      currentJobId: currentJobId || "",
       touchedJobIds: Array.from(touchedJobIds),
       finishedJobs,
       failureNotes: failureNotes.slice(0, 20),
+      nextSuggestedAt:
+        remainingJobs.length > 0
+          ? new Date(Date.now() + 60_000).toISOString()
+          : null,
+      autoChain: autoChain.ok
+        ? {
+            ok: true,
+            message: safeStr(autoChain.response?.message || ""),
+            stats: autoChain.response?.stats || null,
+          }
+        : {
+            ok: false,
+            skipped: Boolean(autoChain.skipped),
+            reason: safeStr(autoChain.reason || ""),
+          },
     },
     { status: 200 }
   );
+
+  res.headers.set("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
+  return res;
 }
 
 export async function GET(req: NextRequest) {
