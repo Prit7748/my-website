@@ -1,4 +1,3 @@
-//app/admin/products/bulk/details/page.tsx//
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -132,10 +131,25 @@ type CreateJobResponse = {
   job?: BulkJob | null;
 };
 
-type CancelJobResponse = {
+type JobActionResponse = {
   ok?: boolean;
   error?: string;
   message?: string;
+  action?: string;
+  job?: BulkJob | null;
+};
+
+type ProcessJobResponse = {
+  ok?: boolean;
+  error?: string;
+  message?: string;
+  processingState?: string;
+  stats?: {
+    processedSteps?: number;
+    failedSteps?: number;
+    elapsedMs?: number;
+    maxSteps?: number;
+  };
   job?: BulkJob | null;
 };
 
@@ -169,6 +183,8 @@ BEGC101ENG202526,BEGC 101,2025-2026,English,BAEGH
 BPSC101ENG202526,BPSC 101,2025-2026,English,"BAPSH, BAG"`;
 
 const POLL_INTERVAL_MS = 5000;
+const PROCESS_MAX_STEPS_PER_REQUEST = 20;
+const PROCESS_LOOP_DELAY_MS = 150;
 
 function notifyLongTaskStart() {
   if (typeof window !== "undefined") {
@@ -205,6 +221,10 @@ function safeBool(x: any, def = false) {
   return def;
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function safeReadJson(res: Response) {
   const text = await res.text();
   if (!text) return { ok: false, error: "Server returned empty response" };
@@ -239,6 +259,10 @@ function isFinalJobStatus(status: string) {
 function statusPillClasses(status: string) {
   const s = safeStr(status);
 
+  if (s === "paused_manual") {
+    return "bg-amber-50 text-amber-700 border-amber-200";
+  }
+
   if (s === "completed") {
     return "bg-emerald-50 text-emerald-700 border-emerald-200";
   }
@@ -261,13 +285,14 @@ function statusPillClasses(status: string) {
 function humanJobStatus(status: string) {
   const s = safeStr(status);
 
+  if (s === "paused_manual") return "Paused";
   if (s === "completed") return "Completed";
   if (s === "completed_with_errors") return "Completed with errors";
   if (s === "failed") return "Failed";
   if (s === "cancelled") return "Cancelled";
   if (s === "processing_batch") return "Processing";
   if (s === "running") return "Running";
-  if (s === "queued") return "Queued";
+  if (s === "queued") return "Saved / Ready";
 
   return s || "Unknown";
 }
@@ -428,6 +453,9 @@ export default function BulkDetailsPage() {
   const initialDefaultsAppliedRef = useRef(false);
   const longTaskActiveRef = useRef(false);
   const pollTimerRef = useRef<number | null>(null);
+  const processorStopRef = useRef(false);
+  const processorRunIdRef = useRef(0);
+  const mountedRef = useRef(false);
 
   const [uploadFile, setUploadFile] = useState<File | null>(null);
 
@@ -439,6 +467,9 @@ export default function BulkDetailsPage() {
   const [isSubmittingJob, setIsSubmittingJob] = useState(false);
   const [isCancellingJob, setIsCancellingJob] = useState(false);
   const [isRefreshingJob, setIsRefreshingJob] = useState(false);
+  const [isProcessingJob, setIsProcessingJob] = useState(false);
+  const [isPausingJob, setIsPausingJob] = useState(false);
+  const [isResumingJob, setIsResumingJob] = useState(false);
   const [defaultsHydrated, setDefaultsHydrated] = useState(false);
 
   const [defaultTemplateMap, setDefaultTemplateMap] =
@@ -602,8 +633,80 @@ export default function BulkDetailsPage() {
   }, [currentJob]);
 
   const canStartNewJob = useMemo(() => {
-    return !isSubmittingJob && !activeJobExists && canSubmit;
-  }, [isSubmittingJob, activeJobExists, canSubmit]);
+    return (
+      !isSubmittingJob &&
+      !isProcessingJob &&
+      !isPausingJob &&
+      !isResumingJob &&
+      !isCancellingJob &&
+      !activeJobExists &&
+      canSubmit
+    );
+  }, [
+    isSubmittingJob,
+    isProcessingJob,
+    isPausingJob,
+    isResumingJob,
+    isCancellingJob,
+    activeJobExists,
+    canSubmit,
+  ]);
+
+  const summary = currentJob?.summary || {};
+  const progress = currentJob?.progress || {};
+  const lastBatch = currentJob?.lastBatch || null;
+  const recentFailures = Array.isArray(currentJob?.recentFailures)
+    ? currentJob.recentFailures
+    : [];
+
+  const needsManualResume = useMemo(() => {
+    return Boolean(
+      currentJob &&
+        !isFinalJobStatus(safeStr(currentJob.status)) &&
+        safeBool(summary.needsManualResume, false)
+    );
+  }, [currentJob, summary]);
+
+  const currentJobVisualStatus = useMemo(() => {
+    if (!currentJob) return "";
+    if (
+      !isFinalJobStatus(safeStr(currentJob.status)) &&
+      safeBool(summary.needsManualResume, false)
+    ) {
+      return "paused_manual";
+    }
+    return safeStr(currentJob.status);
+  }, [currentJob, summary]);
+
+  const canResumeSavedJob = useMemo(() => {
+    return Boolean(
+      currentJob &&
+        !isFinalJobStatus(safeStr(currentJob.status)) &&
+        !isProcessingJob &&
+        !isSubmittingJob &&
+        !isPausingJob &&
+        !isResumingJob &&
+        !isCancellingJob
+    );
+  }, [
+    currentJob,
+    isProcessingJob,
+    isSubmittingJob,
+    isPausingJob,
+    isResumingJob,
+    isCancellingJob,
+  ]);
+
+  const canPauseSavedJob = useMemo(() => {
+    return Boolean(
+      currentJob &&
+        !isFinalJobStatus(safeStr(currentJob.status)) &&
+        !needsManualResume &&
+        !isPausingJob &&
+        !isResumingJob &&
+        !isCancellingJob
+    );
+  }, [currentJob, needsManualResume, isPausingJob, isResumingJob, isCancellingJob]);
 
   const jobProgressPercent = useMemo(() => {
     const fromApi = safeNum(currentJob?.progress?.progressPercent, -1);
@@ -639,6 +742,149 @@ export default function BulkDetailsPage() {
     }
   }
 
+  async function sendJobAction(
+    jobId: string,
+    action: "pause" | "resume" | "cancel",
+    silent = false
+  ) {
+    const res = await fetch(`/api/admin/bulk-jobs/${encodeURIComponent(jobId)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ action }),
+    });
+
+    const data = (await safeReadJson(res)) as JobActionResponse;
+
+    if (!res.ok || !data?.ok) {
+      throw new Error(safeStr(data?.error || data?.message || `${action} failed`));
+    }
+
+    if (data?.job) {
+      setCurrentJob(data.job);
+    }
+
+    if (!silent && safeStr(data?.message)) {
+      setServerMessage(safeStr(data.message));
+      setServerMessageType("info");
+    }
+
+    return data?.job || null;
+  }
+
+  async function runProcessingLoop(jobId: string) {
+    if (!jobId) return;
+
+    processorStopRef.current = false;
+    const runId = Date.now();
+    processorRunIdRef.current = runId;
+    setIsProcessingJob(true);
+
+    try {
+      while (
+        mountedRef.current &&
+        processorRunIdRef.current === runId &&
+        !processorStopRef.current
+      ) {
+        const res = await fetch(
+          "/api/admin/products/bulk/details/jobs/process",
+          {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            credentials: "include",
+            body: JSON.stringify({
+              jobId,
+              maxSteps: PROCESS_MAX_STEPS_PER_REQUEST,
+            }),
+          }
+        );
+
+        const data = (await safeReadJson(res)) as ProcessJobResponse;
+
+        if (!res.ok || !data?.ok) {
+          setServerMessage(
+            safeStr(data?.error || data?.message || "Job processing failed")
+          );
+          setServerMessageType("error");
+          break;
+        }
+
+        if (data?.job) {
+          setCurrentJob(data.job);
+        }
+
+        const processingState = safeStr(data?.processingState);
+        const message = safeStr(data?.message);
+        const finalJobStatus = safeStr(data?.job?.status);
+
+        if (processingState === "processed") {
+          await sleep(PROCESS_LOOP_DELAY_MS);
+          continue;
+        }
+
+        if (processingState === "finished") {
+          setServerMessage(message || "Bulk job completed.");
+          setServerMessageType(
+            finalJobStatus === "completed" ? "success" : "info"
+          );
+          break;
+        }
+
+        if (processingState === "paused") {
+          setServerMessage(message || "Bulk job paused.");
+          setServerMessageType("info");
+          break;
+        }
+
+        if (processingState === "cancelled") {
+          setServerMessage(message || "Bulk job cancelled.");
+          setServerMessageType("info");
+          break;
+        }
+
+        if (processingState === "failed") {
+          setServerMessage(message || "Bulk job failed.");
+          setServerMessageType("error");
+          break;
+        }
+
+        if (message) {
+          setServerMessage(message);
+          setServerMessageType("info");
+        }
+        break;
+      }
+    } finally {
+      if (processorRunIdRef.current === runId) {
+        setIsProcessingJob(false);
+      }
+      await fetchCurrentJob(false);
+    }
+  }
+
+  async function resumeAndProcessJob(job: BulkJob | null, silentResumeMessage = false) {
+    const jobId = safeStr(job?._id);
+    if (!jobId) return;
+
+    setIsResumingJob(true);
+
+    try {
+      const resumedJob = await sendJobAction(jobId, "resume", silentResumeMessage);
+      if (!silentResumeMessage) {
+        setServerMessage(
+          "Saved job resume ho gayi hai. Ab rows one-by-one process hongi."
+        );
+        setServerMessageType("info");
+      }
+      await runProcessingLoop(safeStr(resumedJob?._id || jobId));
+    } catch (error: any) {
+      setServerMessage(safeStr(error?.message || "Resume failed"));
+      setServerMessageType("error");
+    } finally {
+      setIsResumingJob(false);
+    }
+  }
+
   async function createBulkDetailsJob() {
     if (!canSubmit) {
       alert("Category, Title Template aur CSV/Excel data required hai.");
@@ -654,7 +900,7 @@ export default function BulkDetailsPage() {
 
     if (activeJobExists) {
       alert(
-        "Ek bulk product details job already chal rahi hai. Pehle usko complete ya cancel hone do."
+        "Ek bulk product details job already saved hai. Pehle usko resume, complete ya cancel hone do."
       );
       return;
     }
@@ -717,20 +963,43 @@ export default function BulkDetailsPage() {
 
       setCurrentJob(data.job);
       setServerMessage(
-        "Bulk job create ho gayi hai. Excel/CSV save ho chuki hai. Ab products backend me row-by-row create/update hote rahenge."
+        "Bulk job save ho gayi hai. Ab current session me one-by-one processing start ki ja rahi hai."
       );
       setServerMessageType("success");
 
       resetFileInput();
       setForm((prev) => ({ ...prev, csvText: "" }));
 
-      await fetchCurrentJob(false);
+      await resumeAndProcessJob(data.job, true);
     } catch (error: any) {
       const errMsg = safeStr(error?.message || "Failed to create bulk job");
       setServerMessage(errMsg);
       setServerMessageType("error");
     } finally {
       setIsSubmittingJob(false);
+    }
+  }
+
+  async function pauseCurrentJob() {
+    const jobId = safeStr(currentJob?._id);
+    if (!jobId) return;
+
+    setIsPausingJob(true);
+    resetMessages();
+    processorStopRef.current = true;
+
+    try {
+      const pausedJob = await sendJobAction(jobId, "pause", true);
+      setCurrentJob(pausedJob || currentJob);
+      setServerMessage(
+        "Pause request save ho gayi hai. Current row complete hone ke baad job ruk jayegi."
+      );
+      setServerMessageType("info");
+    } catch (error: any) {
+      setServerMessage(safeStr(error?.message || "Pause failed"));
+      setServerMessageType("error");
+    } finally {
+      setIsPausingJob(false);
     }
   }
 
@@ -745,22 +1014,11 @@ export default function BulkDetailsPage() {
 
     setIsCancellingJob(true);
     resetMessages();
+    processorStopRef.current = true;
 
     try {
-      const res = await fetch(`/api/admin/bulk-jobs/${encodeURIComponent(jobId)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        credentials: "include",
-        body: JSON.stringify({ action: "cancel" }),
-      });
-
-      const data = (await safeReadJson(res)) as CancelJobResponse;
-
-      if (!res.ok || !data?.ok) {
-        throw new Error(safeStr(data?.error || data?.message || "Cancel failed"));
-      }
-
-      setCurrentJob(data?.job || null);
+      const cancelledJob = await sendJobAction(jobId, "cancel", true);
+      setCurrentJob(cancelledJob || null);
       setServerMessage("Current bulk job cancelled.");
       setServerMessageType("info");
     } catch (error: any) {
@@ -794,12 +1052,23 @@ export default function BulkDetailsPage() {
   }
 
   useEffect(() => {
+    mountedRef.current = true;
     loadDefaultTemplates();
     fetchCurrentJob(true);
+
+    return () => {
+      mountedRef.current = false;
+    };
   }, []);
 
   useEffect(() => {
-    const active = isSubmittingJob || isCancellingJob || isRefreshingJob;
+    const active =
+      isSubmittingJob ||
+      isCancellingJob ||
+      isRefreshingJob ||
+      isProcessingJob ||
+      isPausingJob ||
+      isResumingJob;
 
     if (active && !longTaskActiveRef.current) {
       notifyLongTaskStart();
@@ -810,7 +1079,14 @@ export default function BulkDetailsPage() {
       notifyLongTaskEnd();
       longTaskActiveRef.current = false;
     }
-  }, [isSubmittingJob, isCancellingJob, isRefreshingJob]);
+  }, [
+    isSubmittingJob,
+    isCancellingJob,
+    isRefreshingJob,
+    isProcessingJob,
+    isPausingJob,
+    isResumingJob,
+  ]);
 
   useEffect(() => {
     if (pollTimerRef.current) {
@@ -820,6 +1096,7 @@ export default function BulkDetailsPage() {
 
     pollTimerRef.current = window.setInterval(() => {
       if (document.visibilityState === "hidden") return;
+      if (isProcessingJob) return;
       fetchCurrentJob(false);
     }, POLL_INTERVAL_MS);
 
@@ -829,15 +1106,16 @@ export default function BulkDetailsPage() {
         pollTimerRef.current = null;
       }
     };
-  }, []);
+  }, [isProcessingJob]);
 
   useEffect(() => {
     const onFocus = () => {
+      if (isProcessingJob) return;
       fetchCurrentJob(false);
     };
 
     const onVisibilityChange = () => {
-      if (document.visibilityState === "visible") {
+      if (document.visibilityState === "visible" && !isProcessingJob) {
         fetchCurrentJob(false);
       }
     };
@@ -849,10 +1127,13 @@ export default function BulkDetailsPage() {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, []);
+  }, [isProcessingJob]);
 
   useEffect(() => {
     return () => {
+      processorStopRef.current = true;
+      processorRunIdRef.current += 1;
+
       if (pollTimerRef.current) {
         window.clearInterval(pollTimerRef.current);
         pollTimerRef.current = null;
@@ -865,13 +1146,6 @@ export default function BulkDetailsPage() {
     };
   }, []);
 
-  const summary = currentJob?.summary || {};
-  const progress = currentJob?.progress || {};
-  const lastBatch = currentJob?.lastBatch || null;
-  const recentFailures = Array.isArray(currentJob?.recentFailures)
-    ? currentJob.recentFailures
-    : [];
-
   return (
     <main className="min-h-screen bg-[#F8FAFC] text-slate-900">
       <div className="max-w-7xl mx-auto px-4 py-8">
@@ -883,8 +1157,9 @@ export default function BulkDetailsPage() {
               </h1>
               <p className="text-sm text-slate-600 mt-1">
                 Excel/CSV upload hone ke baad job database me save rahegi.
-                Processing backend me row-by-row continue hogi. Relogin ke baad ya
-                dusre device par bhi progress dikh sakti hai.
+                Processing current browser session me row-by-row chalegi. Logout,
+                browser close, session expire ya PC off hone par process pause ho
+                jayegi. Dobara login karke Resume se wahi se continue kar sakte ho.
               </p>
             </div>
 
@@ -1018,8 +1293,9 @@ export default function BulkDetailsPage() {
                 <div>
                   <div className="text-sm font-extrabold">Current Job Status</div>
                   <div className="text-xs text-slate-500 mt-1">
-                    Ye status database se aa raha hai. Isliye same progress dusre
-                    device par bhi show ho sakti hai.
+                    Ye status database se aa raha hai. Same saved job dusre device
+                    par bhi dikh sakti hai, lekin processing tabhi chalegi jab
+                    kisi device se Resume/Start kiya jayega.
                   </div>
                 </div>
               </div>
@@ -1027,11 +1303,11 @@ export default function BulkDetailsPage() {
               {currentJob ? (
                 <div
                   className={`inline-flex items-center gap-2 px-3 py-2 rounded-full border text-xs font-extrabold ${statusPillClasses(
-                    safeStr(currentJob.status)
+                    currentJobVisualStatus
                   )}`}
                 >
                   <Activity size={14} />
-                  {humanJobStatus(safeStr(currentJob.status))}
+                  {humanJobStatus(currentJobVisualStatus)}
                 </div>
               ) : (
                 <div className="inline-flex items-center gap-2 px-3 py-2 rounded-full border text-xs font-extrabold bg-slate-50 text-slate-700 border-slate-200">
@@ -1052,10 +1328,22 @@ export default function BulkDetailsPage() {
                           : safeStr(currentJob.status) === "completed_with_errors"
                           ? "bg-amber-600"
                           : "bg-rose-600"
+                        : needsManualResume
+                        ? "bg-amber-500"
                         : "bg-sky-600"
                     }`}
                     style={{ width: `${jobProgressPercent}%` }}
                   />
+                </div>
+
+                <div className="mt-3 text-xs text-slate-500 leading-6">
+                  {needsManualResume
+                    ? "Job paused/saved state me hai. Resume button dabane par wahi se continue hogi."
+                    : isProcessingJob
+                    ? "Is browser session me row-by-row processing chal rahi hai."
+                    : !isFinalJobStatus(safeStr(currentJob.status))
+                    ? "Job saved hai aur ready state me hai."
+                    : "Job final state me pahunch chuki hai."}
                 </div>
 
                 <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
@@ -1083,13 +1371,13 @@ export default function BulkDetailsPage() {
 
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <div className="text-xs uppercase tracking-wide font-extrabold text-slate-500">
-                      Current Row
+                      Last Processed Row
                     </div>
                     <div className="mt-2 text-sm font-bold">
                       {safeNum(progress.lastProcessedIndex, -1) + 1}
                     </div>
                     <div className="mt-1 text-xs text-slate-500">
-                      Backend row-by-row process kar raha hai
+                      Next continue yahi ke baad se hogi
                     </div>
                   </div>
 
@@ -1161,6 +1449,8 @@ export default function BulkDetailsPage() {
                       <br />
                       Dry Run: <b>{safeBool(summary.dryRun) ? "Yes" : "No"}</b>
                       <br />
+                      Resume Needed: <b>{needsManualResume ? "Yes" : "No"}</b>
+                      <br />
                       Started: <b>{formatDateTime(currentJob.startedAt)}</b>
                       <br />
                       Completed: <b>{formatDateTime(currentJob.completedAt)}</b>
@@ -1192,6 +1482,44 @@ export default function BulkDetailsPage() {
                 </div>
 
                 <div className="mt-4 flex items-center gap-3 flex-wrap">
+                  {canResumeSavedJob ? (
+                    <button
+                      type="button"
+                      onClick={() => resumeAndProcessJob(currentJob, false)}
+                      disabled={!canResumeSavedJob}
+                      className="inline-flex items-center gap-2 px-4 py-3 rounded-2xl bg-slate-900 hover:bg-slate-950 text-white transition font-extrabold disabled:opacity-60"
+                    >
+                      {isResumingJob || isProcessingJob ? (
+                        <LoaderCircle size={18} className="animate-spin" />
+                      ) : (
+                        <Play size={18} />
+                      )}
+                      {needsManualResume
+                        ? isResumingJob || isProcessingJob
+                          ? "Resuming..."
+                          : "Resume Saved Job"
+                        : isResumingJob || isProcessingJob
+                        ? "Starting..."
+                        : "Start / Continue Processing"}
+                    </button>
+                  ) : null}
+
+                  {canPauseSavedJob ? (
+                    <button
+                      type="button"
+                      onClick={pauseCurrentJob}
+                      disabled={isPausingJob}
+                      className="inline-flex items-center gap-2 px-4 py-3 rounded-2xl bg-amber-600 hover:bg-amber-700 text-white transition font-extrabold disabled:opacity-60"
+                    >
+                      {isPausingJob ? (
+                        <LoaderCircle size={18} className="animate-spin" />
+                      ) : (
+                        <PauseCircle size={18} />
+                      )}
+                      {isPausingJob ? "Pausing..." : "Pause Job"}
+                    </button>
+                  ) : null}
+
                   {!isFinalJobStatus(safeStr(currentJob.status)) ? (
                     <button
                       type="button"
@@ -1199,7 +1527,11 @@ export default function BulkDetailsPage() {
                       disabled={isCancellingJob}
                       className="inline-flex items-center gap-2 px-4 py-3 rounded-2xl bg-rose-600 hover:bg-rose-700 text-white transition font-extrabold disabled:opacity-60"
                     >
-                      <PauseCircle size={18} />
+                      {isCancellingJob ? (
+                        <LoaderCircle size={18} className="animate-spin" />
+                      ) : (
+                        <PauseCircle size={18} />
+                      )}
                       {isCancellingJob ? "Cancelling..." : "Cancel Current Job"}
                     </button>
                   ) : null}
@@ -1506,8 +1838,8 @@ export default function BulkDetailsPage() {
                 </div>
 
                 <div className="mt-4 rounded-xl border border-sky-200 bg-sky-50 p-3 text-xs leading-5 text-sky-800">
-                  Processing row-by-row hi hogi. Excel upload ek baar hoga, uske baad
-                  backend me rows single-single process hoti rahengi.
+                  Processing row-by-row hi hogi. Lekin ab ye cron/runner se nahi,
+                  current logged-in session ke Start/Resume flow se chalegi.
                 </div>
               </div>
 
@@ -1525,8 +1857,48 @@ export default function BulkDetailsPage() {
                   ) : (
                     <Play size={18} />
                   )}
-                  {isSubmittingJob ? "Creating Job..." : "Start Background Upload"}
+                  {isSubmittingJob
+                    ? "Saving Job..."
+                    : "Save Job & Start Processing"}
                 </button>
+
+                {canResumeSavedJob ? (
+                  <button
+                    type="button"
+                    disabled={!canResumeSavedJob}
+                    onClick={() => resumeAndProcessJob(currentJob, false)}
+                    className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white transition font-extrabold disabled:opacity-60"
+                  >
+                    {isResumingJob || isProcessingJob ? (
+                      <LoaderCircle size={18} className="animate-spin" />
+                    ) : (
+                      <Play size={18} />
+                    )}
+                    {needsManualResume
+                      ? isResumingJob || isProcessingJob
+                        ? "Resuming..."
+                        : "Resume Saved Job"
+                      : isResumingJob || isProcessingJob
+                      ? "Starting..."
+                      : "Start / Continue Saved Job"}
+                  </button>
+                ) : null}
+
+                {canPauseSavedJob ? (
+                  <button
+                    type="button"
+                    disabled={isPausingJob}
+                    onClick={pauseCurrentJob}
+                    className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-amber-600 hover:bg-amber-700 text-white transition font-extrabold disabled:opacity-60"
+                  >
+                    {isPausingJob ? (
+                      <LoaderCircle size={18} className="animate-spin" />
+                    ) : (
+                      <PauseCircle size={18} />
+                    )}
+                    {isPausingJob ? "Pausing..." : "Pause Job"}
+                  </button>
+                ) : null}
 
                 <button
                   type="button"
@@ -1543,8 +1915,9 @@ export default function BulkDetailsPage() {
                 </button>
 
                 <div className="mt-4 text-[11px] text-slate-500 leading-5">
-                  New job start karne ke baad aap page close, logout ya device change
-                  kar sakte ho. Progress database me save rahegi.
+                  New job save karne ke baad aap page close, logout ya device change
+                  kar sakte ho. Progress save rahegi, lekin processing pause ho
+                  jayegi. Baad me Resume se wahi se continue kar sakte ho.
                 </div>
               </div>
 
@@ -1587,16 +1960,18 @@ export default function BulkDetailsPage() {
               <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4">
                 <div className="inline-flex items-center gap-2 text-sm font-extrabold text-sky-900">
                   <FileUp size={16} />
-                  Background flow
+                  New flow
                 </div>
                 <div className="text-sm text-sky-800 mt-2 leading-6">
                   Step 1: Excel/CSV upload/save
                   <br />
                   Step 2: Job database me create
                   <br />
-                  Step 3: Backend row-by-row processing continue
+                  Step 3: Start/Resume dabane par current session me row-by-row process
                   <br />
-                  Step 4: Progress aur report same page par persist
+                  Step 4: Logout / close par pause
+                  <br />
+                  Step 5: Dobara login karke Resume
                 </div>
               </div>
             </div>

@@ -20,7 +20,6 @@ export const maxDuration = 60;
 const MAX_UPLOAD_FILE_BYTES = 6 * 1024 * 1024;
 const MAX_ROWS_PER_JOB = 10000;
 const ROW_BY_ROW_BATCH_SIZE = 1;
-const RUNNER_KICK_TIMEOUT_MS = 12000;
 
 function safeStr(x: any) {
   return String(x ?? "").trim();
@@ -133,97 +132,6 @@ async function parseInputFromJson(req: Request) {
   };
 }
 
-function getBaseUrlFromRequest(req: Request) {
-  const configured =
-    safeStr(process.env.APP_BASE_URL) ||
-    safeStr(process.env.NEXT_PUBLIC_APP_URL) ||
-    safeStr(process.env.NEXTAUTH_URL);
-
-  if (configured) {
-    return configured.replace(/\/+$/, "");
-  }
-
-  try {
-    const url = new URL(req.url);
-    return `${url.protocol}//${url.host}`;
-  } catch {
-    return "";
-  }
-}
-
-async function kickRunnerOnce(params: {
-  req: Request;
-  jobId: string;
-}) {
-  const cronSecret = safeStr(process.env.CRON_SECRET);
-  const baseUrl = getBaseUrlFromRequest(params.req);
-
-  if (!baseUrl) {
-    return {
-      ok: false as const,
-      skipped: true,
-      reason: "Runner kick skipped: base URL not available",
-    };
-  }
-
-  if (!cronSecret) {
-    return {
-      ok: false as const,
-      skipped: true,
-      reason: "Runner kick skipped: CRON_SECRET missing",
-    };
-  }
-
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), RUNNER_KICK_TIMEOUT_MS);
-
-  try {
-    const res = await fetch(`${baseUrl}/api/cron/products-bulk-details-runner`, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${cronSecret}`,
-        "x-bulk-job-id": safeStr(params.jobId),
-      },
-      signal: controller.signal,
-      cache: "no-store",
-    });
-
-    const text = await res.text();
-    let data: any = null;
-
-    try {
-      data = text ? JSON.parse(text) : null;
-    } catch {
-      data = null;
-    }
-
-    if (!res.ok) {
-      return {
-        ok: false as const,
-        skipped: false,
-        reason:
-          safeStr(data?.error) ||
-          safeStr(text) ||
-          `Runner kick failed with status ${res.status}`,
-      };
-    }
-
-    return {
-      ok: true as const,
-      skipped: false,
-      response: data,
-    };
-  } catch (error: any) {
-    return {
-      ok: false as const,
-      skipped: false,
-      reason: safeStr(error?.message || "Runner kick failed"),
-    };
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
 export async function POST(req: Request) {
   const guard = await assertAdminWriteAccess();
   if (!guard.ok) return guard.res;
@@ -241,7 +149,7 @@ export async function POST(req: Request) {
         {
           ok: false,
           error:
-            "Ek bulk product details job already chal rahi hai. Nayi job start karne se pehle current job complete ya cancel karo.",
+            "Ek bulk product details job already saved hai. Pehle current job ko resume, complete ya cancel karo.",
           activeJob: toPlainBulkJob(existingActiveJob),
         },
         { status: 409 }
@@ -281,24 +189,31 @@ export async function POST(req: Request) {
       return badRequest(safeStr(error?.message || "Invalid bulk details input"));
     }
 
+    const now = new Date();
+
     const created = await createBulkUploadJob({
       jobType: "product_details",
       createdBy,
       jobLabel: config.dryRun
-        ? "Bulk Product Details Validation (Row-by-Row)"
-        : "Bulk Product Details Upload (Row-by-Row)",
+        ? "Bulk Product Details Validation (Manual Resume)"
+        : "Bulk Product Details Upload (Manual Resume)",
       batchSize: ROW_BY_ROW_BATCH_SIZE,
       totalItems: rows.length,
       meta: {
         dryRun: config.dryRun,
         category: config.category,
         duplicateStrategy: config.duplicateStrategy,
-        processingMode: "row_by_row",
-        runnerKickRequestedAt: new Date(),
+        processingMode: "manual_row_by_row_resume",
+        executionMode: "manual_only",
+        autoRunnerEnabled: false,
+        createdVia: "bulk_details_page",
+        jobSavedAt: now,
       },
       config: {
         ...config,
-        processingMode: "row_by_row",
+        processingMode: "manual_row_by_row_resume",
+        executionMode: "manual_only",
+        autoRunnerEnabled: false,
       },
       input: {
         rows,
@@ -313,7 +228,13 @@ export async function POST(req: Request) {
         duplicateStrategy: config.duplicateStrategy,
         dryRun: config.dryRun,
         category: config.category,
-        processingMode: "row_by_row",
+        processingMode: "manual_row_by_row_resume",
+        executionMode: "manual_only",
+        autoRunnerEnabled: false,
+        needsManualResume: true,
+        resumeCount: 0,
+        lastResumeRequestedAt: null,
+        lastPausedAt: null,
         comboSync: {
           attempted: 0,
           succeeded: 0,
@@ -334,44 +255,12 @@ export async function POST(req: Request) {
         : "bulk-product-details-upload-failures",
     });
 
-    const createdPlainJob = toPlainBulkJob(created);
-
-    const runnerKick = await kickRunnerOnce({
-      req,
-      jobId: safeStr(created?._id),
-    });
-
-    const messageParts = [
-      "Bulk details job created successfully.",
-      "Processing backend me row-by-row continue hogi.",
-    ];
-
-    if (runnerKick.ok) {
-      messageParts.push("Initial runner kick successful.");
-    } else if (runnerKick.skipped) {
-      messageParts.push(safeStr(runnerKick.reason));
-    } else {
-      messageParts.push(
-        `Initial runner kick failed: ${safeStr(runnerKick.reason)}`
-      );
-    }
-
     return NextResponse.json(
       {
         ok: true,
-        message: messageParts.join(" "),
-        job: createdPlainJob,
-        runnerKick: runnerKick.ok
-          ? {
-              ok: true,
-              stats: runnerKick.response?.stats || null,
-              message: safeStr(runnerKick.response?.message || ""),
-            }
-          : {
-              ok: false,
-              skipped: Boolean(runnerKick.skipped),
-              reason: safeStr(runnerKick.reason || ""),
-            },
+        message:
+          "Bulk details job save ho gayi hai. Excel/CSV database me stored hai. Ab ye job manual resume/start flow se row-by-row process hogi.",
+        job: toPlainBulkJob(created),
       },
       { status: 201 }
     );
