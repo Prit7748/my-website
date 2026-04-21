@@ -22,9 +22,8 @@ export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-const DEFAULT_MAX_STEPS = 20;
-const MAX_STEPS_LIMIT = 50;
-const SOFT_TIME_BUDGET_MS = 20_000;
+const DEFAULT_MAX_STEPS = 1;
+const MAX_STEPS_LIMIT = 1;
 const CLAIM_LOCK_MS = 90_000;
 const STALE_LOCK_RECOVERY_MS = 180_000;
 const EXECUTION_BATCH_SIZE = 10;
@@ -480,7 +479,9 @@ async function processSingleStep(jobDoc: any) {
       toIndex,
     });
 
-    const nextPipelineStage = safeStr(batchResult?.summaryPatch?.pipelineStage).toLowerCase();
+    const nextPipelineStage = safeStr(
+      batchResult?.summaryPatch?.pipelineStage
+    ).toLowerCase();
     const isExecutionStage = nextPipelineStage === "execution";
     const isCompletedStage = nextPipelineStage === "completed";
 
@@ -546,6 +547,88 @@ async function processSingleStep(jobDoc: any) {
       reason: safeStr(error?.message || "Bulk details processing failed"),
     };
   }
+}
+
+function buildResponseMessage(args: {
+  stepResult: any;
+  finalJob: any;
+}) {
+  const { stepResult, finalJob } = args;
+
+  if (stepResult?.ok && stepResult?.blocked) {
+    if (stepResult?.cancelled || safeStr(finalJob?.status) === "cancelled") {
+      return "Cancel request apply kar di gayi.";
+    }
+
+    if (
+      stepResult?.paused ||
+      safeStr(finalJob?.status) === "queued" &&
+        Boolean(finalJob?.summary?.needsManualResume)
+    ) {
+      return "Pause request apply kar di gayi.";
+    }
+
+    if (
+      safeStr(finalJob?.status) === "completed" ||
+      safeStr(finalJob?.status) === "completed_with_errors"
+    ) {
+      return safeStr(finalJob?.resultMessage || "Bulk job completed successfully.");
+    }
+
+    return safeStr(stepResult?.reason || "Processing stopped.");
+  }
+
+  if (!stepResult?.ok) {
+    return safeStr(stepResult?.reason || "Processing failed.");
+  }
+
+  return safeStr(
+    stepResult?.batchResult?.note ||
+      finalJob?.resultMessage ||
+      "One processing step completed successfully."
+  );
+}
+
+function buildProcessingState(args: {
+  stepResult: any;
+  finalJob: any;
+}) {
+  const { stepResult, finalJob } = args;
+  const finalStatus = safeStr(finalJob?.status);
+  const finalStage = getBulkDetailsDetailedStage(finalJob);
+
+  if (finalStatus === "completed" || finalStatus === "completed_with_errors") {
+    return "finished";
+  }
+
+  if (finalStatus === "failed") {
+    return "failed";
+  }
+
+  if (finalStatus === "cancelled") {
+    return "cancelled";
+  }
+
+  if (isPauseRequested(finalJob)) {
+    return "paused";
+  }
+
+  if (stepResult?.ok && stepResult?.blocked) {
+    if (stepResult?.cancelled) return "cancelled";
+    if (stepResult?.paused) return "paused";
+    if (stepResult?.finished) return "finished";
+    return "ready";
+  }
+
+  if (!stepResult?.ok) {
+    return "failed";
+  }
+
+  if (finalStage === "completed") {
+    return "finished";
+  }
+
+  return "processed";
 }
 
 async function runManualProcessor(req: NextRequest) {
@@ -668,117 +751,40 @@ async function runManualProcessor(req: NextRequest) {
   }
 
   const startedAtMs = Date.now();
-  let processedSteps = 0;
-  let failedSteps = 0;
-  let lastMessage = "";
-
-  while (processedSteps < maxSteps) {
-    const elapsed = Date.now() - startedAtMs;
-    if (elapsed >= SOFT_TIME_BUDGET_MS) {
-      break;
-    }
-
-    const currentJob = await getOwnedJob(jobId, createdBy);
-    if (!currentJob) {
-      return NextResponse.json(
-        { ok: false, error: "Job not found during processing" },
-        { status: 404 }
-      );
-    }
-
-    job = await maybePrepareExecutionProgressWindow(jobId, createdBy);
-
-    if (isFinalBulkJobStatus(job.status)) {
-      break;
-    }
-
-    if (isCancelRequested(job)) {
-      job = await applyCancelIfRequested(jobId, createdBy);
-      lastMessage = "Cancel request apply kar di gayi.";
-      break;
-    }
-
-    if (isPauseRequested(job)) {
-      job = await markJobPaused(
-        jobId,
-        createdBy,
-        "Bulk job paused. Resume button se wahi se continue kar sakte ho."
-      );
-      lastMessage = "Pause request apply kar di gayi.";
-      break;
-    }
-
-    if (!hasPendingRows(job)) {
-      job = await finalizeBulkUploadJob({
-        jobId,
-        createdBy,
-        message: "Bulk job completed successfully.",
-      });
-      lastMessage = "Bulk job completed successfully.";
-      break;
-    }
-
-    const result = await processSingleStep(job);
-
-    if (result.ok && !result.blocked) {
-      processedSteps += 1;
-      job = result.updatedJob || job;
-      lastMessage = safeStr(result.batchResult?.note || "One processing step completed.");
-      continue;
-    }
-
-    if (result.ok && result.blocked) {
-      job = result.updatedJob || job;
-      lastMessage = safeStr(result.reason || "Processing stopped.");
-      break;
-    }
-
-    failedSteps += 1;
-    job = result.failedJob || job;
-    lastMessage = safeStr(result.reason || "Processing failed.");
-    break;
-  }
+  const stepResult = await processSingleStep(job);
 
   const latestJob = await getOwnedJob(jobId, createdBy);
-  const finalJob = latestJob || job;
-  const finalStatus = safeStr(finalJob?.status);
-  const finalStage = getBulkDetailsDetailedStage(finalJob);
+  const finalJob =
+    latestJob ||
+    stepResult?.updatedJob ||
+    stepResult?.failedJob ||
+    job;
 
-  let processingState = "idle";
+  const message = buildResponseMessage({
+    stepResult,
+    finalJob,
+  });
 
-  if (finalStatus === "completed" || finalStatus === "completed_with_errors") {
-    processingState = "finished";
-  } else if (finalStatus === "failed") {
-    processingState = "failed";
-  } else if (finalStatus === "cancelled") {
-    processingState = "cancelled";
-  } else if (isPauseRequested(finalJob)) {
-    processingState = "paused";
-  } else if (finalStage === "execution") {
-    processingState = processedSteps > 0 ? "processed" : "ready";
-  } else {
-    processingState = processedSteps > 0 ? "processed" : "ready";
-  }
+  const processingState = buildProcessingState({
+    stepResult,
+    finalJob,
+  });
 
   return NextResponse.json(
     {
-      ok: true,
-      message:
-        lastMessage ||
-        (processedSteps > 0
-          ? `${processedSteps} processing step(s) completed successfully.`
-          : "No steps processed in this request."),
+      ok: stepResult?.ok !== false,
+      message,
       processingState,
       stats: {
-        processedSteps,
-        failedSteps,
+        processedSteps: stepResult?.ok && !stepResult?.blocked ? 1 : 0,
+        failedSteps: stepResult?.ok ? 0 : 1,
         elapsedMs: Date.now() - startedAtMs,
         maxSteps,
       },
       job: toPlainBulkJob(finalJob),
     },
     {
-      status: 200,
+      status: stepResult?.ok === false ? 500 : 200,
       headers: {
         "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
         Pragma: "no-cache",

@@ -33,11 +33,11 @@ export type BulkPipelineStage = BulkDetailsPipelineStage;
 
 export type PreparedBulkDetailsRow = {
   rowNumber: number;
-  A: string; // unique_id / sku
-  B: string; // subject_code
-  C: string; // session
-  D: string; // language
-  E: string; // course_code
+  A: string;
+  B: string;
+  C: string;
+  D: string;
+  E: string;
 };
 
 export type PreparedExecutionRow = {
@@ -858,7 +858,7 @@ async function loadExistingLiveProductSkuSet(rows: PreparedBulkDetailsRow[]) {
 
   const existingDocs: Array<{ sku?: string }> = await Product.find({
     sku: { $in: skuList },
-    $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+    deletedAt: null,
   })
     .select("sku")
     .lean();
@@ -916,8 +916,8 @@ async function buildSkuScanResult(rows: PreparedBulkDetailsRow[], batchNumber: n
       pushFailureRow(failures, {
         itemIndex,
         rowNumber,
-        batchNumber,
         identifier: sku,
+        batchNumber,
         sku,
         status: "skipped",
         reason:
@@ -1485,7 +1485,7 @@ async function loadExistingProductsForExecution(
 
   const docs: any[] = await Product.find({
     sku: { $in: skus },
-    $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+    deletedAt: null,
   })
     .select(PRODUCT_SYNC_SELECT)
     .lean();
@@ -1598,24 +1598,6 @@ function buildNextStageLabel(stage: BulkDetailsDetailedStage) {
   return "Completed";
 }
 
-function buildDeferredSyncPatch(prev: any, label: string) {
-  const existing =
-    prev && typeof prev === "object" && !Array.isArray(prev)
-      ? { ...prev }
-      : {};
-
-  return {
-    attempted: safeNum(existing.attempted, 0),
-    succeeded: safeNum(existing.succeeded, 0),
-    failed: safeNum(existing.failed, 0),
-    errors: Array.isArray(existing.errors) ? existing.errors : [],
-    mode: "deferred",
-    note:
-      safeStr(existing.note) ||
-      `${label} sync bulk upload ke main execution path se hata di gayi hai. Isko notifications/sync panel se alag run karo.`,
-  };
-}
-
 export async function processBulkDetailsJobBatch(args: {
   job: any;
   batchNumber: number;
@@ -1661,6 +1643,7 @@ export async function processBulkDetailsJobBatch(args: {
       stageCursor: 0,
       nextStageRows: [],
       executionRows: [],
+      pricingContext: null,
     });
 
     const skuScan = {
@@ -2128,9 +2111,6 @@ export async function processBulkDetailsJobBatch(args: {
         nextStageTotalItems: accumulatedExecutionRows.length,
         pricingValidation,
         execution,
-        comboSync: buildDeferredSyncPatch(summary?.comboSync, "Combo"),
-        hardcopySync: buildDeferredSyncPatch(summary?.hardcopySync, "Hardcopy"),
-        availabilitySync: buildDeferredSyncPatch(summary?.availabilitySync, "Availability"),
       };
 
       return {
@@ -2249,12 +2229,9 @@ export async function processBulkDetailsJobBatch(args: {
 
         availability: "want_to_buy",
         importantNote: generated.importantNote,
-
         shortDesc: generated.shortDesc,
         descriptionHtml: generated.descriptionHtml,
-
         isDigital: deriveIsDigitalFromCategory(config.category),
-
         metaTitle: generated.metaTitle,
         metaDescription: generated.metaDescription,
 
@@ -2282,8 +2259,7 @@ export async function processBulkDetailsJobBatch(args: {
             identifier: row.sku || row.subjectCodeRaw,
             sku: row.sku,
             status: "skipped",
-            reason:
-              "Execution stage me duplicate live product mila. Row ignored.",
+            reason: "Execution stage me duplicate live product mila. Row ignored.",
             raw: buildFailureRawExecutionRow(row),
           });
           continue;
@@ -2378,11 +2354,11 @@ export async function processBulkDetailsJobBatch(args: {
       endIndex >= executionInputRows.length - 1 ? new Date().toISOString() : null,
     lastNote:
       endIndex >= executionInputRows.length - 1
-        ? `Final product upload/create complete. Created ${safeNum(summary?.execution?.createdRows, 0) + createdRows}, Updated ${safeNum(summary?.execution?.updatedRows, 0) + updatedRows}, Skipped ${safeNum(summary?.execution?.skippedRows, 0) + skippedRows}, Failed ${safeNum(summary?.execution?.failedRows, 0) + failedRows}. Post-upload syncs ko alag panel se run karna hai.`
+        ? `Final product upload/create complete. Created ${safeNum(summary?.execution?.createdRows, 0) + createdRows}, Updated ${safeNum(summary?.execution?.updatedRows, 0) + updatedRows}, Skipped ${safeNum(summary?.execution?.skippedRows, 0) + skippedRows}, Failed ${safeNum(summary?.execution?.failedRows, 0) + failedRows}. Post-upload syncs alag se run hongi.`
         : `Final product upload/create running: ${Math.min(
             executionInputRows.length,
             safeNum(summary?.execution?.processedRows, 0) + batchExecutionRows.length
-          )}/${executionInputRows.length} rows processed. Created ${safeNum(summary?.execution?.createdRows, 0) + createdRows}, Updated ${safeNum(summary?.execution?.updatedRows, 0) + updatedRows}. Post-upload syncs deferred hain.`,
+          )}/${executionInputRows.length} rows processed. Created ${safeNum(summary?.execution?.createdRows, 0) + createdRows}, Updated ${safeNum(summary?.execution?.updatedRows, 0) + updatedRows}. Post-upload syncs abhi intentionally skip hain.`,
   };
 
   const nextSummary = {
@@ -2398,9 +2374,28 @@ export async function processBulkDetailsJobBatch(args: {
     ),
     nextStageTotalItems: 0,
     execution,
-    comboSync: buildDeferredSyncPatch(summary?.comboSync, "Combo"),
-    hardcopySync: buildDeferredSyncPatch(summary?.hardcopySync, "Hardcopy"),
-    availabilitySync: buildDeferredSyncPatch(summary?.availabilitySync, "Availability"),
+    comboSync: {
+      attempted: 0,
+      succeeded: 0,
+      failed: 0,
+      errors: [],
+      mode: "deferred",
+    },
+    hardcopySync: {
+      attempted: 0,
+      succeeded: 0,
+      failed: 0,
+      errors: [],
+      mode: "deferred",
+    },
+    availabilitySync: {
+      attempted: 0,
+      succeeded: 0,
+      failed: 0,
+      errors: [],
+      mode: "deferred",
+    },
+    postUploadSyncDeferred: true,
   };
 
   return {
