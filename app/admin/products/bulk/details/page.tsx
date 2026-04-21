@@ -178,6 +178,40 @@ type ProcessJobResponse = {
   job?: BulkJob | null;
 };
 
+type SavedJobsSummary = {
+  total?: number;
+  active?: number;
+  final?: number;
+};
+
+type SavedJobsResponse = {
+  ok?: boolean;
+  error?: string;
+  message?: string;
+  jobs?: BulkJob[];
+  summary?: SavedJobsSummary;
+};
+
+type SavedJobsAction =
+  | "delete_selected"
+  | "delete_all"
+  | "cancel_selected"
+  | "cancel_all_active";
+
+type SavedJobsActionResponse = {
+  ok?: boolean;
+  error?: string;
+  message?: string;
+  jobs?: BulkJob[];
+  summary?: SavedJobsSummary;
+  stats?: {
+    deletedCount?: number;
+    cancelledCount?: number;
+    modifiedCount?: number;
+    matchedCount?: number;
+  };
+};
+
 type DetailedStage =
   | "sku_scan"
   | "course_validation"
@@ -216,11 +250,13 @@ BHIC132HIN202526,BHIC 132,2025-2026,Hindi,BAHIH
 BEGC101ENG202526,BEGC 101,2025-2026,English,BAEGH
 BPSC101ENG202526,BPSC 101,2025-2026,English,"BAPSH, BAG"`;
 
-// UI same rakhi gayi hai, lekin processing ko zyada responsive aur timeout-safe
-// banane ke liye ye values low rakhi gayi hain.
-const POLL_INTERVAL_MS = 3000;
-const PROCESS_MAX_STEPS_PER_REQUEST = 1;
-const PROCESS_LOOP_DELAY_MS = 180;
+const POLL_INTERVAL_MS = 5000;
+/**
+ * Live site par FUNCTION_INVOCATION_TIMEOUT reduce karne ke liye
+ * ek request me kam steps rakh rahe hain.
+ */
+const PROCESS_MAX_STEPS_PER_REQUEST = 3;
+const PROCESS_LOOP_DELAY_MS = 250;
 
 const STAGE_ORDER: DetailedStage[] = [
   "sku_scan",
@@ -299,6 +335,11 @@ function isFinalJobStatus(status: string) {
     s === "failed" ||
     s === "cancelled"
   );
+}
+
+function isActiveJobStatus(status: string) {
+  const s = safeStr(status);
+  return s === "queued" || s === "running" || s === "processing_batch";
 }
 
 function statusPillClasses(status: string) {
@@ -641,8 +682,17 @@ function computeOverallVisualPercent(summary: Record<string, any> | undefined | 
   );
 }
 
-function pickJobFromActiveResponse(data: ActiveJobResponse | null | undefined) {
-  return data?.job || data?.activeJob || data?.latestJob || null;
+function getJobCategory(job?: BulkJob | null) {
+  return (
+    safeStr(job?.summary?.category) ||
+    safeStr(job?.config?.category) ||
+    safeStr(job?.meta?.category) ||
+    "—"
+  );
+}
+
+function getSavedJobStageLabel(job?: BulkJob | null) {
+  return getDetailedStageLabel(getDetailedStage(job?.summary || {}));
 }
 
 export default function BulkDetailsPage() {
@@ -678,6 +728,13 @@ export default function BulkDetailsPage() {
   const [isRestartingJob, setIsRestartingJob] = useState(false);
   const [isDeletingJob, setIsDeletingJob] = useState(false);
   const [defaultsHydrated, setDefaultsHydrated] = useState(false);
+
+  const [isSavedJobsOpen, setIsSavedJobsOpen] = useState(false);
+  const [isLoadingSavedJobs, setIsLoadingSavedJobs] = useState(false);
+  const [isSavedJobsActionRunning, setIsSavedJobsActionRunning] = useState(false);
+  const [savedJobs, setSavedJobs] = useState<BulkJob[]>([]);
+  const [savedJobsSummary, setSavedJobsSummary] = useState<SavedJobsSummary>({});
+  const [selectedSavedJobIds, setSelectedSavedJobIds] = useState<string[]>([]);
 
   const [defaultTemplateMap, setDefaultTemplateMap] =
     useState<Record<string, DefaultTemplateItem>>(fallbackTemplateMap);
@@ -946,7 +1003,6 @@ export default function BulkDetailsPage() {
   const canCancelSavedJob = useMemo(() => {
     return Boolean(
       currentJob &&
-        !isFinalJobStatus(safeStr(currentJob.status)) &&
         !isCancellingJob &&
         !isRestartingJob &&
         !isDeletingJob
@@ -1027,6 +1083,33 @@ export default function BulkDetailsPage() {
   );
   const executionSummary = useMemo(() => getExecutionBlock(summary), [summary]);
 
+  const allSavedJobIds = useMemo(
+    () => savedJobs.map((job) => safeStr(job._id)).filter(Boolean),
+    [savedJobs]
+  );
+
+  const allSavedJobsSelected = useMemo(() => {
+    if (!allSavedJobIds.length) return false;
+    return allSavedJobIds.every((id) => selectedSavedJobIds.includes(id));
+  }, [allSavedJobIds, selectedSavedJobIds]);
+
+  const selectedSavedJobCount = useMemo(
+    () => selectedSavedJobIds.length,
+    [selectedSavedJobIds]
+  );
+
+  const activeSavedJobsCount = useMemo(() => {
+    const apiCount = safeNum(savedJobsSummary.active, -1);
+    if (apiCount >= 0) return apiCount;
+    return savedJobs.filter((job) => isActiveJobStatus(safeStr(job.status))).length;
+  }, [savedJobs, savedJobsSummary]);
+
+  const finalSavedJobsCount = useMemo(() => {
+    const apiCount = safeNum(savedJobsSummary.final, -1);
+    if (apiCount >= 0) return apiCount;
+    return savedJobs.filter((job) => isFinalJobStatus(safeStr(job.status))).length;
+  }, [savedJobs, savedJobsSummary]);
+
   async function fetchCurrentJob(showSpinner = false) {
     if (showSpinner) setIsRefreshingJob(true);
 
@@ -1041,14 +1124,75 @@ export default function BulkDetailsPage() {
 
       const data = (await safeReadJson(res)) as ActiveJobResponse;
 
-      if (!res.ok || !data?.ok) return;
+      if (!res.ok || !data?.ok) {
+        return;
+      }
 
-      setCurrentJob(pickJobFromActiveResponse(data));
+      setCurrentJob(data?.job || null);
     } catch {
       // ignore
     } finally {
       if (showSpinner) setIsRefreshingJob(false);
     }
+  }
+
+  async function loadSavedJobs(showSpinner = false) {
+    if (showSpinner) setIsLoadingSavedJobs(true);
+
+    try {
+      const res = await fetch(
+        "/api/admin/products/bulk/details/jobs/saved?includeActive=1&limit=200",
+        {
+          credentials: "include",
+          cache: "no-store",
+        }
+      );
+
+      const data = (await safeReadJson(res)) as SavedJobsResponse;
+
+      if (!res.ok || !data?.ok) {
+        throw new Error(
+          safeStr(data?.error || data?.message || "Failed to load saved jobs")
+        );
+      }
+
+      const jobs = Array.isArray(data?.jobs) ? data.jobs : [];
+      setSavedJobs(jobs);
+      setSavedJobsSummary(data?.summary || {});
+      setSelectedSavedJobIds((prev) =>
+        prev.filter((id) => jobs.some((job) => safeStr(job._id) === id))
+      );
+    } catch (error: any) {
+      setServerMessage(safeStr(error?.message || "Saved jobs load failed"));
+      setServerMessageType("error");
+    } finally {
+      if (showSpinner) setIsLoadingSavedJobs(false);
+    }
+  }
+
+  function toggleSavedJobsPanel() {
+    setIsSavedJobsOpen((prev) => {
+      const next = !prev;
+      if (next) {
+        loadSavedJobs(true);
+      }
+      return next;
+    });
+  }
+
+  function toggleSavedJobSelection(jobId: string) {
+    const id = safeStr(jobId);
+    if (!id) return;
+
+    setSelectedSavedJobIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
+    );
+  }
+
+  function toggleSelectAllSavedJobs() {
+    setSelectedSavedJobIds((prev) =>
+      allSavedJobsSelected ? [] : [...allSavedJobIds]
+    );
   }
 
   async function sendJobAction(
@@ -1083,6 +1227,48 @@ export default function BulkDetailsPage() {
     return data?.job || null;
   }
 
+  async function runSavedJobsAction(
+    action: SavedJobsAction,
+    jobIds: string[] = [],
+    successMessage = ""
+  ) {
+    setIsSavedJobsActionRunning(true);
+
+    try {
+      const res = await fetch("/api/admin/products/bulk/details/jobs/saved", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          action,
+          jobIds,
+        }),
+      });
+
+      const data = (await safeReadJson(res)) as SavedJobsActionResponse;
+
+      if (!res.ok || !data?.ok) {
+        throw new Error(
+          safeStr(data?.error || data?.message || "Saved jobs action failed")
+        );
+      }
+
+      const jobs = Array.isArray(data?.jobs) ? data.jobs : [];
+      setSavedJobs(jobs);
+      setSavedJobsSummary(data?.summary || {});
+      setSelectedSavedJobIds((prev) =>
+        prev.filter((id) => jobs.some((job) => safeStr(job._id) === id))
+      );
+
+      setServerMessage(successMessage || safeStr(data?.message || "Action completed"));
+      setServerMessageType("success");
+
+      await fetchCurrentJob(false);
+    } finally {
+      setIsSavedJobsActionRunning(false);
+    }
+  }
+
   async function runProcessingLoop(jobId: string) {
     if (!jobId) return;
 
@@ -1114,24 +1300,42 @@ export default function BulkDetailsPage() {
 
         if (!res.ok || !data?.ok) {
           setServerMessage(
-            safeStr(data?.error || data?.message || "Job processing failed")
+            safeStr(
+              data?.error ||
+                data?.message ||
+                "Job processing request failed. Resume button se continue karo."
+            )
           );
           setServerMessageType("error");
           break;
         }
 
-        const nextJob = data?.job || null;
-        if (nextJob) {
-          setCurrentJob(nextJob);
+        if (data?.job) {
+          setCurrentJob(data.job);
         }
 
-        const processingState = safeStr(data?.processingState).toLowerCase();
+        const processingState = safeStr(data?.processingState);
         const message = safeStr(data?.message);
-        const finalJobStatus = safeStr(nextJob?.status);
-        const nextNeedsManualResume = safeBool(
-          nextJob?.summary?.needsManualResume,
-          false
-        );
+        const finalJobStatus = safeStr(data?.job?.status);
+
+        if (processingState === "processed") {
+          await sleep(PROCESS_LOOP_DELAY_MS);
+          continue;
+        }
+
+        if (processingState === "finished") {
+          setServerMessage(message || "Bulk job completed.");
+          setServerMessageType(
+            finalJobStatus === "completed" ? "success" : "info"
+          );
+          break;
+        }
+
+        if (processingState === "paused") {
+          setServerMessage(message || "Bulk job paused.");
+          setServerMessageType("info");
+          break;
+        }
 
         if (processingState === "cancelled") {
           setServerMessage(message || "Bulk job cancelled.");
@@ -1145,43 +1349,20 @@ export default function BulkDetailsPage() {
           break;
         }
 
-        if (processingState === "paused" || nextNeedsManualResume) {
-          setServerMessage(message || "Bulk job paused.");
-          setServerMessageType("info");
-          break;
-        }
-
-        if (processingState === "finished" || isFinalJobStatus(finalJobStatus)) {
-          setServerMessage(
-            message ||
-              (finalJobStatus === "completed"
-                ? "Bulk job completed."
-                : finalJobStatus === "completed_with_errors"
-                ? "Bulk job completed with errors."
-                : finalJobStatus === "failed"
-                ? "Bulk job failed."
-                : finalJobStatus === "cancelled"
-                ? "Bulk job cancelled."
-                : "Bulk job finished.")
-          );
-          setServerMessageType(
-            finalJobStatus === "completed" ? "success" : finalJobStatus === "failed" ? "error" : "info"
-          );
-          break;
-        }
-
         if (message) {
           setServerMessage(message);
           setServerMessageType("info");
         }
-
-        await sleep(PROCESS_LOOP_DELAY_MS);
+        break;
       }
     } finally {
       if (processorRunIdRef.current === runId) {
         setIsProcessingJob(false);
       }
       await fetchCurrentJob(false);
+      if (isSavedJobsOpen) {
+        await loadSavedJobs(false);
+      }
     }
   }
 
@@ -1199,6 +1380,7 @@ export default function BulkDetailsPage() {
         );
         setServerMessageType("info");
       }
+      await loadSavedJobs(false);
       await runProcessingLoop(safeStr(resumedJob?._id || jobId));
     } catch (error: any) {
       setServerMessage(safeStr(error?.message || "Resume failed"));
@@ -1292,7 +1474,7 @@ export default function BulkDetailsPage() {
 
       resetFileInput();
       setForm((prev) => ({ ...prev, csvText: "" }));
-
+      await loadSavedJobs(false);
       await resumeAndProcessJob(data.job, true);
     } catch (error: any) {
       const errMsg = safeStr(error?.message || "Failed to create bulk job");
@@ -1318,6 +1500,7 @@ export default function BulkDetailsPage() {
         "Pause request save ho gayi hai. Current processing request complete hone ke baad job ruk jayegi."
       );
       setServerMessageType("info");
+      await loadSavedJobs(false);
     } catch (error: any) {
       setServerMessage(safeStr(error?.message || "Pause failed"));
       setServerMessageType("error");
@@ -1340,10 +1523,11 @@ export default function BulkDetailsPage() {
     processorStopRef.current = true;
 
     try {
-      const cancelledJob = await sendJobAction(jobId, "cancel", true);
-      setCurrentJob(cancelledJob || currentJob);
-      setServerMessage("Current bulk job cancelled.");
-      setServerMessageType("info");
+      await runSavedJobsAction(
+        "cancel_selected",
+        [jobId],
+        "Current bulk job cancelled."
+      );
     } catch (error: any) {
       setServerMessage(safeStr(error?.message || "Cancel failed"));
       setServerMessageType("error");
@@ -1372,6 +1556,7 @@ export default function BulkDetailsPage() {
         "Job restart ho gayi hai. Ab ye Unique SKU Scan stage se dubara chalegi."
       );
       setServerMessageType("success");
+      await loadSavedJobs(false);
     } catch (error: any) {
       setServerMessage(safeStr(error?.message || "Restart failed"));
       setServerMessageType("error");
@@ -1394,15 +1579,98 @@ export default function BulkDetailsPage() {
     processorStopRef.current = true;
 
     try {
-      await sendJobAction(jobId, "delete", true);
-      setServerMessage("Saved bulk job permanently delete ho gayi.");
-      setServerMessageType("success");
-      setCurrentJob(null);
+      await runSavedJobsAction(
+        "delete_selected",
+        [jobId],
+        "Saved bulk job delete/cancel action complete ho gayi."
+      );
     } catch (error: any) {
       setServerMessage(safeStr(error?.message || "Delete failed"));
       setServerMessageType("error");
     } finally {
       setIsDeletingJob(false);
+    }
+  }
+
+  async function cancelSelectedSavedJobs() {
+    if (!selectedSavedJobIds.length) {
+      alert("Pehle jobs select karo.");
+      return;
+    }
+
+    const ok = window.confirm(
+      `${selectedSavedJobIds.length} selected job(s) ko cancel karna hai?`
+    );
+    if (!ok) return;
+
+    try {
+      await runSavedJobsAction(
+        "cancel_selected",
+        selectedSavedJobIds,
+        "Selected running job(s) cancelled."
+      );
+    } catch (error: any) {
+      setServerMessage(safeStr(error?.message || "Bulk cancel failed"));
+      setServerMessageType("error");
+    }
+  }
+
+  async function deleteSelectedSavedJobs() {
+    if (!selectedSavedJobIds.length) {
+      alert("Pehle jobs select karo.");
+      return;
+    }
+
+    const ok = window.confirm(
+      `${selectedSavedJobIds.length} selected job(s) ke liye delete/cancel action chalani hai? Final jobs delete hongi aur running jobs force-cancel hongi.`
+    );
+    if (!ok) return;
+
+    try {
+      await runSavedJobsAction(
+        "delete_selected",
+        selectedSavedJobIds,
+        "Selected jobs ke liye delete/cancel action complete ho gayi."
+      );
+    } catch (error: any) {
+      setServerMessage(safeStr(error?.message || "Bulk delete failed"));
+      setServerMessageType("error");
+    }
+  }
+
+  async function cancelAllActiveSavedJobs() {
+    const ok = window.confirm(
+      "Kya aap sabhi active/running saved jobs ko cancel karna chahte hain?"
+    );
+    if (!ok) return;
+
+    try {
+      await runSavedJobsAction(
+        "cancel_all_active",
+        [],
+        "All active jobs cancelled."
+      );
+    } catch (error: any) {
+      setServerMessage(safeStr(error?.message || "Cancel all active failed"));
+      setServerMessageType("error");
+    }
+  }
+
+  async function deleteAllSavedJobs() {
+    const ok = window.confirm(
+      "Kya aap sabhi final saved jobs ko delete karna chahte hain? Running jobs force-cancel bhi ho sakti hain."
+    );
+    if (!ok) return;
+
+    try {
+      await runSavedJobsAction(
+        "delete_all",
+        [],
+        "Delete all / cancel action complete ho gayi."
+      );
+    } catch (error: any) {
+      setServerMessage(safeStr(error?.message || "Delete all failed"));
+      setServerMessageType("error");
     }
   }
 
@@ -1422,7 +1690,8 @@ export default function BulkDetailsPage() {
     const a = document.createElement("a");
     a.href = url;
     a.download =
-      safeStr(currentJob?.downloadFileName || "bulk-product-details-failures") + ".csv";
+      safeStr(currentJob?.downloadFileName || "bulk-product-details-failures") +
+      ".csv";
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
@@ -1433,6 +1702,7 @@ export default function BulkDetailsPage() {
     mountedRef.current = true;
     loadDefaultTemplates();
     fetchCurrentJob(true);
+    loadSavedJobs(false);
 
     return () => {
       mountedRef.current = false;
@@ -1448,7 +1718,9 @@ export default function BulkDetailsPage() {
       isPausingJob ||
       isResumingJob ||
       isRestartingJob ||
-      isDeletingJob;
+      isDeletingJob ||
+      isLoadingSavedJobs ||
+      isSavedJobsActionRunning;
 
     if (active && !longTaskActiveRef.current) {
       notifyLongTaskStart();
@@ -1468,6 +1740,8 @@ export default function BulkDetailsPage() {
     isResumingJob,
     isRestartingJob,
     isDeletingJob,
+    isLoadingSavedJobs,
+    isSavedJobsActionRunning,
   ]);
 
   useEffect(() => {
@@ -1479,7 +1753,11 @@ export default function BulkDetailsPage() {
     pollTimerRef.current = window.setInterval(() => {
       if (document.visibilityState === "hidden") return;
       if (isProcessingJob) return;
+
       fetchCurrentJob(false);
+      if (isSavedJobsOpen) {
+        loadSavedJobs(false);
+      }
     }, POLL_INTERVAL_MS);
 
     return () => {
@@ -1488,17 +1766,23 @@ export default function BulkDetailsPage() {
         pollTimerRef.current = null;
       }
     };
-  }, [isProcessingJob]);
+  }, [isProcessingJob, isSavedJobsOpen]);
 
   useEffect(() => {
     const onFocus = () => {
       if (isProcessingJob) return;
       fetchCurrentJob(false);
+      if (isSavedJobsOpen) {
+        loadSavedJobs(false);
+      }
     };
 
     const onVisibilityChange = () => {
       if (document.visibilityState === "visible" && !isProcessingJob) {
         fetchCurrentJob(false);
+        if (isSavedJobsOpen) {
+          loadSavedJobs(false);
+        }
       }
     };
 
@@ -1509,7 +1793,7 @@ export default function BulkDetailsPage() {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [isProcessingJob]);
+  }, [isProcessingJob, isSavedJobsOpen]);
 
   useEffect(() => {
     return () => {
@@ -1546,6 +1830,18 @@ export default function BulkDetailsPage() {
             </div>
 
             <div className="flex items-center gap-3 flex-wrap">
+              <button
+                type="button"
+                onClick={toggleSavedJobsPanel}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-950 text-white transition font-semibold shadow-sm"
+              >
+                <Database size={18} />
+                Saved Jobs
+                <span className="inline-flex items-center justify-center min-w-[22px] h-[22px] px-2 rounded-full bg-white/15 text-xs font-extrabold">
+                  {safeNum(savedJobsSummary.total, savedJobs.length)}
+                </span>
+              </button>
+
               <Link
                 href="/admin/products/bulk/details/default-patterns"
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white transition font-semibold shadow-sm"
@@ -1556,13 +1852,18 @@ export default function BulkDetailsPage() {
 
               <button
                 type="button"
-                onClick={() => fetchCurrentJob(true)}
-                disabled={isRefreshingJob}
+                onClick={() => {
+                  fetchCurrentJob(true);
+                  if (isSavedJobsOpen) loadSavedJobs(true);
+                }}
+                disabled={isRefreshingJob || isLoadingSavedJobs}
                 className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-semibold shadow-sm disabled:opacity-60"
               >
                 <RefreshCcw
                   size={18}
-                  className={isRefreshingJob ? "animate-spin" : ""}
+                  className={
+                    isRefreshingJob || isLoadingSavedJobs ? "animate-spin" : ""
+                  }
                 />
                 Refresh Status
               </button>
@@ -2203,6 +2504,259 @@ export default function BulkDetailsPage() {
             )}
           </div>
 
+          {isSavedJobsOpen ? (
+            <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-5">
+              <div className="flex items-start justify-between gap-4 flex-wrap">
+                <div>
+                  <div className="text-lg font-extrabold text-slate-900">
+                    Saved Jobs
+                  </div>
+                  <div className="mt-1 text-sm text-slate-600 leading-6">
+                    Yahan sabhi saved jobs show hongi. Aap inhe select karke ek sath
+                    cancel ya delete kar sakte ho. Final jobs turant delete hongi,
+                    aur active jobs fast cancel hongi.
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => loadSavedJobs(true)}
+                    disabled={isLoadingSavedJobs || isSavedJobsActionRunning}
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-semibold shadow-sm disabled:opacity-60"
+                  >
+                    <RefreshCcw
+                      size={18}
+                      className={isLoadingSavedJobs ? "animate-spin" : ""}
+                    />
+                    Refresh Saved Jobs
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setIsSavedJobsOpen(false)}
+                    className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-semibold shadow-sm"
+                  >
+                    Hide Panel
+                  </button>
+                </div>
+              </div>
+
+              <div className="mt-4 grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-4">
+                <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                  <div className="text-xs uppercase tracking-wide font-extrabold text-slate-500">
+                    Total Saved Jobs
+                  </div>
+                  <div className="mt-2 text-xl font-extrabold text-slate-900">
+                    {safeNum(savedJobsSummary.total, savedJobs.length)}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
+                  <div className="text-xs uppercase tracking-wide font-extrabold text-blue-700">
+                    Active Jobs
+                  </div>
+                  <div className="mt-2 text-xl font-extrabold text-slate-900">
+                    {activeSavedJobsCount}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                  <div className="text-xs uppercase tracking-wide font-extrabold text-emerald-700">
+                    Final Jobs
+                  </div>
+                  <div className="mt-2 text-xl font-extrabold text-slate-900">
+                    {finalSavedJobsCount}
+                  </div>
+                </div>
+
+                <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                  <div className="text-xs uppercase tracking-wide font-extrabold text-amber-700">
+                    Selected
+                  </div>
+                  <div className="mt-2 text-xl font-extrabold text-slate-900">
+                    {selectedSavedJobCount}
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-4 rounded-2xl border border-blue-200 bg-blue-50 p-4">
+                <div className="flex items-center justify-between gap-4 flex-wrap">
+                  <div className="text-sm text-blue-900 leading-6">
+                    Running job ko cancel/delete karne ke liye ab fast saved-jobs action
+                    use ho rahi hai. Ye normal per-job action ke comparison me zyada
+                    quick response degi.
+                  </div>
+
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={toggleSelectAllSavedJobs}
+                      disabled={!savedJobs.length || isSavedJobsActionRunning}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 text-sm font-extrabold disabled:opacity-60"
+                    >
+                      {allSavedJobsSelected ? "Unselect All" : "Select All"}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={cancelSelectedSavedJobs}
+                      disabled={!selectedSavedJobCount || isSavedJobsActionRunning}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-amber-600 hover:bg-amber-700 text-white text-sm font-extrabold disabled:opacity-60"
+                    >
+                      {isSavedJobsActionRunning ? (
+                        <LoaderCircle size={16} className="animate-spin" />
+                      ) : (
+                        <PauseCircle size={16} />
+                      )}
+                      Cancel Selected
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={deleteSelectedSavedJobs}
+                      disabled={!selectedSavedJobCount || isSavedJobsActionRunning}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-rose-600 hover:bg-rose-700 text-white text-sm font-extrabold disabled:opacity-60"
+                    >
+                      {isSavedJobsActionRunning ? (
+                        <LoaderCircle size={16} className="animate-spin" />
+                      ) : (
+                        <Trash2 size={16} />
+                      )}
+                      Delete Selected
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={cancelAllActiveSavedJobs}
+                      disabled={!activeSavedJobsCount || isSavedJobsActionRunning}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 text-sm font-extrabold disabled:opacity-60"
+                    >
+                      Cancel All Active
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={deleteAllSavedJobs}
+                      disabled={!savedJobs.length || isSavedJobsActionRunning}
+                      className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-950 text-white text-sm font-extrabold disabled:opacity-60"
+                    >
+                      Delete All / Cleanup
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {isLoadingSavedJobs ? (
+                <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-6 text-sm font-semibold text-slate-700 flex items-center gap-3">
+                  <LoaderCircle size={18} className="animate-spin" />
+                  Saved jobs load ho rahi hain...
+                </div>
+              ) : !savedJobs.length ? (
+                <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-6 text-sm text-slate-600">
+                  Koi saved jobs available nahi hain.
+                </div>
+              ) : (
+                <div className="mt-4 overflow-x-auto rounded-2xl border border-slate-200">
+                  <table className="min-w-full text-sm">
+                    <thead className="bg-slate-50 text-slate-700">
+                      <tr className="text-left">
+                        <th className="py-3 px-4">
+                          <input
+                            type="checkbox"
+                            checked={allSavedJobsSelected}
+                            onChange={toggleSelectAllSavedJobs}
+                            className="h-4 w-4"
+                          />
+                        </th>
+                        <th className="py-3 px-4">Status</th>
+                        <th className="py-3 px-4">Job ID</th>
+                        <th className="py-3 px-4">Category</th>
+                        <th className="py-3 px-4">Stage</th>
+                        <th className="py-3 px-4">Total</th>
+                        <th className="py-3 px-4">Created</th>
+                        <th className="py-3 px-4">Updated</th>
+                        <th className="py-3 px-4">Failed</th>
+                        <th className="py-3 px-4">Created At</th>
+                        <th className="py-3 px-4">Result</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {savedJobs.map((job) => {
+                        const jobId = safeStr(job._id);
+                        const selected = selectedSavedJobIds.includes(jobId);
+                        const jobSummary = job.summary || {};
+
+                        return (
+                          <tr
+                            key={jobId}
+                            className="border-t border-slate-200 align-top hover:bg-slate-50/80"
+                          >
+                            <td className="py-3 px-4">
+                              <input
+                                type="checkbox"
+                                checked={selected}
+                                onChange={() => toggleSavedJobSelection(jobId)}
+                                className="h-4 w-4"
+                              />
+                            </td>
+
+                            <td className="py-3 px-4 whitespace-nowrap">
+                              <span
+                                className={`inline-flex items-center gap-2 px-2.5 py-1 rounded-full border text-[11px] font-extrabold ${statusPillClasses(
+                                  safeStr(job.status)
+                                )}`}
+                              >
+                                <Activity size={12} />
+                                {humanJobStatus(safeStr(job.status))}
+                              </span>
+                            </td>
+
+                            <td className="py-3 px-4 font-bold text-slate-900 break-all min-w-[220px]">
+                              {jobId}
+                            </td>
+
+                            <td className="py-3 px-4 whitespace-nowrap">
+                              {getJobCategory(job)}
+                            </td>
+
+                            <td className="py-3 px-4 whitespace-nowrap">
+                              {getSavedJobStageLabel(job)}
+                            </td>
+
+                            <td className="py-3 px-4 whitespace-nowrap">
+                              {safeNum(jobSummary.totalRows)}
+                            </td>
+
+                            <td className="py-3 px-4 whitespace-nowrap">
+                              {safeNum(jobSummary.createdRows)}
+                            </td>
+
+                            <td className="py-3 px-4 whitespace-nowrap">
+                              {safeNum(jobSummary.updatedRows)}
+                            </td>
+
+                            <td className="py-3 px-4 whitespace-nowrap">
+                              {safeNum(jobSummary.failedRows)}
+                            </td>
+
+                            <td className="py-3 px-4 whitespace-nowrap">
+                              {formatDateTime(job.createdAt)}
+                            </td>
+
+                            <td className="py-3 px-4 min-w-[260px] text-slate-700">
+                              {safeStr(job.resultMessage || "—")}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          ) : null}
+
           <div className="mt-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
             <div className="lg:col-span-2 space-y-4">
               <div className="rounded-2xl border border-gray-200 bg-gray-50 p-5">
@@ -2569,9 +3123,19 @@ export default function BulkDetailsPage() {
                   Reset Form
                 </button>
 
+                <button
+                  type="button"
+                  onClick={toggleSavedJobsPanel}
+                  className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-slate-900 hover:bg-slate-950 text-white transition font-extrabold"
+                >
+                  <Database size={18} />
+                  {isSavedJobsOpen ? "Hide Saved Jobs" : "Open Saved Jobs"}
+                </button>
+
                 <div className="mt-4 text-[11px] text-slate-500 leading-5">
                   Galat Excel upload hone par Pause, Cancel, Restart aur Delete options
-                  available hain.
+                  available hain. Saved Jobs panel se multiple jobs ko ek sath bhi
+                  delete kiya ja sakta hai.
                 </div>
               </div>
 
@@ -2630,6 +3194,18 @@ export default function BulkDetailsPage() {
                   Step 6: Pricing Validation
                   <br />
                   Step 7: Final Product Upload/Create
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4">
+                <div className="inline-flex items-center gap-2 text-sm font-extrabold text-rose-900">
+                  <Server size={16} />
+                  Live timeout mitigation
+                </div>
+                <div className="text-sm text-rose-800 mt-2 leading-6">
+                  Live site par function timeout kam karne ke liye process route ko
+                  chhote step-requests me chalaya ja raha hai. Isliye ek request me kam
+                  steps process hongi aur overall stability better rahegi.
                 </div>
               </div>
             </div>
