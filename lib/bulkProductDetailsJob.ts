@@ -3,10 +3,8 @@ import Product from "@/models/Product";
 import Subject from "@/models/Subject";
 import Course from "@/models/Course";
 import Session from "@/models/Session";
+import BulkUploadJob from "@/models/BulkUploadJob";
 import ProductPricingRule from "@/models/ProductPricingRule";
-import { syncGeneratedCombosForProductChange } from "@/lib/comboAutoSync";
-import { resolveRequiredProductPricing } from "@/lib/productPricing";
-import { syncProductAvailabilityBySku } from "@/lib/productAvailability";
 import {
   CATEGORY_CONFIG,
   normalizeProductCategory,
@@ -16,7 +14,22 @@ import {
 } from "@/lib/productCatalog";
 
 export type DuplicateStrategy = "replace" | "ignore";
-export type BulkPipelineStage = "prevalidation" | "execution" | "completed";
+
+export type BulkDetailsDetailedStage =
+  | "sku_scan"
+  | "course_validation"
+  | "session_validation"
+  | "subject_validation"
+  | "pricing_validation"
+  | "execution"
+  | "completed";
+
+export type BulkDetailsPipelineStage =
+  | "prevalidation"
+  | "execution"
+  | "completed";
+
+export type BulkPipelineStage = BulkDetailsPipelineStage;
 
 export type PreparedBulkDetailsRow = {
   rowNumber: number;
@@ -27,47 +40,26 @@ export type PreparedBulkDetailsRow = {
   E: string; // course_code
 };
 
-export type PrevalidatedBulkDetailsRow = {
+export type PreparedExecutionRow = {
   itemIndex: number;
   rowNumber: number;
   sku: string;
   subjectCodeRaw: string;
-  subjectCodeLoose: string;
   session: string;
   session6: string;
   language: string;
   lang3: string;
   courseCodeList: string[];
-  normalizedCourseTitles: string[];
+  courseTitles: string[];
   joinedCourseTitles: string;
   subjectTitleHi: string;
   subjectTitleEn: string;
   subjectTitleOther: string;
   matchedSubjectTitle: string;
-  title: string;
-  slugBase: string;
-  normalizedSlugBase: string;
-  importantNote: string;
-  shortDesc: string;
-  descriptionHtml: string;
-  metaTitle: string;
-  metaDescription: string;
   price: number;
   oldPrice: number;
   pricingSource: string;
   templateWarnings: string[];
-  raw: {
-    unique_id: string;
-    subject_code: string;
-    session: string;
-    language: string;
-    course_code: string;
-    A: string;
-    B: string;
-    C: string;
-    D: string;
-    E: string;
-  };
 };
 
 export type BulkDetailsJobConfig = {
@@ -84,59 +76,7 @@ export type BulkDetailsJobConfig = {
   duplicateStrategy: DuplicateStrategy;
 };
 
-export type BulkDetailsPipelineSummary = {
-  totalRows: number;
-  validRows: number;
-  createdRows: number;
-  updatedRows: number;
-  skippedRows: number;
-  failedRows: number;
-  duplicateStrategy: DuplicateStrategy;
-  dryRun: boolean;
-  category: string;
-  pipelineStage: BulkPipelineStage;
-  prevalidation: {
-    totalRows: number;
-    processedRows: number;
-    validRows: number;
-    failedRows: number;
-    skippedRows: number;
-    duplicateUploadRows: number;
-    readyRows: number;
-    startedAt: Date | null;
-    completedAt: Date | null;
-    lastNote: string;
-  };
-  execution: {
-    totalRows: number;
-    processedRows: number;
-    createdRows: number;
-    updatedRows: number;
-    skippedRows: number;
-    failedRows: number;
-    successRows: number;
-    startedAt: Date | null;
-    completedAt: Date | null;
-    lastNote: string;
-  };
-  comboSync: {
-    attempted: number;
-    succeeded: number;
-    failed: number;
-    errors: string[];
-    mode: string;
-  };
-  hardcopySync: {
-    attempted: number;
-    succeeded: number;
-    failed: number;
-    errors: string[];
-    mode: string;
-  };
-};
-
 export type BulkDetailsBatchProcessResult = {
-  stage: BulkPipelineStage;
   processedDelta: number;
   successDelta: number;
   failedDelta: number;
@@ -157,19 +97,8 @@ export type BulkDetailsBatchProcessResult = {
     reason?: string;
     raw?: any;
   }>;
-  summaryPatch: BulkDetailsPipelineSummary;
-  inputPatch?: Record<string, any>;
-  inputAppendPatch?: {
-    prevalidationSeenSkus?: string[];
-    prevalidatedRows?: PrevalidatedBulkDetailsRow[];
-  };
-  nextStage?: BulkPipelineStage;
+  summaryPatch: Record<string, any>;
   note: string;
-};
-
-type SyncQueueItem = {
-  before?: any | null;
-  after?: any | null;
 };
 
 type MasterDataCache = {
@@ -182,22 +111,41 @@ type MasterDataCache = {
   sessionAllowedByCategory: Map<string, Set<string>>;
 };
 
-type PricingCache = {
-  loadedAt: number;
-  category: string;
-  courseRuleMap: Map<string, any>;
-  productOverrideBySku: Map<string, any>;
-  productOverrideByProductId: Map<string, any>;
+type PricingContext = {
+  overrideBySku: Map<string, any>;
+  courseRuleByCode: Map<string, any>;
+};
+
+type ChunkValidationResult<RowOut> = {
+  acceptedRows: RowOut[];
+  failures: BulkDetailsBatchProcessResult["failures"];
+  validCount: number;
+  failedCount: number;
+  skippedCount: number;
 };
 
 const MANUAL_HARDCOPY_BULK_BLOCK_MESSAGE =
   "Handwritten Hardcopy (Delivery) category ka manual bulk upload disabled hai. Ye products ab Solved Assignments se automatically generate honge.";
 
 const MASTER_CACHE_TTL_MS = 2 * 60 * 1000;
-const PRICING_CACHE_TTL_MS = 30 * 1000;
+const PREVALIDATION_STAGE_CHUNK_SIZE = 250;
+
+const PRODUCT_EXECUTION_SELECT = [
+  "_id",
+  "slug",
+  "sku",
+  "pages",
+  "pdfKey",
+  "pdfUrl",
+  "images",
+  "thumbnailUrl",
+  "quickUrl",
+  "deliverWithinMinutes",
+  "onDemandNote",
+  "autoMakeAvailableOnUpload",
+].join(" ");
 
 let masterDataCache: MasterDataCache | null = null;
-let pricingCache: PricingCache | null = null;
 
 function safeStr(x: any) {
   return String(x ?? "").trim();
@@ -247,17 +195,11 @@ function normalizeSku(input: string) {
 }
 
 function normalizeSubjectCodeLoose(input: string) {
-  return safeStr(input)
-    .toUpperCase()
-    .replace(/\s+/g, "")
-    .replace(/[^A-Z0-9]/g, "");
+  return safeStr(input).toUpperCase().replace(/\s+/g, "").replace(/[^A-Z0-9]/g, "");
 }
 
 function normalizeCourseCodeLoose(input: string) {
-  return safeStr(input)
-    .toUpperCase()
-    .replace(/\s+/g, "")
-    .replace(/[^A-Z0-9]/g, "");
+  return safeStr(input).toUpperCase().replace(/\s+/g, "").replace(/[^A-Z0-9]/g, "");
 }
 
 function normalizeLang3(input: string) {
@@ -380,6 +322,57 @@ function replaceTokens(template: string, row: Record<string, string>) {
     .replace(/%H/g, row.H || "");
 }
 
+function buildDeterministicSlug(seed: string, sku: string) {
+  const cleanSeed = slugify(seed);
+  const cleanSku = normalizeSku(sku).toLowerCase();
+  if (cleanSeed && cleanSku) return slugify(`${cleanSeed}-${cleanSku}`);
+  if (cleanSeed) return cleanSeed;
+  if (cleanSku) return cleanSku;
+  return "product";
+}
+
+function buildDeferredSyncPatch(current: any, label: string) {
+  const errors = Array.isArray(current?.errors)
+    ? current.errors.map((x: any) => safeStr(x)).filter(Boolean).slice(0, 10)
+    : [];
+
+  return {
+    attempted: safeNum(current?.attempted, 0),
+    succeeded: safeNum(current?.succeeded, 0),
+    failed: safeNum(current?.failed, 0),
+    errors,
+    mode: "separate_notifications_flow",
+    deferred: true,
+    note: `${label} sync final product upload/create flow se alag kar di gayi hai. Isko Notifications page se separately run karo.`,
+  };
+}
+
+function buildExecutionErrorReason(error: any) {
+  const code = safeNum(error?.code, 0);
+  const message = safeStr(error?.message || "");
+
+  if (code === 11000) {
+    const keyPattern = error?.keyPattern || {};
+    const keyValue = error?.keyValue || {};
+
+    if (keyPattern?.sku || message.includes("sku_1")) {
+      return `SKU duplicate key conflict in database: ${safeStr(
+        keyValue?.sku || ""
+      ) || "unknown sku"}.`;
+    }
+
+    if (keyPattern?.slug || message.includes("slug_1")) {
+      return `Generated slug already exists in database: ${safeStr(
+        keyValue?.slug || ""
+      ) || "unknown slug"}.`;
+    }
+
+    return "Duplicate key conflict in database for this row.";
+  }
+
+  return sanitizeUnexpectedRowError(error);
+}
+
 export function parseCsv(text: string) {
   const cleaned = String(text ?? "").replace(/^\uFEFF/, "");
   const rows: string[][] = [];
@@ -484,8 +477,7 @@ export function normalizeBulkDetailsConfig(input: any): BulkDetailsJobConfig {
       input?.publishNow !== undefined
         ? safeBool(input?.publishNow, false)
         : category === "Question Papers (PYQ)",
-    duplicateStrategy:
-      input?.duplicateStrategy === "replace" ? "replace" : "ignore",
+    duplicateStrategy: input?.duplicateStrategy === "replace" ? "replace" : "ignore",
   };
 }
 
@@ -521,11 +513,7 @@ function pickFirstNonEmpty(...vals: any[]) {
 
 function getSubjectTitle(subject: any) {
   return {
-    subjectTitleHi: pickFirstNonEmpty(
-      subject?.titleHi,
-      subject?.nameHi,
-      subject?.labelHi
-    ),
+    subjectTitleHi: pickFirstNonEmpty(subject?.titleHi, subject?.nameHi, subject?.labelHi),
     subjectTitleEn: pickFirstNonEmpty(
       subject?.titleEn,
       subject?.nameEn,
@@ -563,12 +551,7 @@ function detectLanguageBucket(input: string): "en" | "hi" | "other" | "" {
   const norm = normalizeLooseText(input);
 
   if (!raw && !norm) return "";
-  if (
-    raw === "en" ||
-    raw.includes("english") ||
-    norm === "en" ||
-    norm.includes("english")
-  ) {
+  if (raw === "en" || raw.includes("english") || norm === "en" || norm.includes("english")) {
     return "en";
   }
   if (
@@ -586,23 +569,16 @@ function detectLanguageBucket(input: string): "en" | "hi" | "other" | "" {
 
 function getMatchedSubjectTitleForLanguage(subject: any, language: string) {
   const bucket = detectLanguageBucket(language);
-  const { subjectTitleHi, subjectTitleEn, subjectTitleOther } =
-    getSubjectTitle(subject);
+  const { subjectTitleHi, subjectTitleEn, subjectTitleOther } = getSubjectTitle(subject);
 
   if (bucket === "en") return subjectTitleEn;
   if (bucket === "hi") return subjectTitleHi;
 
   if (bucket === "other") {
-    const subjectOtherLanguageName = normalizeLooseText(
-      subject?.otherLangName || ""
-    );
+    const subjectOtherLanguageName = normalizeLooseText(subject?.otherLangName || "");
     const rowLanguage = normalizeLooseText(language);
 
-    if (
-      subjectOtherLanguageName &&
-      rowLanguage &&
-      subjectOtherLanguageName === rowLanguage
-    ) {
+    if (subjectOtherLanguageName && rowLanguage && subjectOtherLanguageName === rowLanguage) {
       return subjectTitleOther;
     }
     return "";
@@ -621,9 +597,7 @@ function buildTemplateWarnings(params: {
   const usesCourseTitle = params.allTemplates.some((t) => /%G/.test(safeStr(t)));
 
   if (usesSubjectTitle && !safeStr(params.matchedSubjectTitle)) {
-    warnings.push(
-      "Matched subject title is blank for this row language in master subjects"
-    );
+    warnings.push("Matched subject title is blank for this row language in master subjects");
   }
 
   if (usesCourseTitle && !safeStr(params.joinedCourseTitles)) {
@@ -653,63 +627,39 @@ function buildFailureRawRow(row: PreparedBulkDetailsRow) {
   };
 }
 
-async function makeUniqueSlug(base: string, excludeId?: string) {
-  await dbConnect();
-
-  const clean = slugify(base) || "product";
-  let slug = clean;
-  let i = 1;
-
-  while (true) {
-    const existing = await Product.findOne(
-      excludeId ? { slug, _id: { $ne: excludeId } } : { slug }
-    ).select("_id");
-
-    if (!existing) return slug;
-
-    i += 1;
-    slug = `${clean}-${i}`;
-  }
-}
-
-function buildExistingProductMatchQuery(sku: string, normalizedSlugBase: string) {
-  const or: any[] = [];
-
-  if (safeStr(sku)) {
-    or.push({ sku });
-  }
-
-  if (safeStr(normalizedSlugBase)) {
-    or.push({ slug: normalizedSlugBase });
-  }
-
-  if (!or.length) {
-    return null;
-  }
-
-  return { $or: or };
-}
-
-async function syncGeneratedCombosForBulkChanges(changes: SyncQueueItem[]) {
-  const errors: string[] = [];
-
-  for (const change of changes) {
-    try {
-      const result: any = await syncGeneratedCombosForProductChange(change as any);
-
-      if (result && result.ok === false) {
-        const reason = safeStr(result.reason || result.error);
-        if (reason) errors.push(reason);
-      }
-    } catch (e: any) {
-      errors.push(safeStr(e?.message) || "Unknown combo sync error");
-    }
-  }
-
+function buildFailureRawExecutionRow(row: PreparedExecutionRow) {
   return {
-    ok: errors.length === 0,
-    errors: uniqueStrings(errors).slice(0, 10),
+    unique_id: safeStr(row?.sku),
+    subject_code: safeStr(row?.subjectCodeRaw),
+    session: safeStr(row?.session),
+    language: safeStr(row?.language),
+    course_code: Array.isArray(row?.courseCodeList) ? row.courseCodeList.join(", ") : "",
   };
+}
+
+function pushFailureRow(
+  failures: BulkDetailsBatchProcessResult["failures"],
+  args: {
+    itemIndex: number;
+    rowNumber: number;
+    batchNumber: number;
+    identifier?: string;
+    sku?: string;
+    status: string;
+    reason: string;
+    raw?: any;
+  }
+) {
+  failures.push({
+    itemIndex: args.itemIndex,
+    rowNumber: args.rowNumber,
+    batchNumber: args.batchNumber,
+    identifier: safeStr(args.identifier),
+    sku: safeStr(args.sku),
+    status: safeStr(args.status),
+    reason: safeStr(args.reason),
+    raw: args.raw ?? null,
+  });
 }
 
 function buildSubjectMap(subjects: any[]) {
@@ -786,10 +736,7 @@ async function getMasterDataCache(forceRefresh = false) {
   return masterDataCache;
 }
 
-function getSessionAllowedForCategory(
-  cache: MasterDataCache,
-  category: string
-) {
+function getSessionAllowedForCategory(cache: MasterDataCache, category: string) {
   const categoryKey = safeStr(category);
 
   const existing = cache.sessionAllowedByCategory.get(categoryKey);
@@ -840,134 +787,536 @@ function getSessionAllowedForCategory(
   return sessionAllowed;
 }
 
-async function buildPricingCacheForCategory(args: {
-  category: string;
-  courseCodes: string[];
-  skus: string[];
-  existingProductIds: string[];
-}) {
-  const category = safeStr(args.category);
-  const now = Date.now();
+function buildStageBlock(totalRows = 0, extra?: Record<string, any>) {
+  return {
+    totalRows: safeNum(totalRows, 0),
+    processedRows: 0,
+    validRows: 0,
+    failedRows: 0,
+    skippedRows: 0,
+    startedAt: null,
+    completedAt: null,
+    lastNote: "",
+    ...(extra || {}),
+  };
+}
 
-  if (
-    pricingCache &&
-    pricingCache.category === category &&
-    now - pricingCache.loadedAt < PRICING_CACHE_TTL_MS
-  ) {
-    return pricingCache;
-  }
+function buildExecutionBlock(totalRows = 0) {
+  return {
+    totalRows: safeNum(totalRows, 0),
+    processedRows: 0,
+    createdRows: 0,
+    updatedRows: 0,
+    skippedRows: 0,
+    failedRows: 0,
+    successRows: 0,
+    startedAt: null,
+    completedAt: null,
+    lastNote: "",
+  };
+}
 
+function cloneRecord(input: any) {
+  return input && typeof input === "object" && !Array.isArray(input)
+    ? { ...input }
+    : {};
+}
+
+function getStageBlock(summary: any, key: string, totalRows = 0, extra?: Record<string, any>) {
+  const current = summary?.[key];
+  return {
+    ...buildStageBlock(totalRows, extra),
+    ...(current && typeof current === "object" && !Array.isArray(current) ? current : {}),
+  };
+}
+
+function getChunkInfo<T>(rows: T[], cursor: number, chunkSize: number) {
+  const safeCursor = Math.max(0, safeNum(cursor, 0));
+  const size = Math.max(1, safeNum(chunkSize, 1));
+  const endExclusive = Math.min(rows.length, safeCursor + size);
+
+  return {
+    cursor: safeCursor,
+    chunkRows: rows.slice(safeCursor, endExclusive),
+    nextCursor: endExclusive,
+    isDone: endExclusive >= rows.length,
+  };
+}
+
+async function persistJobInput(job: any, patch: Record<string, any>) {
   await dbConnect();
 
-  const courseCodes = uniqueStrings(args.courseCodes.map((x) => safeStr(x).toUpperCase()));
-  const skus = uniqueStrings(args.skus.map((x) => normalizeSku(x)));
-  const existingProductIds = uniqueStrings(
-    args.existingProductIds.map((x) => safeStr(x))
+  await BulkUploadJob.updateOne(
+    {
+      _id: String(job?._id),
+      createdBy: safeStr(job?.createdBy),
+    },
+    {
+      $set: Object.fromEntries(
+        Object.entries(patch).map(([key, value]) => [`input.${key}`, value])
+      ),
+    }
+  );
+}
+
+async function loadExistingLiveProductSkuSet(rows: PreparedBulkDetailsRow[]) {
+  await dbConnect();
+
+  const skuList = uniqueStrings(rows.map((row) => normalizeSku(row?.A)).filter(Boolean));
+  if (!skuList.length) return new Set<string>();
+
+  const existingDocs: Array<{ sku?: string }> = await Product.find({
+    sku: { $in: skuList },
+    deletedAt: null,
+  })
+    .select("sku")
+    .lean();
+
+  const existingSet = new Set<string>();
+
+  for (const doc of Array.isArray(existingDocs) ? existingDocs : []) {
+    const sku = normalizeSku(doc?.sku || "");
+    if (sku) existingSet.add(sku);
+  }
+
+  return existingSet;
+}
+
+async function buildSkuScanResult(rows: PreparedBulkDetailsRow[], batchNumber: number) {
+  const failures: BulkDetailsBatchProcessResult["failures"] = [];
+  const remainingRows: PreparedBulkDetailsRow[] = [];
+
+  const firstIndexBySku = new Map<string, number>();
+  const firstRowNumberBySku = new Map<string, number>();
+
+  const existingLiveSkuSet = await loadExistingLiveProductSkuSet(rows);
+
+  let validCount = 0;
+  let failedCount = 0;
+  let skippedCount = 0;
+  let duplicateRows = 0;
+  let siteDuplicateRows = 0;
+  let sheetDuplicateRows = 0;
+
+  rows.forEach((row, itemIndex) => {
+    const rowNumber = safeNum(row?.rowNumber, itemIndex + 1);
+    const sku = normalizeSku(row?.A);
+
+    if (!sku) {
+      failedCount++;
+      pushFailureRow(failures, {
+        itemIndex,
+        rowNumber,
+        batchNumber,
+        identifier: `row-${rowNumber}`,
+        sku: "",
+        status: "failed",
+        reason: "Unique SKU required",
+        raw: buildFailureRawRow(row),
+      });
+      return;
+    }
+
+    if (existingLiveSkuSet.has(sku)) {
+      skippedCount++;
+      duplicateRows++;
+      siteDuplicateRows++;
+
+      pushFailureRow(failures, {
+        itemIndex,
+        rowNumber,
+        batchNumber,
+        identifier: sku,
+        sku,
+        status: "skipped",
+        reason:
+          "SKU already exists in live site products. Ye row invalid hai aur upload/create stage me nahi jayegi.",
+        raw: buildFailureRawRow(row),
+      });
+      return;
+    }
+
+    if (!firstIndexBySku.has(sku)) {
+      firstIndexBySku.set(sku, itemIndex);
+      firstRowNumberBySku.set(sku, rowNumber);
+      remainingRows.push({
+        ...row,
+        A: sku,
+      });
+      validCount++;
+      return;
+    }
+
+    skippedCount++;
+    duplicateRows++;
+    sheetDuplicateRows++;
+
+    pushFailureRow(failures, {
+      itemIndex,
+      rowNumber,
+      batchNumber,
+      identifier: sku,
+      sku,
+      status: "skipped",
+      reason: `Duplicate SKU within uploaded sheet. First occurrence row ${safeNum(
+        firstRowNumberBySku.get(sku),
+        0
+      )} kept, current row skipped.`,
+      raw: buildFailureRawRow(row),
+    });
+  });
+
+  return {
+    remainingRows,
+    failures,
+    validCount,
+    failedCount,
+    skippedCount,
+    duplicateRows,
+    siteDuplicateRows,
+    sheetDuplicateRows,
+  };
+}
+
+function buildCourseValidationChunk(args: {
+  rows: PreparedBulkDetailsRow[];
+  startIndex: number;
+  batchNumber: number;
+  courseMap: Map<string, any>;
+}): ChunkValidationResult<PreparedBulkDetailsRow> {
+  const failures: BulkDetailsBatchProcessResult["failures"] = [];
+  const acceptedRows: PreparedBulkDetailsRow[] = [];
+
+  let validCount = 0;
+  let failedCount = 0;
+  let skippedCount = 0;
+
+  args.rows.forEach((row, localIndex) => {
+    const itemIndex = args.startIndex + localIndex;
+    const rowNumber = safeNum(row?.rowNumber, itemIndex + 1);
+    const sku = normalizeSku(row?.A);
+    const courseCodeRaw = safeStr(row?.E);
+
+    try {
+      if (!courseCodeRaw) {
+        failedCount++;
+        pushFailureRow(failures, {
+          itemIndex,
+          rowNumber,
+          batchNumber: args.batchNumber,
+          identifier: sku || `row-${rowNumber}`,
+          sku,
+          status: "failed",
+          reason: "Course code missing",
+          raw: buildFailureRawRow(row),
+        });
+        return;
+      }
+
+      const courseCodeList = splitCourseCodes(courseCodeRaw);
+      if (!courseCodeList.length) {
+        failedCount++;
+        pushFailureRow(failures, {
+          itemIndex,
+          rowNumber,
+          batchNumber: args.batchNumber,
+          identifier: sku || `row-${rowNumber}`,
+          sku,
+          status: "failed",
+          reason: "Course code missing or invalid",
+          raw: buildFailureRawRow(row),
+        });
+        return;
+      }
+
+      const missingCourse: string[] = [];
+
+      for (const oneCode of courseCodeList) {
+        const loose = normalizeCourseCodeLoose(oneCode);
+        const courseDoc = args.courseMap.get(loose);
+        if (!courseDoc) missingCourse.push(oneCode);
+      }
+
+      if (missingCourse.length) {
+        failedCount++;
+        pushFailureRow(failures, {
+          itemIndex,
+          rowNumber,
+          batchNumber: args.batchNumber,
+          identifier: sku || `row-${rowNumber}`,
+          sku,
+          status: "failed",
+          reason: `Course not found in master courses: ${missingCourse.join(", ")}`,
+          raw: buildFailureRawRow(row),
+        });
+        return;
+      }
+
+      acceptedRows.push(row);
+      validCount++;
+    } catch (error: any) {
+      failedCount++;
+      pushFailureRow(failures, {
+        itemIndex,
+        rowNumber,
+        batchNumber: args.batchNumber,
+        identifier: sku || `row-${rowNumber}`,
+        sku,
+        status: "failed",
+        reason: sanitizeUnexpectedRowError(error),
+        raw: buildFailureRawRow(row),
+      });
+    }
+  });
+
+  return {
+    acceptedRows,
+    failures,
+    validCount,
+    failedCount,
+    skippedCount,
+  };
+}
+
+function buildSessionValidationChunk(args: {
+  rows: PreparedBulkDetailsRow[];
+  startIndex: number;
+  batchNumber: number;
+  sessionAllowed: Set<string>;
+}): ChunkValidationResult<PreparedBulkDetailsRow> {
+  const failures: BulkDetailsBatchProcessResult["failures"] = [];
+  const acceptedRows: PreparedBulkDetailsRow[] = [];
+
+  let validCount = 0;
+  let failedCount = 0;
+  let skippedCount = 0;
+
+  args.rows.forEach((row, localIndex) => {
+    const itemIndex = args.startIndex + localIndex;
+    const rowNumber = safeNum(row?.rowNumber, itemIndex + 1);
+    const sku = normalizeSku(row?.A);
+    const session = safeStr(row?.C);
+
+    try {
+      if (!session) {
+        failedCount++;
+        pushFailureRow(failures, {
+          itemIndex,
+          rowNumber,
+          batchNumber: args.batchNumber,
+          identifier: sku || `row-${rowNumber}`,
+          sku,
+          status: "failed",
+          reason: "Session missing",
+          raw: buildFailureRawRow(row),
+        });
+        return;
+      }
+
+      if (!sessionMatches(args.sessionAllowed, session)) {
+        failedCount++;
+        pushFailureRow(failures, {
+          itemIndex,
+          rowNumber,
+          batchNumber: args.batchNumber,
+          identifier: sku || `row-${rowNumber}`,
+          sku,
+          status: "failed",
+          reason: `Session not found in category-wise master sessions: ${session}`,
+          raw: buildFailureRawRow(row),
+        });
+        return;
+      }
+
+      acceptedRows.push(row);
+      validCount++;
+    } catch (error: any) {
+      failedCount++;
+      pushFailureRow(failures, {
+        itemIndex,
+        rowNumber,
+        batchNumber: args.batchNumber,
+        identifier: sku || `row-${rowNumber}`,
+        sku,
+        status: "failed",
+        reason: sanitizeUnexpectedRowError(error),
+        raw: buildFailureRawRow(row),
+      });
+    }
+  });
+
+  return {
+    acceptedRows,
+    failures,
+    validCount,
+    failedCount,
+    skippedCount,
+  };
+}
+
+function buildSubjectValidationChunk(args: {
+  rows: PreparedBulkDetailsRow[];
+  startIndex: number;
+  batchNumber: number;
+  subjectMap: Map<string, any>;
+}): ChunkValidationResult<PreparedBulkDetailsRow> {
+  const failures: BulkDetailsBatchProcessResult["failures"] = [];
+  const acceptedRows: PreparedBulkDetailsRow[] = [];
+
+  let validCount = 0;
+  let failedCount = 0;
+  let skippedCount = 0;
+
+  args.rows.forEach((row, localIndex) => {
+    const itemIndex = args.startIndex + localIndex;
+    const rowNumber = safeNum(row?.rowNumber, itemIndex + 1);
+    const sku = normalizeSku(row?.A);
+    const subjectCodeRaw = safeStr(row?.B);
+
+    try {
+      if (!subjectCodeRaw) {
+        failedCount++;
+        pushFailureRow(failures, {
+          itemIndex,
+          rowNumber,
+          batchNumber: args.batchNumber,
+          identifier: sku || `row-${rowNumber}`,
+          sku,
+          status: "failed",
+          reason: "Subject code missing",
+          raw: buildFailureRawRow(row),
+        });
+        return;
+      }
+
+      const subjectCodeLoose = normalizeSubjectCodeLoose(subjectCodeRaw);
+      const subjectDoc = args.subjectMap.get(subjectCodeLoose);
+
+      if (!subjectDoc) {
+        failedCount++;
+        pushFailureRow(failures, {
+          itemIndex,
+          rowNumber,
+          batchNumber: args.batchNumber,
+          identifier: sku || subjectCodeRaw || `row-${rowNumber}`,
+          sku,
+          status: "failed",
+          reason: `Subject not found in master subjects: ${subjectCodeRaw}`,
+          raw: buildFailureRawRow(row),
+        });
+        return;
+      }
+
+      acceptedRows.push(row);
+      validCount++;
+    } catch (error: any) {
+      failedCount++;
+      pushFailureRow(failures, {
+        itemIndex,
+        rowNumber,
+        batchNumber: args.batchNumber,
+        identifier: sku || subjectCodeRaw || `row-${rowNumber}`,
+        sku,
+        status: "failed",
+        reason: sanitizeUnexpectedRowError(error),
+        raw: buildFailureRawRow(row),
+      });
+    }
+  });
+
+  return {
+    acceptedRows,
+    failures,
+    validCount,
+    failedCount,
+    skippedCount,
+  };
+}
+
+async function loadPricingContext(args: {
+  category: string;
+  rows: PreparedBulkDetailsRow[];
+}) {
+  await dbConnect();
+
+  const skus = uniqueStrings(
+    args.rows.map((row) => normalizeSku(row?.A)).filter(Boolean)
   );
 
-  const [courseRules, skuOverrides, productIdOverrides] = await Promise.all([
-    courseCodes.length
-      ? ProductPricingRule.find({
-          ruleType: "course_rule",
-          isActive: true,
-          category,
-          courseCode: { $in: courseCodes },
-        }).lean()
-      : Promise.resolve([]),
+  const courseCodes = uniqueStrings(
+    args.rows
+      .flatMap((row) => splitCourseCodes(safeStr(row?.E)))
+      .filter(Boolean)
+  );
+
+  const [overridesRaw, courseRulesRaw] = await Promise.all([
     skus.length
       ? ProductPricingRule.find({
           ruleType: "product_override",
           isActive: true,
           productSku: { $in: skus },
-        }).lean()
-      : Promise.resolve([]),
-    existingProductIds.length
+        })
+          .sort({ updatedAt: -1, _id: -1 })
+          .lean()
+      : [],
+    courseCodes.length
       ? ProductPricingRule.find({
-          ruleType: "product_override",
+          ruleType: "course_rule",
           isActive: true,
-          productId: { $in: existingProductIds },
-        }).lean()
-      : Promise.resolve([]),
+          category: args.category,
+          courseCode: { $in: courseCodes },
+        })
+          .sort({ updatedAt: -1, _id: -1 })
+          .lean()
+      : [],
   ]);
 
-  const courseRuleMap = new Map<string, any>();
-  const productOverrideBySku = new Map<string, any>();
-  const productOverrideByProductId = new Map<string, any>();
+  const overrideBySku = new Map<string, any>();
+  const courseRuleByCode = new Map<string, any>();
 
-  for (const rule of Array.isArray(courseRules) ? courseRules : []) {
-    const key = normalizeCourseCodeLoose(rule?.courseCode || "");
-    if (key && !courseRuleMap.has(key)) courseRuleMap.set(key, rule);
-  }
-
-  for (const rule of Array.isArray(skuOverrides) ? skuOverrides : []) {
-    const key = normalizeSku(rule?.productSku || "");
-    if (key && !productOverrideBySku.has(key)) {
-      productOverrideBySku.set(key, rule);
+  for (const rule of Array.isArray(overridesRaw) ? overridesRaw : []) {
+    const sku = normalizeSku(rule?.productSku);
+    if (sku && !overrideBySku.has(sku)) {
+      overrideBySku.set(sku, rule);
     }
   }
 
-  for (const rule of Array.isArray(productIdOverrides) ? productIdOverrides : []) {
-    const key = safeStr(rule?.productId);
-    if (key && !productOverrideByProductId.has(key)) {
-      productOverrideByProductId.set(key, rule);
+  for (const rule of Array.isArray(courseRulesRaw) ? courseRulesRaw : []) {
+    const code = safeStr(rule?.courseCode).toUpperCase();
+    if (code && !courseRuleByCode.has(code)) {
+      courseRuleByCode.set(code, rule);
     }
   }
 
-  pricingCache = {
-    loadedAt: now,
-    category,
-    courseRuleMap,
-    productOverrideBySku,
-    productOverrideByProductId,
-  };
-
-  return pricingCache;
+  return {
+    overrideBySku,
+    courseRuleByCode,
+  } as PricingContext;
 }
 
-function resolveRequiredPricingFromCache(args: {
-  pricingCache: PricingCache;
-  courseCodeList: string[];
+function resolvePricingForRow(args: {
+  pricingContext: PricingContext;
   sku: string;
-  existingProductId?: string;
+  courseCodeList: string[];
 }) {
-  const existingProductId = safeStr(args.existingProductId);
-
-  if (
-    existingProductId &&
-    args.pricingCache.productOverrideByProductId.has(existingProductId)
-  ) {
-    const rule = args.pricingCache.productOverrideByProductId.get(existingProductId);
+  const overrideRule = args.pricingContext.overrideBySku.get(args.sku);
+  if (overrideRule) {
     return {
       ok: true,
       source: "product_override",
-      price: Math.max(0, safeNum(rule?.price, 0)),
-      oldPrice: Math.max(0, safeNum(rule?.oldPrice, 0)),
-      matchedRule: rule,
+      price: Math.max(0, safeNum(overrideRule?.price, 0)),
+      oldPrice: Math.max(0, safeNum(overrideRule?.oldPrice, 0)),
     };
   }
 
-  const sku = normalizeSku(args.sku);
-  if (sku && args.pricingCache.productOverrideBySku.has(sku)) {
-    const rule = args.pricingCache.productOverrideBySku.get(sku);
-    return {
-      ok: true,
-      source: "product_override",
-      price: Math.max(0, safeNum(rule?.price, 0)),
-      oldPrice: Math.max(0, safeNum(rule?.oldPrice, 0)),
-      matchedRule: rule,
-    };
-  }
-
-  for (const oneCode of args.courseCodeList) {
-    const key = normalizeCourseCodeLoose(oneCode);
-    if (key && args.pricingCache.courseRuleMap.has(key)) {
-      const rule = args.pricingCache.courseRuleMap.get(key);
+  for (const code of args.courseCodeList) {
+    const courseRule = args.pricingContext.courseRuleByCode.get(code);
+    if (courseRule) {
       return {
         ok: true,
         source: "course_rule",
-        price: Math.max(0, safeNum(rule?.price, 0)),
-        oldPrice: Math.max(0, safeNum(rule?.oldPrice, 0)),
-        matchedRule: rule,
+        price: Math.max(0, safeNum(courseRule?.price, 0)),
+        oldPrice: Math.max(0, safeNum(courseRule?.oldPrice, 0)),
       };
     }
   }
@@ -977,466 +1326,81 @@ function resolveRequiredPricingFromCache(args: {
     source: "not_found",
     price: 0,
     oldPrice: 0,
-    matchedRule: null,
   };
 }
 
-function buildInitialPipelineSummary(args: {
-  totalRows: number;
+async function buildPricingValidationChunk(args: {
+  rows: PreparedBulkDetailsRow[];
+  startIndex: number;
   config: BulkDetailsJobConfig;
-  existingSummary?: any;
-}) {
-  const totalRows = Math.max(0, safeNum(args.totalRows, 0));
-  const config = args.config;
-  const existing = args.existingSummary || {};
-
-  const prevalidation = existing?.prevalidation || {};
-  const execution = existing?.execution || {};
-  const comboSync = existing?.comboSync || {};
-  const hardcopySync = existing?.hardcopySync || {};
-
-  const normalized: BulkDetailsPipelineSummary = {
-    totalRows,
-    validRows: Math.max(0, safeNum(existing?.validRows, 0)),
-    createdRows: Math.max(0, safeNum(existing?.createdRows, 0)),
-    updatedRows: Math.max(0, safeNum(existing?.updatedRows, 0)),
-    skippedRows: Math.max(0, safeNum(existing?.skippedRows, 0)),
-    failedRows: Math.max(0, safeNum(existing?.failedRows, 0)),
-    duplicateStrategy: config.duplicateStrategy,
-    dryRun: config.dryRun,
-    category: config.category,
-    pipelineStage:
-      safeStr(existing?.pipelineStage) === "execution" ||
-      safeStr(existing?.pipelineStage) === "completed"
-        ? (safeStr(existing?.pipelineStage) as BulkPipelineStage)
-        : "prevalidation",
-    prevalidation: {
-      totalRows,
-      processedRows: Math.max(0, safeNum(prevalidation?.processedRows, 0)),
-      validRows: Math.max(0, safeNum(prevalidation?.validRows, 0)),
-      failedRows: Math.max(0, safeNum(prevalidation?.failedRows, 0)),
-      skippedRows: Math.max(0, safeNum(prevalidation?.skippedRows, 0)),
-      duplicateUploadRows: Math.max(
-        0,
-        safeNum(prevalidation?.duplicateUploadRows, 0)
-      ),
-      readyRows: Math.max(0, safeNum(prevalidation?.readyRows, 0)),
-      startedAt: prevalidation?.startedAt || null,
-      completedAt: prevalidation?.completedAt || null,
-      lastNote: safeStr(prevalidation?.lastNote),
-    },
-    execution: {
-      totalRows: Math.max(0, safeNum(execution?.totalRows, 0)),
-      processedRows: Math.max(0, safeNum(execution?.processedRows, 0)),
-      createdRows: Math.max(0, safeNum(execution?.createdRows, 0)),
-      updatedRows: Math.max(0, safeNum(execution?.updatedRows, 0)),
-      skippedRows: Math.max(0, safeNum(execution?.skippedRows, 0)),
-      failedRows: Math.max(0, safeNum(execution?.failedRows, 0)),
-      successRows: Math.max(0, safeNum(execution?.successRows, 0)),
-      startedAt: execution?.startedAt || null,
-      completedAt: execution?.completedAt || null,
-      lastNote: safeStr(execution?.lastNote),
-    },
-    comboSync: {
-      attempted: Math.max(0, safeNum(comboSync?.attempted, 0)),
-      succeeded: Math.max(0, safeNum(comboSync?.succeeded, 0)),
-      failed: Math.max(0, safeNum(comboSync?.failed, 0)),
-      errors: Array.isArray(comboSync?.errors)
-        ? uniqueStrings(comboSync.errors.map((x: any) => safeStr(x))).slice(0, 10)
-        : [],
-      mode: safeStr(comboSync?.mode || "none"),
-    },
-    hardcopySync: {
-      attempted: Math.max(0, safeNum(hardcopySync?.attempted, 0)),
-      succeeded: Math.max(0, safeNum(hardcopySync?.succeeded, 0)),
-      failed: Math.max(0, safeNum(hardcopySync?.failed, 0)),
-      errors: Array.isArray(hardcopySync?.errors)
-        ? uniqueStrings(hardcopySync.errors.map((x: any) => safeStr(x))).slice(0, 10)
-        : [],
-      mode: safeStr(hardcopySync?.mode || "none"),
-    },
-  };
-
-  return normalized;
-}
-
-function buildTokenRow(args: {
-  sku: string;
-  subjectCodeRaw: string;
-  session: string;
-  language: string;
-  courseCodeList: string[];
-  matchedSubjectTitle: string;
-  joinedCourseTitles: string;
-}) {
-  return {
-    A: args.sku,
-    B: args.subjectCodeRaw,
-    C: args.session,
-    D: args.language,
-    E: args.courseCodeList.join(", "),
-    F: args.matchedSubjectTitle,
-    G: args.joinedCourseTitles,
-    H: "",
-  };
-}
-
-function buildPrevalidatedRow(args: {
-  itemIndex: number;
-  row: PreparedBulkDetailsRow;
-  courseCodeList: string[];
-  normalizedCourseTitles: string[];
-  joinedCourseTitles: string;
-  subjectDoc: any;
-  matchedSubjectTitle: string;
-  config: BulkDetailsJobConfig;
-  title: string;
-  slugBase: string;
-  normalizedSlugBase: string;
-  price: number;
-  oldPrice: number;
-  pricingSource: string;
-  templateWarnings: string[];
-}) {
-  const { subjectTitleHi, subjectTitleEn, subjectTitleOther } = getSubjectTitle(
-    args.subjectDoc
-  );
-
-  const tokenRow = buildTokenRow({
-    sku: normalizeSku(args.row.A),
-    subjectCodeRaw: safeStr(args.row.B),
-    session: safeStr(args.row.C),
-    language: safeStr(args.row.D),
-    courseCodeList: args.courseCodeList,
-    matchedSubjectTitle: args.matchedSubjectTitle,
-    joinedCourseTitles: args.joinedCourseTitles,
-  });
-
-  return {
-    itemIndex: args.itemIndex,
-    rowNumber: safeNum(args.row.rowNumber, args.itemIndex + 1),
-    sku: normalizeSku(args.row.A),
-    subjectCodeRaw: safeStr(args.row.B),
-    subjectCodeLoose: normalizeSubjectCodeLoose(args.row.B),
-    session: safeStr(args.row.C),
-    session6: normalizeSession6(args.row.C),
-    language: safeStr(args.row.D),
-    lang3: normalizeLang3(args.row.D),
-    courseCodeList: args.courseCodeList,
-    normalizedCourseTitles: args.normalizedCourseTitles,
-    joinedCourseTitles: args.joinedCourseTitles,
-    subjectTitleHi,
-    subjectTitleEn,
-    subjectTitleOther,
-    matchedSubjectTitle: args.matchedSubjectTitle,
-    title: args.title,
-    slugBase: args.slugBase,
-    normalizedSlugBase: args.normalizedSlugBase,
-    importantNote: replaceTokens(args.config.importantNoteTemplate, tokenRow),
-    shortDesc: replaceTokens(args.config.shortDescTemplate, tokenRow),
-    descriptionHtml: replaceTokens(args.config.longDescTemplate, tokenRow),
-    metaTitle: replaceTokens(args.config.metaTitleTemplate, tokenRow),
-    metaDescription: replaceTokens(args.config.metaDescriptionTemplate, tokenRow),
-    price: Math.max(0, safeNum(args.price, 0)),
-    oldPrice: Math.max(0, safeNum(args.oldPrice, 0)),
-    pricingSource: safeStr(args.pricingSource),
-    templateWarnings: args.templateWarnings,
-    raw: buildFailureRawRow(args.row),
-  } satisfies PrevalidatedBulkDetailsRow;
-}
-
-function buildExecutionPayload(args: {
-  config: BulkDetailsJobConfig;
-  row: PrevalidatedBulkDetailsRow;
-}) {
-  return {
-    title: args.row.title,
-    sku: args.row.sku,
-    category: args.config.category,
-
-    subjectCode: args.row.subjectCodeRaw,
-    subjectTitleHi: args.row.subjectTitleHi,
-    subjectTitleEn: args.row.subjectTitleEn,
-    subjectTitleOther: args.row.subjectTitleOther,
-
-    courseCodes: args.row.courseCodeList,
-    courseTitles: args.row.normalizedCourseTitles,
-
-    session: args.row.session,
-    session6: args.row.session6,
-    language: args.row.language,
-    lang3: args.row.lang3,
-
-    price: Math.max(0, safeNum(args.row.price, 0)),
-    oldPrice: Math.max(0, safeNum(args.row.oldPrice, 0)),
-
-    availability: "want_to_buy",
-    importantNote: args.row.importantNote,
-
-    shortDesc: args.row.shortDesc,
-    descriptionHtml: args.row.descriptionHtml,
-
-    isDigital: deriveIsDigitalFromCategory(args.config.category),
-
-    metaTitle: args.row.metaTitle,
-    metaDescription: args.row.metaDescription,
-
-    isAutoGenerated: false,
-    autoGenerationType: "",
-    autoGeneratedFromProductId: null,
-    autoGeneratedFromSku: "",
-    autoGeneratedFromCategory: "",
-    autoGeneratedAt: null,
-
-    isActive: args.config.publishNow,
-    lastModifiedAt: new Date(),
-
-    deletedAt: null,
-    deletedBy: "",
-  };
-}
-
-function applyHardcopySyncPatch(
-  currentPatch: BulkDetailsPipelineSummary["hardcopySync"],
-  syncResult: any
-) {
-  const next = {
-    attempted: Math.max(0, safeNum(currentPatch?.attempted, 0)),
-    succeeded: Math.max(0, safeNum(currentPatch?.succeeded, 0)),
-    failed: Math.max(0, safeNum(currentPatch?.failed, 0)),
-    errors: Array.isArray(currentPatch?.errors)
-      ? [...currentPatch.errors]
-      : [],
-    mode: safeStr(currentPatch?.mode || "none"),
-  };
-
-  const hardcopySync = syncResult?.hardcopySync;
-  if (!hardcopySync) return next;
-
-  next.attempted += 1;
-  next.mode = "via-availability-sync";
-
-  if (hardcopySync?.ok === false) {
-    next.failed += 1;
-    const reason = safeStr(hardcopySync?.reason || hardcopySync?.error);
-    if (reason) {
-      next.errors = uniqueStrings([...next.errors, reason]).slice(0, 10);
-    }
-    return next;
-  }
-
-  next.succeeded += 1;
-  return next;
-}
-
-async function prevalidateBulkDetailsBatch(args: {
-  job: any;
+  subjectMap: Map<string, any>;
+  courseMap: Map<string, any>;
+  pricingContext: PricingContext;
   batchNumber: number;
-  fromIndex: number;
-  toIndex: number;
-}) {
-  await dbConnect();
-
-  const job = args.job;
-  const config = normalizeBulkDetailsConfig(job?.config || {});
-  validateBulkDetailsConfig(config);
-
-  const rows: PreparedBulkDetailsRow[] = Array.isArray(job?.input?.rows)
-    ? job.input.rows
-    : [];
-
-  const batchRows = rows.slice(args.fromIndex, args.toIndex + 1);
-  const currentSummary = buildInitialPipelineSummary({
-    totalRows: rows.length,
-    config,
-    existingSummary: job?.summary || {},
-  });
-
-  const prevalidationStartedAt =
-    currentSummary.prevalidation.startedAt || new Date();
-
-  const seenSkuSet = new Set<string>(
-    Array.isArray(job?.input?.prevalidationSeenSkus)
-      ? job.input.prevalidationSeenSkus.map((x: any) => normalizeSku(x))
-      : []
-  );
-
-  const newPreparedRows: PrevalidatedBulkDetailsRow[] = [];
-  const newSeenSkus: string[] = [];
+}): Promise<ChunkValidationResult<PreparedExecutionRow>> {
   const failures: BulkDetailsBatchProcessResult["failures"] = [];
-
-  const master = await getMasterDataCache(false);
-  const subjectMap = master.subjectMap;
-  const courseMap = master.courseMap;
-  const sessionAllowed = getSessionAllowedForCategory(master, config.category);
+  const acceptedRows: PreparedExecutionRow[] = [];
 
   const allTemplates = [
-    config.titleTemplate,
-    config.importantNoteTemplate,
-    config.shortDescTemplate,
-    config.longDescTemplate,
-    config.slugTemplate,
-    config.metaTitleTemplate,
-    config.metaDescriptionTemplate,
+    args.config.titleTemplate,
+    args.config.importantNoteTemplate,
+    args.config.shortDescTemplate,
+    args.config.longDescTemplate,
+    args.config.slugTemplate,
+    args.config.metaTitleTemplate,
+    args.config.metaDescriptionTemplate,
   ];
 
-  const batchSkus = uniqueStrings(batchRows.map((row) => normalizeSku(row?.A)));
-  const batchCourseCodes = uniqueStrings(
-    batchRows.flatMap((row) => splitCourseCodes(row?.E))
-  );
+  let validCount = 0;
+  let failedCount = 0;
+  let skippedCount = 0;
 
-  const existingProducts: any[] = batchSkus.length
-    ? await Product.find({
-        sku: { $in: batchSkus },
-        deletedAt: null,
-      })
-        .select("_id sku")
-        .lean()
-    : [];
-
-  const existingBySku = new Map<string, any>();
-  for (const item of Array.isArray(existingProducts) ? existingProducts : []) {
-    const key = normalizeSku(item?.sku || "");
-    if (key && !existingBySku.has(key)) existingBySku.set(key, item);
-  }
-
-  const pricing = await buildPricingCacheForCategory({
-    category: config.category,
-    courseCodes: batchCourseCodes,
-    skus: batchSkus,
-    existingProductIds: existingProducts.map((x: any) => safeStr(x?._id)),
-  });
-
-  let batchValidRows = 0;
-  let batchFailedRows = 0;
-  let batchSkippedRows = 0;
-  let batchDuplicateRows = 0;
-
-  for (let idx = 0; idx < batchRows.length; idx++) {
-    const row = batchRows[idx];
-    const itemIndex = args.fromIndex + idx;
-    const rowNumber = Number(row?.rowNumber || itemIndex + 1);
-
+  args.rows.forEach((row, localIndex) => {
+    const itemIndex = args.startIndex + localIndex;
+    const rowNumber = safeNum(row?.rowNumber, itemIndex + 1);
     const sku = normalizeSku(row?.A);
     const subjectCodeRaw = safeStr(row?.B);
-
-    const pushFailure = (status: string, reason: string, customSku?: string) => {
-      const effectiveSku = safeStr(customSku || sku);
-      failures.push({
-        itemIndex,
-        rowNumber,
-        batchNumber: args.batchNumber,
-        identifier: effectiveSku || subjectCodeRaw || `row-${rowNumber}`,
-        sku: effectiveSku,
-        status,
-        reason,
-        raw: buildFailureRawRow(row),
-      });
-    };
+    const session = safeStr(row?.C);
+    const language = safeStr(row?.D);
+    const courseCodeRaw = safeStr(row?.E);
 
     try {
-      const session = safeStr(row?.C);
-      const language = safeStr(row?.D);
-      const courseCodeRaw = safeStr(row?.E);
-
-      if (!sku || !subjectCodeRaw || !session || !language || !courseCodeRaw) {
-        batchFailedRows++;
-        pushFailure("failed", "Required columns missing or invalid in this row");
-        continue;
-      }
-
-      if (seenSkuSet.has(sku)) {
-        batchSkippedRows++;
-        batchDuplicateRows++;
-        pushFailure(
-          "skipped",
-          "Duplicate SKU found inside uploaded sheet. First occurrence kept, later duplicate row skipped before validation."
-        );
-        continue;
-      }
-
-      seenSkuSet.add(sku);
-      newSeenSkus.push(sku);
-
       const subjectCodeLoose = normalizeSubjectCodeLoose(subjectCodeRaw);
+      const subjectDoc = args.subjectMap.get(subjectCodeLoose);
       const courseCodeList = splitCourseCodes(courseCodeRaw);
 
-      const subjectDoc = subjectMap.get(subjectCodeLoose);
-      if (!subjectDoc) {
-        batchFailedRows++;
-        pushFailure(
-          "failed",
-          `Subject not found in master subjects: ${subjectCodeRaw}`
-        );
-        continue;
+      if (!subjectDoc || !courseCodeList.length) {
+        failedCount++;
+        pushFailureRow(failures, {
+          itemIndex,
+          rowNumber,
+          batchNumber: args.batchNumber,
+          identifier: sku || subjectCodeRaw || `row-${rowNumber}`,
+          sku,
+          status: "failed",
+          reason: "Pricing stage input invalid. Previous validation output mismatch.",
+          raw: buildFailureRawRow(row),
+        });
+        return;
       }
 
-      if (!courseCodeList.length) {
-        batchFailedRows++;
-        pushFailure("failed", `Course code missing or invalid: ${courseCodeRaw}`);
-        continue;
-      }
-
-      const missingCourse: string[] = [];
       const courseTitles: string[] = [];
-
       for (const oneCode of courseCodeList) {
-        const loose = normalizeCourseCodeLoose(oneCode);
-        const courseDoc = courseMap.get(loose);
-
-        if (!courseDoc) {
-          missingCourse.push(oneCode);
-        } else {
+        const courseDoc = args.courseMap.get(normalizeCourseCodeLoose(oneCode));
+        if (courseDoc) {
           courseTitles.push(getCourseTitle(courseDoc));
         }
       }
 
-      if (missingCourse.length) {
-        batchFailedRows++;
-        pushFailure(
-          "failed",
-          `Course not found in master courses: ${missingCourse.join(", ")}`
-        );
-        continue;
-      }
-
-      if (!sessionMatches(sessionAllowed, session)) {
-        batchFailedRows++;
-        pushFailure(
-          "failed",
-          `Session not found in category-wise master sessions: ${session}`
-        );
-        continue;
-      }
-
       const normalizedCourseTitles = uniqueStrings(courseTitles.filter(Boolean));
       const joinedCourseTitles = normalizedCourseTitles.join(", ");
+
+      const { subjectTitleHi, subjectTitleEn, subjectTitleOther } =
+        getSubjectTitle(subjectDoc);
       const matchedSubjectTitle = getMatchedSubjectTitleForLanguage(
         subjectDoc,
         language
       );
-
-      const tokenRow = buildTokenRow({
-        sku,
-        subjectCodeRaw,
-        session,
-        language,
-        courseCodeList,
-        matchedSubjectTitle,
-        joinedCourseTitles,
-      });
-
-      const title = replaceTokens(config.titleTemplate, tokenRow);
-      const slugBase = config.slugTemplate
-        ? replaceTokens(config.slugTemplate, tokenRow)
-        : title;
-      const normalizedSlugBase = slugify(slugBase);
-
-      if (!title) {
-        batchFailedRows++;
-        pushFailure("failed", "Generated title empty hai");
-        continue;
-      }
 
       const templateWarnings = buildTemplateWarnings({
         allTemplates,
@@ -1444,168 +1408,178 @@ async function prevalidateBulkDetailsBatch(args: {
         joinedCourseTitles,
       });
 
-      const existingProduct = existingBySku.get(sku);
-      const cachedPricing = resolveRequiredPricingFromCache({
-        pricingCache: pricing,
-        courseCodeList,
+      const pricingResolution = resolvePricingForRow({
+        pricingContext: args.pricingContext,
         sku,
-        existingProductId: safeStr(existingProduct?._id),
+        courseCodeList,
       });
 
-      let finalPricing = cachedPricing;
-      if (!finalPricing.ok) {
-        const fallbackPricing = await resolveRequiredProductPricing({
-          category: config.category,
-          courseCodes: courseCodeList,
-          productSku: sku,
-          productId: safeStr(existingProduct?._id),
+      if (!pricingResolution.ok || Number(pricingResolution.price) <= 0) {
+        failedCount++;
+        pushFailureRow(failures, {
+          itemIndex,
+          rowNumber,
+          batchNumber: args.batchNumber,
+          identifier: sku || subjectCodeRaw || `row-${rowNumber}`,
+          sku,
+          status: "failed",
+          reason:
+            "Pricing rule not found. Pehle Product Pricing page me category + course rule ya product override set karo.",
+          raw: buildFailureRawRow(row),
         });
-
-        finalPricing = {
-          ok: fallbackPricing.ok,
-          source: fallbackPricing.source,
-          price: fallbackPricing.price,
-          oldPrice: fallbackPricing.oldPrice,
-          matchedRule: null,
-        };
+        return;
       }
 
-      if (!finalPricing.ok || Number(finalPricing.price) <= 0) {
-        batchFailedRows++;
-        pushFailure(
-          "failed",
-          "Pricing rule not found. Pehle Product Pricing page me category + course rule ya product override set karo."
-        );
-        continue;
-      }
-
-      const prepared = buildPrevalidatedRow({
+      acceptedRows.push({
         itemIndex,
-        row,
+        rowNumber,
+        sku,
+        subjectCodeRaw,
+        session,
+        session6: normalizeSession6(session),
+        language,
+        lang3: normalizeLang3(language),
         courseCodeList,
-        normalizedCourseTitles,
+        courseTitles: normalizedCourseTitles,
         joinedCourseTitles,
-        subjectDoc,
+        subjectTitleHi,
+        subjectTitleEn,
+        subjectTitleOther,
         matchedSubjectTitle,
-        config,
-        title,
-        slugBase,
-        normalizedSlugBase,
-        price: finalPricing.price,
-        oldPrice: finalPricing.oldPrice,
-        pricingSource: finalPricing.source,
+        price: Math.max(0, safeNum(pricingResolution.price, 0)),
+        oldPrice: Math.max(0, safeNum(pricingResolution.oldPrice, 0)),
+        pricingSource: safeStr(pricingResolution.source),
         templateWarnings,
       });
 
-      newPreparedRows.push(prepared);
-      batchValidRows++;
+      validCount++;
     } catch (error: any) {
-      batchFailedRows++;
-      pushFailure("failed", sanitizeUnexpectedRowError(error));
-      continue;
+      failedCount++;
+      pushFailureRow(failures, {
+        itemIndex,
+        rowNumber,
+        batchNumber: args.batchNumber,
+        identifier: sku || subjectCodeRaw || `row-${rowNumber}`,
+        sku,
+        status: "failed",
+        reason: sanitizeUnexpectedRowError(error),
+        raw: buildFailureRawRow(row),
+      });
     }
-  }
-
-  const nextSummary = buildInitialPipelineSummary({
-    totalRows: rows.length,
-    config,
-    existingSummary: currentSummary,
   });
 
-  nextSummary.pipelineStage = "prevalidation";
-  nextSummary.validRows =
-    safeNum(currentSummary.validRows, 0) + batchValidRows;
-  nextSummary.failedRows =
-    safeNum(currentSummary.failedRows, 0) + batchFailedRows;
-  nextSummary.skippedRows =
-    safeNum(currentSummary.skippedRows, 0) + batchSkippedRows;
-
-  nextSummary.prevalidation = {
-    ...nextSummary.prevalidation,
-    totalRows: rows.length,
-    processedRows:
-      safeNum(currentSummary.prevalidation.processedRows, 0) + batchRows.length,
-    validRows: safeNum(currentSummary.prevalidation.validRows, 0) + batchValidRows,
-    failedRows:
-      safeNum(currentSummary.prevalidation.failedRows, 0) + batchFailedRows,
-    skippedRows:
-      safeNum(currentSummary.prevalidation.skippedRows, 0) + batchSkippedRows,
-    duplicateUploadRows:
-      safeNum(currentSummary.prevalidation.duplicateUploadRows, 0) +
-      batchDuplicateRows,
-    readyRows:
-      safeNum(currentSummary.prevalidation.readyRows, 0) + batchValidRows,
-    startedAt: prevalidationStartedAt,
-    completedAt: null,
-    lastNote: `Pre-validation batch ${args.batchNumber} processed. Valid ${batchValidRows}, Duplicate skipped ${batchDuplicateRows}, Failed ${batchFailedRows}.`,
+  return {
+    acceptedRows,
+    failures,
+    validCount,
+    failedCount,
+    skippedCount,
   };
+}
 
-  let nextStage: BulkPipelineStage = "prevalidation";
+async function loadExistingProductsForExecution(
+  executionRows: PreparedExecutionRow[]
+) {
+  await dbConnect();
 
-  if (nextSummary.prevalidation.processedRows >= rows.length) {
-    nextSummary.prevalidation.completedAt = new Date();
+  const skus = uniqueStrings(
+    executionRows
+      .map((row: PreparedExecutionRow) => normalizeSku(row?.sku))
+      .filter((sku: string) => Boolean(sku))
+  );
 
-    if (config.dryRun) {
-      nextSummary.pipelineStage = "completed";
-      nextSummary.execution = {
-        ...nextSummary.execution,
-        totalRows: safeNum(nextSummary.prevalidation.readyRows, 0),
-        processedRows: 0,
-        createdRows: 0,
-        updatedRows: 0,
-        skippedRows: 0,
-        failedRows: 0,
-        successRows: 0,
-        startedAt: null,
-        completedAt: new Date(),
-        lastNote:
-          "Pre-validation completed. Dry run enabled hai, isliye final product create/update stage run nahi hui.",
-      };
-      nextStage = "completed";
-    } else {
-      nextSummary.pipelineStage = "execution";
-      nextSummary.execution = {
-        ...nextSummary.execution,
-        totalRows: safeNum(nextSummary.prevalidation.readyRows, 0),
-        processedRows: 0,
-        createdRows: 0,
-        updatedRows: 0,
-        skippedRows: 0,
-        failedRows: 0,
-        successRows: 0,
-        startedAt: null,
-        completedAt: null,
-        lastNote:
-          "Pre-validation completed successfully. Final product upload/create stage ready hai.",
-      };
-      nextStage = "execution";
+  if (!skus.length) {
+    return new Map<string, any>();
+  }
+
+  const docs: any[] = await Product.find({
+    sku: { $in: skus },
+    deletedAt: null,
+  })
+    .select(PRODUCT_EXECUTION_SELECT)
+    .lean();
+
+  const out = new Map<string, any>();
+  for (const doc of docs) {
+    const sku = normalizeSku(doc?.sku);
+    if (sku) {
+      out.set(sku, doc);
     }
   }
 
-  return {
-    stage: "prevalidation" as BulkPipelineStage,
-    processedDelta: batchRows.length,
-    successDelta: 0,
-    failedDelta: batchFailedRows,
-    skippedDelta: batchSkippedRows,
-    validDelta: batchValidRows,
-    nextLastProcessedIndex: args.toIndex,
-    batchNumber: args.batchNumber,
-    fromIndex: args.fromIndex,
-    toIndex: args.toIndex,
-    attempted: batchRows.length,
-    failures,
-    summaryPatch: nextSummary,
-    inputAppendPatch: {
-      prevalidationSeenSkus: newSeenSkus,
-      prevalidatedRows: newPreparedRows,
-    },
-    nextStage,
-    note: nextSummary.prevalidation.lastNote,
-  } satisfies BulkDetailsBatchProcessResult;
+  return out;
 }
 
-async function executeBulkDetailsBatch(args: {
+function buildProductPayload(config: BulkDetailsJobConfig, row: PreparedExecutionRow) {
+  const tokenRow = {
+    A: row.sku,
+    B: row.subjectCodeRaw,
+    C: row.session,
+    D: row.language,
+    E: row.courseCodeList.join(", "),
+    F: row.matchedSubjectTitle,
+    G: row.joinedCourseTitles,
+    H: "",
+  };
+
+  const title = replaceTokens(config.titleTemplate, tokenRow);
+  const slugSeed = config.slugTemplate
+    ? replaceTokens(config.slugTemplate, tokenRow)
+    : title;
+
+  return {
+    title,
+    slugBase: buildDeterministicSlug(slugSeed || title, row.sku),
+    importantNote: replaceTokens(config.importantNoteTemplate, tokenRow),
+    shortDesc: replaceTokens(config.shortDescTemplate, tokenRow),
+    descriptionHtml: replaceTokens(config.longDescTemplate, tokenRow),
+    metaTitle: replaceTokens(config.metaTitleTemplate, tokenRow),
+    metaDescription: replaceTokens(config.metaDescriptionTemplate, tokenRow),
+  };
+}
+
+function getDetailedStage(jobLike: any): BulkDetailsDetailedStage {
+  const stage = safeStr(jobLike?.summary?.pipelineStage).toLowerCase();
+
+  if (
+    stage === "sku_scan" ||
+    stage === "course_validation" ||
+    stage === "session_validation" ||
+    stage === "subject_validation" ||
+    stage === "pricing_validation" ||
+    stage === "execution" ||
+    stage === "completed"
+  ) {
+    return stage as BulkDetailsDetailedStage;
+  }
+
+  return "sku_scan";
+}
+
+export function getBulkDetailsDetailedStage(jobLike: any) {
+  return getDetailedStage(jobLike);
+}
+
+export function getBulkDetailsPipelineStage(
+  jobLike: any
+): BulkDetailsPipelineStage {
+  const stage = getDetailedStage(jobLike);
+  if (stage === "execution") return "execution";
+  if (stage === "completed") return "completed";
+  return "prevalidation";
+}
+
+function buildNextStageLabel(stage: BulkDetailsDetailedStage) {
+  if (stage === "sku_scan") return "Unique SKU Scan";
+  if (stage === "course_validation") return "Master Course Validation";
+  if (stage === "session_validation") return "Master Session Validation";
+  if (stage === "subject_validation") return "Master Subject Validation";
+  if (stage === "pricing_validation") return "Pricing Validation";
+  if (stage === "execution") return "Final Product Upload/Create";
+  return "Completed";
+}
+
+export async function processBulkDetailsJobBatch(args: {
   job: any;
   batchNumber: number;
   fromIndex: number;
@@ -1617,91 +1591,663 @@ async function executeBulkDetailsBatch(args: {
   const config = normalizeBulkDetailsConfig(job?.config || {});
   validateBulkDetailsConfig(config);
 
-  const preparedRows: PrevalidatedBulkDetailsRow[] = Array.isArray(
-    job?.input?.prevalidatedRows
-  )
-    ? job.input.prevalidatedRows
+  const summary = cloneRecord(job?.summary || {});
+  const detailedStage = getDetailedStage(job);
+
+  const rawRows: PreparedBulkDetailsRow[] = Array.isArray(job?.input?.rows)
+    ? job.input.rows
     : [];
-
-  const batchRows = preparedRows.slice(args.fromIndex, args.toIndex + 1);
-  const currentSummary = buildInitialPipelineSummary({
-    totalRows: safeNum(job?.summary?.totalRows, preparedRows.length),
-    config,
-    existingSummary: job?.summary || {},
-  });
-
-  const comboSyncQueue: SyncQueueItem[] = [];
-  let hardcopySyncPatch = {
-    ...currentSummary.hardcopySync,
-  };
-
-  let batchCreatedRows = 0;
-  let batchUpdatedRows = 0;
-  let batchSkippedRows = 0;
-  let batchFailedRows = 0;
+  const stageRows: PreparedBulkDetailsRow[] = Array.isArray(job?.input?.stageRows)
+    ? job.input.stageRows
+    : rawRows;
+  const stageCursor = Math.max(0, safeNum(job?.input?.stageCursor, 0));
+  const nextStageRows: PreparedBulkDetailsRow[] = Array.isArray(job?.input?.nextStageRows)
+    ? job.input.nextStageRows
+    : [];
+  const executionRows: PreparedExecutionRow[] = Array.isArray(job?.input?.executionRows)
+    ? job.input.executionRows
+    : [];
 
   const failures: BulkDetailsBatchProcessResult["failures"] = [];
 
-  for (let idx = 0; idx < batchRows.length; idx++) {
-    const row = batchRows[idx];
-    const rowNumber = safeNum(row?.rowNumber, args.fromIndex + idx + 1);
-    const itemIndex = safeNum(row?.itemIndex, args.fromIndex + idx);
-    const sku = normalizeSku(row?.sku);
-    const subjectCodeRaw = safeStr(row?.subjectCodeRaw);
+  const master = await getMasterDataCache(false);
+  const subjectMap = master.subjectMap;
+  const courseMap = master.courseMap;
+  const sessionAllowed = getSessionAllowedForCategory(master, config.category);
 
-    const pushFailure = (status: string, reason: string, customSku?: string) => {
-      const effectiveSku = safeStr(customSku || sku);
-      failures.push({
-        itemIndex,
-        rowNumber,
-        batchNumber: args.batchNumber,
-        identifier: effectiveSku || subjectCodeRaw || `row-${rowNumber}`,
-        sku: effectiveSku,
-        status,
-        reason,
-        raw: row?.raw || null,
-      });
+  if (detailedStage === "sku_scan") {
+    const result = await buildSkuScanResult(rawRows, args.batchNumber);
+    failures.push(...result.failures);
+
+    await persistJobInput(job, {
+      stageRows: result.remainingRows,
+      stageCursor: 0,
+      nextStageRows: [],
+      executionRows: [],
+    });
+
+    const skuScan = {
+      ...getStageBlock(summary, "skuScan", rawRows.length, {
+        duplicateRows: 0,
+        remainingRows: rawRows.length,
+        siteDuplicateRows: 0,
+        sheetDuplicateRows: 0,
+      }),
+      totalRows: rawRows.length,
+      processedRows: rawRows.length,
+      validRows: result.validCount,
+      failedRows: result.failedCount,
+      skippedRows: result.skippedCount,
+      duplicateRows: result.duplicateRows,
+      remainingRows: result.remainingRows.length,
+      siteDuplicateRows: result.siteDuplicateRows,
+      sheetDuplicateRows: result.sheetDuplicateRows,
+      startedAt: summary?.skuScan?.startedAt || new Date().toISOString(),
+      completedAt: new Date().toISOString(),
+      lastNote: `Unique SKU scan complete. Remaining valid rows ${result.remainingRows.length}, site duplicate skipped ${result.siteDuplicateRows}, sheet duplicate skipped ${result.sheetDuplicateRows}, failed ${result.failedCount}.`,
     };
 
+    const courseValidation = {
+      ...getStageBlock(summary, "courseValidation", result.remainingRows.length),
+      totalRows: result.remainingRows.length,
+    };
+
+    const nextSummary = {
+      ...summary,
+      totalRows: rawRows.length,
+      validRows: result.remainingRows.length,
+      failedRows: safeNum(summary.failedRows, 0) + result.failedCount,
+      skippedRows: safeNum(summary.skippedRows, 0) + result.skippedCount,
+      pipelineStage: "course_validation",
+      stageLabel: buildNextStageLabel("course_validation"),
+      nextStageTotalItems: result.remainingRows.length,
+      skuScan,
+      courseValidation,
+    };
+
+    return {
+      processedDelta: rawRows.length,
+      successDelta: 0,
+      failedDelta: result.failedCount,
+      skippedDelta: result.skippedCount,
+      validDelta: 0,
+      nextLastProcessedIndex: Math.max(-1, rawRows.length - 1),
+      batchNumber: args.batchNumber,
+      fromIndex: 0,
+      toIndex: Math.max(-1, rawRows.length - 1),
+      attempted: rawRows.length,
+      failures,
+      summaryPatch: nextSummary,
+      note: skuScan.lastNote,
+    } as BulkDetailsBatchProcessResult;
+  }
+
+  if (detailedStage === "course_validation") {
+    const chunkInfo = getChunkInfo(
+      stageRows,
+      stageCursor,
+      PREVALIDATION_STAGE_CHUNK_SIZE
+    );
+
+    const result = buildCourseValidationChunk({
+      rows: chunkInfo.chunkRows,
+      startIndex: chunkInfo.cursor,
+      batchNumber: args.batchNumber,
+      courseMap,
+    });
+
+    failures.push(...result.failures);
+
+    const accumulatedNextRows = [...nextStageRows, ...result.acceptedRows];
+    const courseValidation = {
+      ...getStageBlock(summary, "courseValidation", stageRows.length),
+      totalRows: stageRows.length,
+      processedRows:
+        safeNum(summary?.courseValidation?.processedRows, 0) + chunkInfo.chunkRows.length,
+      validRows: safeNum(summary?.courseValidation?.validRows, 0) + result.validCount,
+      failedRows: safeNum(summary?.courseValidation?.failedRows, 0) + result.failedCount,
+      skippedRows: safeNum(summary?.courseValidation?.skippedRows, 0) + result.skippedCount,
+      startedAt: summary?.courseValidation?.startedAt || new Date().toISOString(),
+      completedAt: chunkInfo.isDone ? new Date().toISOString() : null,
+      lastNote: chunkInfo.isDone
+        ? `Master course validation complete. Remaining valid rows ${accumulatedNextRows.length}, failed ${safeNum(summary?.courseValidation?.failedRows, 0) + result.failedCount}.`
+        : `Master course validation running: ${chunkInfo.nextCursor}/${stageRows.length} rows checked. Valid till now ${accumulatedNextRows.length}.`,
+    };
+
+    if (chunkInfo.isDone) {
+      await persistJobInput(job, {
+        stageRows: accumulatedNextRows,
+        stageCursor: 0,
+        nextStageRows: [],
+      });
+
+      const sessionValidation = {
+        ...getStageBlock(summary, "sessionValidation", accumulatedNextRows.length),
+        totalRows: accumulatedNextRows.length,
+      };
+
+      const nextSummary = {
+        ...summary,
+        validRows: accumulatedNextRows.length,
+        failedRows: safeNum(summary.failedRows, 0) + result.failedCount,
+        skippedRows: safeNum(summary.skippedRows, 0) + result.skippedCount,
+        pipelineStage: "session_validation",
+        stageLabel: buildNextStageLabel("session_validation"),
+        nextStageTotalItems: accumulatedNextRows.length,
+        courseValidation,
+        sessionValidation,
+      };
+
+      return {
+        processedDelta: chunkInfo.chunkRows.length,
+        successDelta: 0,
+        failedDelta: result.failedCount,
+        skippedDelta: result.skippedCount,
+        validDelta: 0,
+        nextLastProcessedIndex: Math.max(-1, chunkInfo.nextCursor - 1),
+        batchNumber: args.batchNumber,
+        fromIndex: chunkInfo.cursor,
+        toIndex: Math.max(-1, chunkInfo.nextCursor - 1),
+        attempted: chunkInfo.chunkRows.length,
+        failures,
+        summaryPatch: nextSummary,
+        note: courseValidation.lastNote,
+      } as BulkDetailsBatchProcessResult;
+    }
+
+    await persistJobInput(job, {
+      stageRows,
+      stageCursor: chunkInfo.nextCursor,
+      nextStageRows: accumulatedNextRows,
+    });
+
+    const nextSummary = {
+      ...summary,
+      validRows: accumulatedNextRows.length,
+      failedRows: safeNum(summary.failedRows, 0) + result.failedCount,
+      skippedRows: safeNum(summary.skippedRows, 0) + result.skippedCount,
+      pipelineStage: "course_validation",
+      stageLabel: buildNextStageLabel("course_validation"),
+      nextStageTotalItems: stageRows.length,
+      courseValidation,
+    };
+
+    return {
+      processedDelta: chunkInfo.chunkRows.length,
+      successDelta: 0,
+      failedDelta: result.failedCount,
+      skippedDelta: result.skippedCount,
+      validDelta: 0,
+      nextLastProcessedIndex: Math.max(-1, chunkInfo.nextCursor - 1),
+      batchNumber: args.batchNumber,
+      fromIndex: chunkInfo.cursor,
+      toIndex: Math.max(-1, chunkInfo.nextCursor - 1),
+      attempted: chunkInfo.chunkRows.length,
+      failures,
+      summaryPatch: nextSummary,
+      note: courseValidation.lastNote,
+    } as BulkDetailsBatchProcessResult;
+  }
+
+  if (detailedStage === "session_validation") {
+    const chunkInfo = getChunkInfo(
+      stageRows,
+      stageCursor,
+      PREVALIDATION_STAGE_CHUNK_SIZE
+    );
+
+    const result = buildSessionValidationChunk({
+      rows: chunkInfo.chunkRows,
+      startIndex: chunkInfo.cursor,
+      batchNumber: args.batchNumber,
+      sessionAllowed,
+    });
+
+    failures.push(...result.failures);
+
+    const accumulatedNextRows = [...nextStageRows, ...result.acceptedRows];
+    const sessionValidation = {
+      ...getStageBlock(summary, "sessionValidation", stageRows.length),
+      totalRows: stageRows.length,
+      processedRows:
+        safeNum(summary?.sessionValidation?.processedRows, 0) + chunkInfo.chunkRows.length,
+      validRows: safeNum(summary?.sessionValidation?.validRows, 0) + result.validCount,
+      failedRows: safeNum(summary?.sessionValidation?.failedRows, 0) + result.failedCount,
+      skippedRows: safeNum(summary?.sessionValidation?.skippedRows, 0) + result.skippedCount,
+      startedAt: summary?.sessionValidation?.startedAt || new Date().toISOString(),
+      completedAt: chunkInfo.isDone ? new Date().toISOString() : null,
+      lastNote: chunkInfo.isDone
+        ? `Master session validation complete. Remaining valid rows ${accumulatedNextRows.length}, failed ${safeNum(summary?.sessionValidation?.failedRows, 0) + result.failedCount}.`
+        : `Master session validation running: ${chunkInfo.nextCursor}/${stageRows.length} rows checked. Valid till now ${accumulatedNextRows.length}.`,
+    };
+
+    if (chunkInfo.isDone) {
+      await persistJobInput(job, {
+        stageRows: accumulatedNextRows,
+        stageCursor: 0,
+        nextStageRows: [],
+      });
+
+      const subjectValidation = {
+        ...getStageBlock(summary, "subjectValidation", accumulatedNextRows.length),
+        totalRows: accumulatedNextRows.length,
+      };
+
+      const nextSummary = {
+        ...summary,
+        validRows: accumulatedNextRows.length,
+        failedRows: safeNum(summary.failedRows, 0) + result.failedCount,
+        skippedRows: safeNum(summary.skippedRows, 0) + result.skippedCount,
+        pipelineStage: "subject_validation",
+        stageLabel: buildNextStageLabel("subject_validation"),
+        nextStageTotalItems: accumulatedNextRows.length,
+        sessionValidation,
+        subjectValidation,
+      };
+
+      return {
+        processedDelta: chunkInfo.chunkRows.length,
+        successDelta: 0,
+        failedDelta: result.failedCount,
+        skippedDelta: result.skippedCount,
+        validDelta: 0,
+        nextLastProcessedIndex: Math.max(-1, chunkInfo.nextCursor - 1),
+        batchNumber: args.batchNumber,
+        fromIndex: chunkInfo.cursor,
+        toIndex: Math.max(-1, chunkInfo.nextCursor - 1),
+        attempted: chunkInfo.chunkRows.length,
+        failures,
+        summaryPatch: nextSummary,
+        note: sessionValidation.lastNote,
+      } as BulkDetailsBatchProcessResult;
+    }
+
+    await persistJobInput(job, {
+      stageRows,
+      stageCursor: chunkInfo.nextCursor,
+      nextStageRows: accumulatedNextRows,
+    });
+
+    const nextSummary = {
+      ...summary,
+      validRows: accumulatedNextRows.length,
+      failedRows: safeNum(summary.failedRows, 0) + result.failedCount,
+      skippedRows: safeNum(summary.skippedRows, 0) + result.skippedCount,
+      pipelineStage: "session_validation",
+      stageLabel: buildNextStageLabel("session_validation"),
+      nextStageTotalItems: stageRows.length,
+      sessionValidation,
+    };
+
+    return {
+      processedDelta: chunkInfo.chunkRows.length,
+      successDelta: 0,
+      failedDelta: result.failedCount,
+      skippedDelta: result.skippedCount,
+      validDelta: 0,
+      nextLastProcessedIndex: Math.max(-1, chunkInfo.nextCursor - 1),
+      batchNumber: args.batchNumber,
+      fromIndex: chunkInfo.cursor,
+      toIndex: Math.max(-1, chunkInfo.nextCursor - 1),
+      attempted: chunkInfo.chunkRows.length,
+      failures,
+      summaryPatch: nextSummary,
+      note: sessionValidation.lastNote,
+    } as BulkDetailsBatchProcessResult;
+  }
+
+  if (detailedStage === "subject_validation") {
+    const chunkInfo = getChunkInfo(
+      stageRows,
+      stageCursor,
+      PREVALIDATION_STAGE_CHUNK_SIZE
+    );
+
+    const result = buildSubjectValidationChunk({
+      rows: chunkInfo.chunkRows,
+      startIndex: chunkInfo.cursor,
+      batchNumber: args.batchNumber,
+      subjectMap,
+    });
+
+    failures.push(...result.failures);
+
+    const accumulatedNextRows = [...nextStageRows, ...result.acceptedRows];
+    const subjectValidation = {
+      ...getStageBlock(summary, "subjectValidation", stageRows.length),
+      totalRows: stageRows.length,
+      processedRows:
+        safeNum(summary?.subjectValidation?.processedRows, 0) + chunkInfo.chunkRows.length,
+      validRows: safeNum(summary?.subjectValidation?.validRows, 0) + result.validCount,
+      failedRows: safeNum(summary?.subjectValidation?.failedRows, 0) + result.failedCount,
+      skippedRows: safeNum(summary?.subjectValidation?.skippedRows, 0) + result.skippedCount,
+      startedAt: summary?.subjectValidation?.startedAt || new Date().toISOString(),
+      completedAt: chunkInfo.isDone ? new Date().toISOString() : null,
+      lastNote: chunkInfo.isDone
+        ? `Master subject validation complete. Remaining valid rows ${accumulatedNextRows.length}, failed ${safeNum(summary?.subjectValidation?.failedRows, 0) + result.failedCount}.`
+        : `Master subject validation running: ${chunkInfo.nextCursor}/${stageRows.length} rows checked. Valid till now ${accumulatedNextRows.length}.`,
+    };
+
+    if (chunkInfo.isDone) {
+      await persistJobInput(job, {
+        stageRows: accumulatedNextRows,
+        stageCursor: 0,
+        nextStageRows: [],
+        executionRows: [],
+      });
+
+      const pricingValidation = {
+        ...getStageBlock(summary, "pricingValidation", accumulatedNextRows.length),
+        totalRows: accumulatedNextRows.length,
+      };
+
+      const nextSummary = {
+        ...summary,
+        validRows: accumulatedNextRows.length,
+        failedRows: safeNum(summary.failedRows, 0) + result.failedCount,
+        skippedRows: safeNum(summary.skippedRows, 0) + result.skippedCount,
+        pipelineStage: "pricing_validation",
+        stageLabel: buildNextStageLabel("pricing_validation"),
+        nextStageTotalItems: accumulatedNextRows.length,
+        subjectValidation,
+        pricingValidation,
+      };
+
+      return {
+        processedDelta: chunkInfo.chunkRows.length,
+        successDelta: 0,
+        failedDelta: result.failedCount,
+        skippedDelta: result.skippedCount,
+        validDelta: 0,
+        nextLastProcessedIndex: Math.max(-1, chunkInfo.nextCursor - 1),
+        batchNumber: args.batchNumber,
+        fromIndex: chunkInfo.cursor,
+        toIndex: Math.max(-1, chunkInfo.nextCursor - 1),
+        attempted: chunkInfo.chunkRows.length,
+        failures,
+        summaryPatch: nextSummary,
+        note: subjectValidation.lastNote,
+      } as BulkDetailsBatchProcessResult;
+    }
+
+    await persistJobInput(job, {
+      stageRows,
+      stageCursor: chunkInfo.nextCursor,
+      nextStageRows: accumulatedNextRows,
+    });
+
+    const nextSummary = {
+      ...summary,
+      validRows: accumulatedNextRows.length,
+      failedRows: safeNum(summary.failedRows, 0) + result.failedCount,
+      skippedRows: safeNum(summary.skippedRows, 0) + result.skippedCount,
+      pipelineStage: "subject_validation",
+      stageLabel: buildNextStageLabel("subject_validation"),
+      nextStageTotalItems: stageRows.length,
+      subjectValidation,
+    };
+
+    return {
+      processedDelta: chunkInfo.chunkRows.length,
+      successDelta: 0,
+      failedDelta: result.failedCount,
+      skippedDelta: result.skippedCount,
+      validDelta: 0,
+      nextLastProcessedIndex: Math.max(-1, chunkInfo.nextCursor - 1),
+      batchNumber: args.batchNumber,
+      fromIndex: chunkInfo.cursor,
+      toIndex: Math.max(-1, chunkInfo.nextCursor - 1),
+      attempted: chunkInfo.chunkRows.length,
+      failures,
+      summaryPatch: nextSummary,
+      note: subjectValidation.lastNote,
+    } as BulkDetailsBatchProcessResult;
+  }
+
+  if (detailedStage === "pricing_validation") {
+    const pricingContext =
+      job?.input?.pricingContext &&
+      typeof job.input.pricingContext === "object" &&
+      !Array.isArray(job.input.pricingContext)
+        ? {
+            overrideBySku: new Map<string, any>(job.input.pricingContext.overrideBySku || []),
+            courseRuleByCode: new Map<string, any>(job.input.pricingContext.courseRuleByCode || []),
+          }
+        : await loadPricingContext({
+            category: config.category,
+            rows: stageRows,
+          });
+
+    if (
+      !job?.input?.pricingContext ||
+      typeof job.input.pricingContext !== "object" ||
+      Array.isArray(job.input.pricingContext)
+    ) {
+      await persistJobInput(job, {
+        pricingContext: {
+          overrideBySku: Array.from(pricingContext.overrideBySku.entries()),
+          courseRuleByCode: Array.from(pricingContext.courseRuleByCode.entries()),
+        },
+      });
+    }
+
+    const chunkInfo = getChunkInfo(
+      stageRows,
+      stageCursor,
+      PREVALIDATION_STAGE_CHUNK_SIZE
+    );
+
+    const result = await buildPricingValidationChunk({
+      rows: chunkInfo.chunkRows,
+      startIndex: chunkInfo.cursor,
+      config,
+      subjectMap,
+      courseMap,
+      pricingContext,
+      batchNumber: args.batchNumber,
+    });
+
+    failures.push(...result.failures);
+
+    const accumulatedExecutionRows = [...executionRows, ...result.acceptedRows];
+    const pricingValidation = {
+      ...getStageBlock(summary, "pricingValidation", stageRows.length),
+      totalRows: stageRows.length,
+      processedRows:
+        safeNum(summary?.pricingValidation?.processedRows, 0) + chunkInfo.chunkRows.length,
+      validRows: safeNum(summary?.pricingValidation?.validRows, 0) + result.validCount,
+      failedRows: safeNum(summary?.pricingValidation?.failedRows, 0) + result.failedCount,
+      skippedRows: safeNum(summary?.pricingValidation?.skippedRows, 0) + result.skippedCount,
+      startedAt: summary?.pricingValidation?.startedAt || new Date().toISOString(),
+      completedAt: chunkInfo.isDone ? new Date().toISOString() : null,
+      lastNote: chunkInfo.isDone
+        ? `Pricing validation complete. Valid rows for final upload/create ${accumulatedExecutionRows.length}, failed ${safeNum(summary?.pricingValidation?.failedRows, 0) + result.failedCount}.`
+        : `Pricing validation running: ${chunkInfo.nextCursor}/${stageRows.length} rows checked. Ready for final upload/create till now ${accumulatedExecutionRows.length}.`,
+    };
+
+    if (chunkInfo.isDone) {
+      await persistJobInput(job, {
+        stageRows: [],
+        stageCursor: 0,
+        nextStageRows: [],
+        executionRows: accumulatedExecutionRows,
+        pricingContext: null,
+      });
+
+      const execution = {
+        ...(summary?.execution && typeof summary.execution === "object"
+          ? summary.execution
+          : buildExecutionBlock(accumulatedExecutionRows.length)),
+        totalRows: accumulatedExecutionRows.length,
+      };
+
+      const nextSummary = {
+        ...summary,
+        validRows: accumulatedExecutionRows.length,
+        failedRows: safeNum(summary.failedRows, 0) + result.failedCount,
+        skippedRows: safeNum(summary.skippedRows, 0) + result.skippedCount,
+        pipelineStage: "execution",
+        stageLabel: buildNextStageLabel("execution"),
+        nextStageTotalItems: accumulatedExecutionRows.length,
+        pricingValidation,
+        execution,
+      };
+
+      return {
+        processedDelta: chunkInfo.chunkRows.length,
+        successDelta: 0,
+        failedDelta: result.failedCount,
+        skippedDelta: result.skippedCount,
+        validDelta: 0,
+        nextLastProcessedIndex: Math.max(-1, chunkInfo.nextCursor - 1),
+        batchNumber: args.batchNumber,
+        fromIndex: chunkInfo.cursor,
+        toIndex: Math.max(-1, chunkInfo.nextCursor - 1),
+        attempted: chunkInfo.chunkRows.length,
+        failures,
+        summaryPatch: nextSummary,
+        note: pricingValidation.lastNote,
+      } as BulkDetailsBatchProcessResult;
+    }
+
+    await persistJobInput(job, {
+      stageRows,
+      stageCursor: chunkInfo.nextCursor,
+      executionRows: accumulatedExecutionRows,
+    });
+
+    const nextSummary = {
+      ...summary,
+      validRows: accumulatedExecutionRows.length,
+      failedRows: safeNum(summary.failedRows, 0) + result.failedCount,
+      skippedRows: safeNum(summary.skippedRows, 0) + result.skippedCount,
+      pipelineStage: "pricing_validation",
+      stageLabel: buildNextStageLabel("pricing_validation"),
+      nextStageTotalItems: stageRows.length,
+      pricingValidation,
+    };
+
+    return {
+      processedDelta: chunkInfo.chunkRows.length,
+      successDelta: 0,
+      failedDelta: result.failedCount,
+      skippedDelta: result.skippedCount,
+      validDelta: 0,
+      nextLastProcessedIndex: Math.max(-1, chunkInfo.nextCursor - 1),
+      batchNumber: args.batchNumber,
+      fromIndex: chunkInfo.cursor,
+      toIndex: Math.max(-1, chunkInfo.nextCursor - 1),
+      attempted: chunkInfo.chunkRows.length,
+      failures,
+      summaryPatch: nextSummary,
+      note: pricingValidation.lastNote,
+    } as BulkDetailsBatchProcessResult;
+  }
+
+  const executionInputRows: PreparedExecutionRow[] = executionRows;
+  const requestedChunkSize = Math.max(
+    1,
+    safeNum(args.toIndex, 0) - safeNum(args.fromIndex, 0) + 1
+  );
+  const startIndex = Math.max(0, args.fromIndex);
+  const endIndex = Math.min(
+    executionInputRows.length - 1,
+    startIndex + requestedChunkSize - 1
+  );
+  const batchExecutionRows =
+    startIndex <= endIndex
+      ? executionInputRows.slice(startIndex, endIndex + 1)
+      : [];
+
+  const existingBySku = await loadExistingProductsForExecution(batchExecutionRows);
+
+  let createdRows = 0;
+  let updatedRows = 0;
+  let failedRows = 0;
+  let skippedRows = 0;
+
+  for (const row of batchExecutionRows) {
     try {
-      if (!sku || !row?.title || !Array.isArray(row?.courseCodeList)) {
-        batchFailedRows++;
-        pushFailure(
-          "failed",
-          "Prevalidated row payload invalid hai. Is row ko skip karke आगे बढ़ा गया."
-        );
+      const generated = buildProductPayload(config, row);
+      const existing = existingBySku.get(row.sku) || null;
+
+      if (config.dryRun) {
+        skippedRows++;
+        pushFailureRow(failures, {
+          itemIndex: row.itemIndex,
+          rowNumber: row.rowNumber,
+          batchNumber: args.batchNumber,
+          identifier: row.sku || row.subjectCodeRaw,
+          sku: row.sku,
+          status: "skipped",
+          reason: "Dry run active hai. Final product create/update skip ki gayi.",
+          raw: buildFailureRawExecutionRow(row),
+        });
         continue;
       }
 
-      const payload = buildExecutionPayload({
-        config,
-        row,
-      });
+      const payload: any = {
+        title: generated.title,
+        sku: row.sku,
+        category: config.category,
 
-      const existingMatchQuery = buildExistingProductMatchQuery(
-        sku,
-        safeStr(row?.normalizedSlugBase)
-      );
+        subjectCode: row.subjectCodeRaw,
+        subjectTitleHi: row.subjectTitleHi,
+        subjectTitleEn: row.subjectTitleEn,
+        subjectTitleOther: row.subjectTitleOther,
 
-      const existing: any = existingMatchQuery
-        ? await Product.findOne(existingMatchQuery)
-        : null;
+        courseCodes: row.courseCodeList,
+        courseTitles: row.courseTitles,
 
-      const warningText = Array.isArray(row?.templateWarnings) && row.templateWarnings.length
-        ? ` Warnings: ${row.templateWarnings.join(" | ")}.`
-        : "";
+        session: row.session,
+        session6: row.session6,
+        language: row.language,
+        lang3: row.lang3,
+
+        price: Math.max(0, safeNum(row.price, 0)),
+        oldPrice: Math.max(0, safeNum(row.oldPrice, 0)),
+
+        availability: "want_to_buy",
+        importantNote: generated.importantNote,
+
+        shortDesc: generated.shortDesc,
+        descriptionHtml: generated.descriptionHtml,
+
+        isDigital: deriveIsDigitalFromCategory(config.category),
+
+        metaTitle: generated.metaTitle,
+        metaDescription: generated.metaDescription,
+
+        isAutoGenerated: false,
+        autoGenerationType: "",
+        autoGeneratedFromProductId: null,
+        autoGeneratedFromSku: "",
+        autoGeneratedFromCategory: "",
+        autoGeneratedAt: null,
+
+        isActive: config.publishNow,
+        lastModifiedAt: new Date(),
+
+        deletedAt: null,
+        deletedBy: "",
+      };
 
       if (existing) {
         if (config.duplicateStrategy === "ignore") {
-          batchSkippedRows++;
-          pushFailure(
-            "skipped",
-            `Duplicate product already exists, new row ignored. Price pre-validation stage me confirm ho chuki thi.${warningText}`
-          );
+          skippedRows++;
+          pushFailureRow(failures, {
+            itemIndex: row.itemIndex,
+            rowNumber: row.rowNumber,
+            batchNumber: args.batchNumber,
+            identifier: row.sku || row.subjectCodeRaw,
+            sku: row.sku,
+            status: "skipped",
+            reason:
+              "Execution stage me duplicate live product mila. Row ignored.",
+            raw: buildFailureRawExecutionRow(row),
+          });
           continue;
         }
-
-        const beforeDoc = existing.toObject();
 
         const preservedMedia = {
           pages: safeNum(existing?.pages, 0),
@@ -1721,22 +2267,6 @@ async function executeBulkDetailsBatch(args: {
               : true,
         };
 
-        let finalSlug = existing.slug;
-        if (
-          safeStr(row?.normalizedSlugBase) &&
-          safeStr(existing.slug) !== safeStr(row?.normalizedSlugBase)
-        ) {
-          finalSlug = await makeUniqueSlug(
-            safeStr(row?.normalizedSlugBase),
-            String(existing._id)
-          );
-        } else if (!safeStr(existing.slug)) {
-          finalSlug = await makeUniqueSlug(
-            safeStr(row?.slugBase || row?.title),
-            String(existing._id)
-          );
-        }
-
         await Product.updateOne(
           { _id: existing._id },
           {
@@ -1744,35 +2274,18 @@ async function executeBulkDetailsBatch(args: {
               ...payload,
               ...preservedMedia,
               ...preservedDemandConfig,
-              slug: finalSlug,
+              slug: generated.slugBase,
             },
           }
         );
 
-        const availabilitySync: any = await syncProductAvailabilityBySku(sku);
-        const afterDoc: any = await Product.findById(existing._id);
-
-        comboSyncQueue.push({
-          before: beforeDoc,
-          after: afterDoc ? afterDoc.toObject() : null,
-        });
-
-        hardcopySyncPatch = applyHardcopySyncPatch(
-          hardcopySyncPatch,
-          availabilitySync
-        );
-
-        batchUpdatedRows++;
+        updatedRows++;
         continue;
       }
 
-      const finalSlug = await makeUniqueSlug(
-        safeStr(row?.slugBase || row?.title)
-      );
-
-      const createdDoc: any = await Product.create({
+      await Product.create({
         ...payload,
-        slug: finalSlug,
+        slug: generated.slugBase,
         pages: 0,
         pdfKey: "",
         pdfUrl: "",
@@ -1784,184 +2297,77 @@ async function executeBulkDetailsBatch(args: {
         autoMakeAvailableOnUpload: true,
       });
 
-      const availabilitySync: any = await syncProductAvailabilityBySku(sku);
-      const refreshedDoc: any = await Product.findById(createdDoc._id);
-      const createdObj =
-        refreshedDoc?.toObject?.() || createdDoc?.toObject?.() || createdDoc;
-
-      comboSyncQueue.push({
-        before: null,
-        after: createdObj,
-      });
-
-      hardcopySyncPatch = applyHardcopySyncPatch(
-        hardcopySyncPatch,
-        availabilitySync
-      );
-
-      batchCreatedRows++;
+      createdRows++;
     } catch (error: any) {
-      batchFailedRows++;
-      pushFailure("failed", sanitizeUnexpectedRowError(error));
-      continue;
+      failedRows++;
+      pushFailureRow(failures, {
+        itemIndex: row.itemIndex,
+        rowNumber: row.rowNumber,
+        batchNumber: args.batchNumber,
+        identifier: row.sku || row.subjectCodeRaw,
+        sku: row.sku,
+        status: "failed",
+        reason: buildExecutionErrorReason(error),
+        raw: buildFailureRawExecutionRow(row),
+      });
     }
   }
 
-  let comboSyncPatch = currentSummary.comboSync || {
-    attempted: 0,
-    succeeded: 0,
-    failed: 0,
-    errors: [],
-    mode: "none",
-  };
-
-  if (comboSyncQueue.length) {
-    const comboResult = await syncGeneratedCombosForBulkChanges(comboSyncQueue);
-    comboSyncPatch = {
-      attempted: safeNum(comboSyncPatch.attempted, 0) + comboSyncQueue.length,
-      succeeded:
-        safeNum(comboSyncPatch.succeeded, 0) +
-        (comboResult.ok ? comboSyncQueue.length : 0),
-      failed:
-        safeNum(comboSyncPatch.failed, 0) +
-        (comboResult.ok ? 0 : comboSyncQueue.length),
-      errors: uniqueStrings([
-        ...((comboSyncPatch.errors as string[]) || []),
-        ...(comboResult.errors || []),
-      ]).slice(0, 10),
-      mode: "batch-sync",
-    };
-  }
-
-  const nextSummary = buildInitialPipelineSummary({
-    totalRows: safeNum(job?.summary?.totalRows, preparedRows.length),
-    config,
-    existingSummary: currentSummary,
-  });
-
-  const successRows = batchCreatedRows + batchUpdatedRows;
-
-  nextSummary.pipelineStage = "execution";
-  nextSummary.createdRows =
-    safeNum(currentSummary.createdRows, 0) + batchCreatedRows;
-  nextSummary.updatedRows =
-    safeNum(currentSummary.updatedRows, 0) + batchUpdatedRows;
-  nextSummary.skippedRows =
-    safeNum(currentSummary.skippedRows, 0) + batchSkippedRows;
-  nextSummary.failedRows =
-    safeNum(currentSummary.failedRows, 0) + batchFailedRows;
-
-  nextSummary.execution = {
-    ...nextSummary.execution,
-    totalRows: preparedRows.length,
+  const execution = {
+    ...(summary?.execution && typeof summary.execution === "object"
+      ? summary.execution
+      : buildExecutionBlock(executionInputRows.length)),
+    totalRows: safeNum(summary?.execution?.totalRows, executionInputRows.length),
     processedRows:
-      safeNum(currentSummary.execution.processedRows, 0) + batchRows.length,
-    createdRows:
-      safeNum(currentSummary.execution.createdRows, 0) + batchCreatedRows,
-    updatedRows:
-      safeNum(currentSummary.execution.updatedRows, 0) + batchUpdatedRows,
-    skippedRows:
-      safeNum(currentSummary.execution.skippedRows, 0) + batchSkippedRows,
-    failedRows:
-      safeNum(currentSummary.execution.failedRows, 0) + batchFailedRows,
+      safeNum(summary?.execution?.processedRows, 0) + batchExecutionRows.length,
+    createdRows: safeNum(summary?.execution?.createdRows, 0) + createdRows,
+    updatedRows: safeNum(summary?.execution?.updatedRows, 0) + updatedRows,
+    skippedRows: safeNum(summary?.execution?.skippedRows, 0) + skippedRows,
+    failedRows: safeNum(summary?.execution?.failedRows, 0) + failedRows,
     successRows:
-      safeNum(currentSummary.execution.successRows, 0) + successRows,
-    startedAt: currentSummary.execution.startedAt || new Date(),
-    completedAt: null,
-    lastNote: `Upload batch ${args.batchNumber} processed. Created ${batchCreatedRows}, Updated ${batchUpdatedRows}, Skipped ${batchSkippedRows}, Failed ${batchFailedRows}.`,
+      safeNum(summary?.execution?.successRows, 0) + createdRows + updatedRows,
+    startedAt: summary?.execution?.startedAt || new Date().toISOString(),
+    completedAt:
+      endIndex >= executionInputRows.length - 1 ? new Date().toISOString() : null,
+    lastNote:
+      endIndex >= executionInputRows.length - 1
+        ? `Final product upload/create complete. Created ${safeNum(summary?.execution?.createdRows, 0) + createdRows}, Updated ${safeNum(summary?.execution?.updatedRows, 0) + updatedRows}, Skipped ${safeNum(summary?.execution?.skippedRows, 0) + skippedRows}, Failed ${safeNum(summary?.execution?.failedRows, 0) + failedRows}.`
+        : `Final product upload/create running: ${Math.min(
+            executionInputRows.length,
+            safeNum(summary?.execution?.processedRows, 0) + batchExecutionRows.length
+          )}/${executionInputRows.length} rows processed. Created ${safeNum(summary?.execution?.createdRows, 0) + createdRows}, Updated ${safeNum(summary?.execution?.updatedRows, 0) + updatedRows}.`,
   };
 
-  nextSummary.comboSync = comboSyncPatch;
-  nextSummary.hardcopySync = hardcopySyncPatch;
-
-  let nextStage: BulkPipelineStage = "execution";
-  if (nextSummary.execution.processedRows >= preparedRows.length) {
-    nextSummary.pipelineStage = "completed";
-    nextSummary.execution.completedAt = new Date();
-    nextSummary.execution.lastNote =
-      "Final product upload/create stage completed.";
-    nextStage = "completed";
-  }
+  const nextSummary = {
+    ...summary,
+    createdRows: safeNum(summary.createdRows, 0) + createdRows,
+    updatedRows: safeNum(summary.updatedRows, 0) + updatedRows,
+    skippedRows: safeNum(summary.skippedRows, 0) + skippedRows,
+    failedRows: safeNum(summary.failedRows, 0) + failedRows,
+    pipelineStage:
+      endIndex >= executionInputRows.length - 1 ? "completed" : "execution",
+    stageLabel: buildNextStageLabel(
+      endIndex >= executionInputRows.length - 1 ? "completed" : "execution"
+    ),
+    nextStageTotalItems: 0,
+    execution,
+    comboSync: buildDeferredSyncPatch(summary?.comboSync, "Combo"),
+    hardcopySync: buildDeferredSyncPatch(summary?.hardcopySync, "Hardcopy"),
+  };
 
   return {
-    stage: "execution" as BulkPipelineStage,
-    processedDelta: batchRows.length,
-    successDelta: successRows,
-    failedDelta: batchFailedRows,
-    skippedDelta: batchSkippedRows,
+    processedDelta: batchExecutionRows.length,
+    successDelta: createdRows + updatedRows,
+    failedDelta: failedRows,
+    skippedDelta: skippedRows,
     validDelta: 0,
-    nextLastProcessedIndex: args.toIndex,
+    nextLastProcessedIndex: endIndex,
     batchNumber: args.batchNumber,
-    fromIndex: args.fromIndex,
-    toIndex: args.toIndex,
-    attempted: batchRows.length,
+    fromIndex: startIndex,
+    toIndex: endIndex,
+    attempted: batchExecutionRows.length,
     failures,
     summaryPatch: nextSummary,
-    nextStage,
-    note: nextSummary.execution.lastNote,
-  } satisfies BulkDetailsBatchProcessResult;
-}
-
-export async function processBulkDetailsJobBatch(args: {
-  job: any;
-  batchNumber: number;
-  fromIndex: number;
-  toIndex: number;
-}) {
-  const job = args.job;
-  const config = normalizeBulkDetailsConfig(job?.config || {});
-  const rows: PreparedBulkDetailsRow[] = Array.isArray(job?.input?.rows)
-    ? job.input.rows
-    : [];
-  const preparedRows: PrevalidatedBulkDetailsRow[] = Array.isArray(
-    job?.input?.prevalidatedRows
-  )
-    ? job.input.prevalidatedRows
-    : [];
-
-  const summary = buildInitialPipelineSummary({
-    totalRows: rows.length,
-    config,
-    existingSummary: job?.summary || {},
-  });
-
-  const stage =
-    safeStr(summary.pipelineStage) === "execution" ||
-    safeStr(summary.pipelineStage) === "completed"
-      ? (safeStr(summary.pipelineStage) as BulkPipelineStage)
-      : "prevalidation";
-
-  if (stage === "completed") {
-    return {
-      stage: "completed" as BulkPipelineStage,
-      processedDelta: 0,
-      successDelta: 0,
-      failedDelta: 0,
-      skippedDelta: 0,
-      validDelta: 0,
-      nextLastProcessedIndex: args.toIndex,
-      batchNumber: args.batchNumber,
-      fromIndex: args.fromIndex,
-      toIndex: args.toIndex,
-      attempted: 0,
-      failures: [],
-      summaryPatch: summary,
-      nextStage: "completed" as BulkPipelineStage,
-      note: "Bulk details job already completed.",
-    } satisfies BulkDetailsBatchProcessResult;
-  }
-
-  if (stage === "prevalidation") {
-    const safeToIndex = Math.min(args.toIndex, rows.length - 1);
-    return prevalidateBulkDetailsBatch({
-      ...args,
-      toIndex: safeToIndex,
-    });
-  }
-
-  const safeToIndex = Math.min(args.toIndex, preparedRows.length - 1);
-  return executeBulkDetailsBatch({
-    ...args,
-    toIndex: safeToIndex,
-  });
+    note: execution.lastNote,
+  } as BulkDetailsBatchProcessResult;
 }

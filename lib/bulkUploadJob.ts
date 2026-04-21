@@ -29,11 +29,6 @@ export type BulkJobFailureInput = {
   raw?: any;
 };
 
-export type BulkJobInputAppendPatch = {
-  prevalidationSeenSkus?: string[];
-  prevalidatedRows?: any[];
-};
-
 export type BulkJobAppendProgressArgs = {
   jobId: string;
   createdBy: string;
@@ -51,8 +46,6 @@ export type BulkJobAppendProgressArgs = {
   attempted?: number;
   startedAt?: Date | string | null;
   heartbeatAt?: Date | string | null;
-  inputPatch?: Record<string, any>;
-  inputAppendPatch?: BulkJobInputAppendPatch;
 };
 
 const FINAL_STATUSES = new Set<BulkJobStatus>([
@@ -152,107 +145,33 @@ function overwriteSummary(current: any, patch: any) {
   return { ...base, ...next };
 }
 
-function overwriteObject(current: any, patch: any) {
-  const base =
-    current && typeof current === "object" && !Array.isArray(current)
-      ? { ...current }
-      : {};
-  const next =
-    patch && typeof patch === "object" && !Array.isArray(patch) ? patch : {};
-  return { ...base, ...next };
+function getPipelineStage(summary: any) {
+  return safeStr(summary?.pipelineStage).toLowerCase();
 }
 
-function uniqueStrings(arr: string[]) {
-  const seen = new Set<string>();
-  const out: string[] = [];
-
-  for (const item of arr) {
-    const clean = safeStr(item);
-    if (!clean || seen.has(clean)) continue;
-    seen.add(clean);
-    out.push(clean);
-  }
-
-  return out;
+function isProductDetailsJob(job: any) {
+  return safeStr(job?.jobType) === "product_details";
 }
 
-function stableRowKey(row: any, indexFallback = -1) {
-  const itemIndex = Number(row?.itemIndex);
-  if (Number.isFinite(itemIndex) && itemIndex >= 0) {
-    return `item:${Math.trunc(itemIndex)}`;
-  }
-
-  const rowNumber = Number(row?.rowNumber);
-  const sku = safeStr(row?.sku).toUpperCase();
-  if (Number.isFinite(rowNumber) && rowNumber >= 0 && sku) {
-    return `row:${Math.trunc(rowNumber)}::sku:${sku}`;
-  }
-
-  if (Number.isFinite(rowNumber) && rowNumber >= 0) {
-    return `row:${Math.trunc(rowNumber)}`;
-  }
-
-  if (sku) {
-    return `sku:${sku}`;
-  }
-
-  return `fallback:${indexFallback}`;
-}
-
-function appendUniqueObjectRows(existingRows: any[], incomingRows: any[]) {
-  const map = new Map<string, any>();
-
-  for (let i = 0; i < existingRows.length; i++) {
-    const row = existingRows[i];
-    map.set(stableRowKey(row, i), row);
-  }
-
-  for (let i = 0; i < incomingRows.length; i++) {
-    const row = incomingRows[i];
-    map.set(stableRowKey(row, existingRows.length + i), row);
-  }
-
-  return Array.from(map.values());
-}
-
-function applyInputAppendPatch(currentInput: any, appendPatch?: BulkJobInputAppendPatch) {
-  const nextInput =
-    currentInput && typeof currentInput === "object" && !Array.isArray(currentInput)
-      ? { ...currentInput }
-      : {};
-
-  if (!appendPatch || typeof appendPatch !== "object" || Array.isArray(appendPatch)) {
-    return nextInput;
-  }
-
-  if (Array.isArray(appendPatch.prevalidationSeenSkus) && appendPatch.prevalidationSeenSkus.length) {
-    const existing = Array.isArray(nextInput.prevalidationSeenSkus)
-      ? nextInput.prevalidationSeenSkus.map((x: any) => safeStr(x).toUpperCase())
-      : [];
-    const incoming = appendPatch.prevalidationSeenSkus.map((x) =>
-      safeStr(x).toUpperCase()
-    );
-    nextInput.prevalidationSeenSkus = uniqueStrings([...existing, ...incoming]);
-  }
-
-  if (Array.isArray(appendPatch.prevalidatedRows) && appendPatch.prevalidatedRows.length) {
-    const existing = Array.isArray(nextInput.prevalidatedRows)
-      ? nextInput.prevalidatedRows
-      : [];
-    nextInput.prevalidatedRows = appendUniqueObjectRows(
-      existing,
-      appendPatch.prevalidatedRows
-    );
-  }
-
-  return nextInput;
+function isProductDetailsPipelineCompleted(summary: any) {
+  return getPipelineStage(summary) === "completed";
 }
 
 function computeFinalStatus(args: {
+  job: any;
   totalItems: number;
   processedItems: number;
   failedItems: number;
+  summary: any;
 }) {
+  if (isProductDetailsJob(args.job)) {
+    return isProductDetailsPipelineCompleted(args.summary)
+      ? ((args.failedItems > 0
+          ? "completed_with_errors"
+          : "completed") as BulkJobStatus)
+      : ("running" as BulkJobStatus);
+  }
+
   if (args.totalItems <= 0) return "completed" as BulkJobStatus;
   if (args.processedItems < args.totalItems) return "running" as BulkJobStatus;
   return args.failedItems > 0 ? "completed_with_errors" : "completed";
@@ -296,7 +215,6 @@ export function toPlainBulkJob(job: any) {
 
     meta: job.meta ?? {},
     config: job.config ?? {},
-    input: job.input ?? {},
     summary: job.summary ?? {},
 
     progress: {
@@ -461,7 +379,6 @@ export async function updateBulkUploadJobInput(args: {
   jobId: string;
   createdBy: string;
   inputPatch?: Record<string, any>;
-  inputAppendPatch?: BulkJobInputAppendPatch;
   metaPatch?: Record<string, any>;
   configPatch?: Record<string, any>;
   summaryPatch?: Record<string, any>;
@@ -481,13 +398,9 @@ export async function updateBulkUploadJobInput(args: {
     return job;
   }
 
-  const nextInput = applyInputAppendPatch(
-    overwriteObject(job.input || {}, args.inputPatch || {}),
-    args.inputAppendPatch
-  );
-
-  const nextMeta = overwriteObject(job.meta || {}, args.metaPatch || {});
-  const nextConfig = overwriteObject(job.config || {}, args.configPatch || {});
+  const nextInput = overwriteSummary(job.input || {}, args.inputPatch || {});
+  const nextMeta = overwriteSummary(job.meta || {}, args.metaPatch || {});
+  const nextConfig = overwriteSummary(job.config || {}, args.configPatch || {});
   const nextSummary = mergeSummary(job.summary || {}, args.summaryPatch || {});
 
   const updated: any = await BulkUploadJob.findOneAndUpdate(
@@ -621,18 +534,17 @@ export async function appendBulkUploadJobProgress(args: BulkJobAppendProgressArg
 
   const nextProcessed = Math.min(totalItems, currentProcessed + processedDelta);
   const nextFailed = currentFailed + failedDelta;
-  const nextStatus = computeFinalStatus({
-    totalItems,
-    processedItems: nextProcessed,
-    failedItems: nextFailed,
-  });
 
   const cleanFailures = sanitizeFailures(args.failures || []);
   const nextSummary = mergeSummary(job.summary || {}, args.summaryPatch || {});
-  const nextInput = applyInputAppendPatch(
-    overwriteObject(job.input || {}, args.inputPatch || {}),
-    args.inputAppendPatch
-  );
+
+  const nextStatus = computeFinalStatus({
+    job,
+    totalItems,
+    processedItems: nextProcessed,
+    failedItems: nextFailed,
+    summary: nextSummary,
+  });
 
   const startedAt =
     asDateOrNull(args.startedAt) || asDateOrNull(job?.startedAt) || new Date();
@@ -674,7 +586,6 @@ export async function appendBulkUploadJobProgress(args: BulkJobAppendProgressArg
       },
       $set: {
         status: nextStatus,
-        input: nextInput,
         summary: nextSummary,
         startedAt,
         lastHeartbeatAt: heartbeatAt,
@@ -728,8 +639,6 @@ export async function finalizeBulkUploadJob(args: {
   createdBy: string;
   message?: string;
   summaryPatch?: Record<string, any>;
-  inputPatch?: Record<string, any>;
-  inputAppendPatch?: BulkJobInputAppendPatch;
 }) {
   await dbConnect();
 
@@ -750,19 +659,14 @@ export async function finalizeBulkUploadJob(args: {
   const processedItems = safeNum(job?.progress?.processedItems, 0);
   const failedItems = safeNum(job?.progress?.failedItems, 0);
   const nextSummary = overwriteSummary(job.summary || {}, args.summaryPatch || {});
-  const nextInput = applyInputAppendPatch(
-    overwriteObject(job.input || {}, args.inputPatch || {}),
-    args.inputAppendPatch
-  );
 
-  const finalStatus: BulkJobStatus =
-    processedItems >= totalItems
-      ? failedItems > 0
-        ? "completed_with_errors"
-        : "completed"
-      : failedItems > 0
-      ? "completed_with_errors"
-      : "completed";
+  const finalStatus = computeFinalStatus({
+    job,
+    totalItems,
+    processedItems,
+    failedItems,
+    summary: nextSummary,
+  });
 
   const updated: any = await BulkUploadJob.findOneAndUpdate(
     {
@@ -772,9 +676,11 @@ export async function finalizeBulkUploadJob(args: {
     {
       $set: {
         status: finalStatus,
-        input: nextInput,
         summary: nextSummary,
-        completedAt: new Date(),
+        completedAt:
+          finalStatus === "completed" || finalStatus === "completed_with_errors"
+            ? new Date()
+            : null,
         lastHeartbeatAt: new Date(),
         lockToken: "",
         lockExpiresAt: null,
@@ -782,7 +688,9 @@ export async function finalizeBulkUploadJob(args: {
           safeStr(args.message) ||
           (finalStatus === "completed"
             ? "Bulk job completed successfully."
-            : "Bulk job completed with some failed items."),
+            : finalStatus === "completed_with_errors"
+            ? "Bulk job completed with some failed items."
+            : safeStr(job?.resultMessage || "")),
       },
     },
     { new: true }
@@ -819,7 +727,11 @@ export async function claimBulkUploadJobBatch(args: {
   const totalItems = safeNum(current?.progress?.totalItems, 0);
   const processedItems = safeNum(current?.progress?.processedItems, 0);
 
-  if (totalItems > 0 && processedItems >= totalItems) {
+  if (
+    !isProductDetailsJob(current) &&
+    totalItems > 0 &&
+    processedItems >= totalItems
+  ) {
     return { ok: false as const, error: "All items already processed" };
   }
 
@@ -887,8 +799,6 @@ export async function completeBulkUploadJobBatch(args: {
   failures?: BulkJobFailureInput[];
   note?: string;
   summaryPatch?: Record<string, any>;
-  inputPatch?: Record<string, any>;
-  inputAppendPatch?: BulkJobInputAppendPatch;
 }) {
   await dbConnect();
 
@@ -915,21 +825,17 @@ export async function completeBulkUploadJobBatch(args: {
   const nextProcessed = Math.min(totalItems, currentProcessed + processedDelta);
   const nextFailed = currentFailed + failedDelta;
 
-  const finalStatus: BulkJobStatus =
-    nextProcessed >= totalItems
-      ? nextFailed > 0
-        ? "completed_with_errors"
-        : "completed"
-      : "running";
-
   const cleanFailures = sanitizeFailures(args.failures || []);
   const nextSummary = overwriteSummary(job.summary || {}, args.summaryPatch || {});
-  const nextInput = applyInputAppendPatch(
-    overwriteObject(job.input || {}, args.inputPatch || {}),
-    args.inputAppendPatch
-  );
-
   const now = new Date();
+
+  const finalStatus = computeFinalStatus({
+    job,
+    totalItems,
+    processedItems: nextProcessed,
+    failedItems: nextFailed,
+    summary: nextSummary,
+  });
 
   const updated: any = await BulkUploadJob.findOneAndUpdate(
     {
@@ -947,7 +853,6 @@ export async function completeBulkUploadJobBatch(args: {
       },
       $set: {
         status: finalStatus,
-        input: nextInput,
         summary: nextSummary,
         "progress.currentBatchNumber": safeNum(args.batchNumber, 0),
         "progress.lastProcessedIndex": Math.max(
@@ -1001,9 +906,6 @@ export async function failBulkUploadJob(args: {
   lockToken?: string;
   message: string;
   failures?: BulkJobFailureInput[];
-  summaryPatch?: Record<string, any>;
-  inputPatch?: Record<string, any>;
-  inputAppendPatch?: BulkJobInputAppendPatch;
 }) {
   await dbConnect();
 
@@ -1016,25 +918,13 @@ export async function failBulkUploadJob(args: {
     query.lockToken = safeStr(args.lockToken);
   }
 
-  const existing: any = await BulkUploadJob.findOne(query);
-  if (!existing) {
-    throw new Error("Job not found while failing");
-  }
-
   const cleanFailures = sanitizeFailures(args.failures || []);
-  const nextSummary = overwriteSummary(existing.summary || {}, args.summaryPatch || {});
-  const nextInput = applyInputAppendPatch(
-    overwriteObject(existing.input || {}, args.inputPatch || {}),
-    args.inputAppendPatch
-  );
 
   const updated: any = await BulkUploadJob.findOneAndUpdate(
     query,
     {
       $set: {
         status: "failed",
-        input: nextInput,
-        summary: nextSummary,
         resultMessage: safeStr(args.message || "Bulk job failed"),
         failedAt: new Date(),
         completedAt: new Date(),

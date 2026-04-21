@@ -14,23 +14,20 @@ import {
   toPlainBulkJob,
 } from "@/lib/bulkUploadJob";
 import {
+  getBulkDetailsDetailedStage,
   processBulkDetailsJobBatch,
-  type BulkPipelineStage,
-  type BulkDetailsBatchProcessResult,
 } from "@/lib/bulkProductDetailsJob";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
 
-const DEFAULT_MAX_BATCH_STEPS = 20;
-const MAX_BATCH_STEPS_LIMIT = 50;
+const DEFAULT_MAX_STEPS = 20;
+const MAX_STEPS_LIMIT = 50;
 const SOFT_TIME_BUDGET_MS = 20_000;
 const CLAIM_LOCK_MS = 90_000;
 const STALE_LOCK_RECOVERY_MS = 180_000;
-
-const DEFAULT_PREVALIDATION_BATCH_SIZE = 25;
-const DEFAULT_EXECUTION_BATCH_SIZE = 5;
+const EXECUTION_BATCH_SIZE = 10;
 
 function safeStr(x: any) {
   return String(x ?? "").trim();
@@ -49,120 +46,6 @@ function cloneRecord(input: any) {
   return input && typeof input === "object" && !Array.isArray(input)
     ? { ...input }
     : {};
-}
-
-function overwriteObject(current: any, patch: any) {
-  const base =
-    current && typeof current === "object" && !Array.isArray(current)
-      ? { ...current }
-      : {};
-  const next =
-    patch && typeof patch === "object" && !Array.isArray(patch) ? patch : {};
-  return { ...base, ...next };
-}
-
-function uniqueStrings(arr: string[]) {
-  const seen = new Set<string>();
-  const out: string[] = [];
-
-  for (const item of arr) {
-    const clean = safeStr(item);
-    if (!clean || seen.has(clean)) continue;
-    seen.add(clean);
-    out.push(clean);
-  }
-
-  return out;
-}
-
-function stableRowKey(row: any, indexFallback = -1) {
-  const itemIndex = Number(row?.itemIndex);
-  if (Number.isFinite(itemIndex) && itemIndex >= 0) {
-    return `item:${Math.trunc(itemIndex)}`;
-  }
-
-  const rowNumber = Number(row?.rowNumber);
-  const sku = safeStr(row?.sku).toUpperCase();
-  if (Number.isFinite(rowNumber) && rowNumber >= 0 && sku) {
-    return `row:${Math.trunc(rowNumber)}::sku:${sku}`;
-  }
-
-  if (Number.isFinite(rowNumber) && rowNumber >= 0) {
-    return `row:${Math.trunc(rowNumber)}`;
-  }
-
-  if (sku) {
-    return `sku:${sku}`;
-  }
-
-  return `fallback:${indexFallback}`;
-}
-
-function appendUniqueObjectRows(existingRows: any[], incomingRows: any[]) {
-  const map = new Map<string, any>();
-
-  for (let i = 0; i < existingRows.length; i++) {
-    const row = existingRows[i];
-    map.set(stableRowKey(row, i), row);
-  }
-
-  for (let i = 0; i < incomingRows.length; i++) {
-    const row = incomingRows[i];
-    map.set(stableRowKey(row, existingRows.length + i), row);
-  }
-
-  return Array.from(map.values());
-}
-
-function applyInputPatchAndAppend(
-  currentInput: any,
-  args: {
-    inputPatch?: Record<string, any>;
-    inputAppendPatch?: {
-      prevalidationSeenSkus?: string[];
-      prevalidatedRows?: any[];
-    };
-  }
-) {
-  const nextInput = overwriteObject(currentInput || {}, args.inputPatch || {});
-
-  const appendPatch = args.inputAppendPatch;
-  if (!appendPatch || typeof appendPatch !== "object" || Array.isArray(appendPatch)) {
-    return nextInput;
-  }
-
-  if (
-    Array.isArray(appendPatch.prevalidationSeenSkus) &&
-    appendPatch.prevalidationSeenSkus.length
-  ) {
-    const existing = Array.isArray(nextInput.prevalidationSeenSkus)
-      ? nextInput.prevalidationSeenSkus.map((x: any) =>
-        safeStr(x).toUpperCase()
-      )
-      : [];
-
-    const incoming = appendPatch.prevalidationSeenSkus.map((x: any) =>
-      safeStr(x).toUpperCase()
-    );
-
-    nextInput.prevalidationSeenSkus = uniqueStrings([...existing, ...incoming]);
-  }
-
-  if (
-    Array.isArray(appendPatch.prevalidatedRows) &&
-    appendPatch.prevalidatedRows.length
-  ) {
-    const existing = Array.isArray(nextInput.prevalidatedRows)
-      ? nextInput.prevalidatedRows
-      : [];
-
-    nextInput.prevalidatedRows = appendUniqueObjectRows(
-      existing,
-      appendPatch.prevalidatedRows
-    );
-  }
-
-  return nextInput;
 }
 
 async function assertAdminWriteAccess() {
@@ -205,23 +88,44 @@ function getRequestedJobId(req: NextRequest, body?: any) {
 
 function getRequestedMaxSteps(body?: any) {
   return clamp(
-    Math.trunc(safeNum(body?.maxSteps, DEFAULT_MAX_BATCH_STEPS)),
+    Math.trunc(safeNum(body?.maxSteps, DEFAULT_MAX_STEPS)),
     1,
-    MAX_BATCH_STEPS_LIMIT
+    MAX_STEPS_LIMIT
   );
 }
 
-function getCurrentPipelineStage(job: any): BulkPipelineStage {
-  const stage = safeStr(job?.summary?.pipelineStage).toLowerCase();
-  if (stage === "execution") return "execution";
-  if (stage === "completed") return "completed";
-  return "prevalidation";
+function getExecutionRows(job: any) {
+  return Array.isArray(job?.input?.executionRows) ? job.input.executionRows : [];
+}
+
+function getExecutionTotalRows(job: any) {
+  const summaryTotal = safeNum(job?.summary?.execution?.totalRows, -1);
+  if (summaryTotal >= 0) return summaryTotal;
+  return getExecutionRows(job).length;
+}
+
+function getExecutionProcessedRows(job: any) {
+  const summaryProcessed = safeNum(job?.summary?.execution?.processedRows, -1);
+  if (summaryProcessed >= 0) return summaryProcessed;
+  return safeNum(job?.progress?.processedItems, 0);
 }
 
 function hasPendingRows(job: any) {
-  const totalItems = safeNum(job?.progress?.totalItems, 0);
-  const processedItems = safeNum(job?.progress?.processedItems, 0);
-  return totalItems > 0 && processedItems < totalItems;
+  if (!job || isFinalBulkJobStatus(job?.status)) return false;
+
+  const stage = getBulkDetailsDetailedStage(job);
+
+  if (stage === "completed") {
+    return false;
+  }
+
+  if (stage === "execution") {
+    const totalRows = getExecutionTotalRows(job);
+    const processedRows = getExecutionProcessedRows(job);
+    return processedRows < totalRows;
+  }
+
+  return true;
 }
 
 function isPauseRequested(job: any) {
@@ -232,16 +136,6 @@ function isPauseRequested(job: any) {
 
 function isCancelRequested(job: any) {
   return Boolean(job?.meta?.cancelRequested === true);
-}
-
-function getStageBatchSize(job: any) {
-  const stage = getCurrentPipelineStage(job);
-  const configured = safeNum(job?.progress?.batchSize, 0);
-
-  if (configured > 0) return configured;
-  return stage === "prevalidation"
-    ? DEFAULT_PREVALIDATION_BATCH_SIZE
-    : DEFAULT_EXECUTION_BATCH_SIZE;
 }
 
 async function getOwnedJob(jobId: string, createdBy: string) {
@@ -387,155 +281,77 @@ async function applyCancelIfRequested(jobId: string, createdBy: string) {
   return updated || cancelled.job || null;
 }
 
-async function transitionPrevalidationToExecution(args: {
-  jobId: string;
-  createdBy: string;
-  lockToken: string;
-  batchResult: BulkDetailsBatchProcessResult;
-}) {
+async function prepareExecutionProgressWindow(jobId: string, createdBy: string) {
   await dbConnect();
 
-  const current: any = await BulkUploadJob.findOne({
-    _id: safeStr(args.jobId),
-    createdBy: safeStr(args.createdBy),
-    lockToken: safeStr(args.lockToken),
+  const job: any = await BulkUploadJob.findOne({
+    _id: safeStr(jobId),
+    createdBy: safeStr(createdBy),
   });
 
-  if (!current) {
-    throw new Error("Locked job not found while switching to execution stage");
-  }
+  if (!job) return null;
 
-  const now = new Date();
-  const nextInput = applyInputPatchAndAppend(current.input || {}, {
-    inputPatch: args.batchResult.inputPatch || {},
-    inputAppendPatch: args.batchResult.inputAppendPatch || {},
-  });
-
-  const summaryPatch: Record<string, any> =
-    args.batchResult.summaryPatch &&
-      typeof args.batchResult.summaryPatch === "object" &&
-      !Array.isArray(args.batchResult.summaryPatch)
-      ? { ...args.batchResult.summaryPatch }
-      : {};
-
-  const executionTotalFromSummary = safeNum(
-    summaryPatch?.execution?.totalRows,
-    Array.isArray(nextInput?.prevalidatedRows) ? nextInput.prevalidatedRows.length : 0
+  const executionTotalRows = getExecutionTotalRows(job);
+  const executionProcessedRows = Math.min(
+    getExecutionProcessedRows(job),
+    executionTotalRows
   );
 
-  const executionTotal = Math.max(
-    0,
-    executionTotalFromSummary ||
-    (Array.isArray(nextInput?.prevalidatedRows) ? nextInput.prevalidatedRows.length : 0)
-  );
+  const batchCount =
+    executionTotalRows > 0
+      ? Math.ceil(executionTotalRows / EXECUTION_BATCH_SIZE)
+      : 0;
 
-  if (executionTotal <= 0) {
-    const completedSummary = {
-      ...summaryPatch,
-      pipelineStage: "completed",
-      execution: {
-        ...(summaryPatch.execution || {}),
-        totalRows: 0,
-        processedRows: 0,
-        createdRows: 0,
-        updatedRows: 0,
-        skippedRows: 0,
-        failedRows: 0,
-        successRows: 0,
-        startedAt: now,
-        completedAt: now,
-        lastNote:
-          "Pre-validation completed. Valid rows 0 thi, isliye final upload/create stage run nahi hui.",
-      },
-    };
+  const currentBatchNumber =
+    executionProcessedRows > 0
+      ? Math.ceil(executionProcessedRows / EXECUTION_BATCH_SIZE)
+      : 0;
 
-    const updated = await completeBulkUploadJobBatch({
-      jobId: safeStr(args.jobId),
-      createdBy: safeStr(args.createdBy),
-      lockToken: safeStr(args.lockToken),
-      processedDelta: safeNum(args.batchResult.processedDelta, 0),
-      successDelta: safeNum(args.batchResult.successDelta, 0),
-      failedDelta: safeNum(args.batchResult.failedDelta, 0),
-      skippedDelta: safeNum(args.batchResult.skippedDelta, 0),
-      validDelta: safeNum(args.batchResult.validDelta, 0),
-      nextLastProcessedIndex: safeNum(args.batchResult.nextLastProcessedIndex, -1),
-      batchNumber: safeNum(args.batchResult.batchNumber, 0),
-      fromIndex: safeNum(args.batchResult.fromIndex, -1),
-      toIndex: safeNum(args.batchResult.toIndex, -1),
-      attempted: safeNum(args.batchResult.attempted, 0),
-      failures: Array.isArray(args.batchResult.failures) ? args.batchResult.failures : [],
-      note: safeStr(args.batchResult.note),
-      summaryPatch: completedSummary,
-      inputPatch: args.batchResult.inputPatch || {},
-      inputAppendPatch: args.batchResult.inputAppendPatch || {},
-    });
-
-    return updated;
-  }
-
-  const meta = cloneRecord(current.meta);
-  meta.currentStage = "execution";
-  meta.prevalidationCompletedAt = now;
-
-  const executionBatchSize = DEFAULT_EXECUTION_BATCH_SIZE;
   const updated: any = await BulkUploadJob.findOneAndUpdate(
     {
-      _id: String(current._id),
-      createdBy: safeStr(args.createdBy),
-      lockToken: safeStr(args.lockToken),
+      _id: String(job._id),
+      createdBy: safeStr(createdBy),
     },
     {
       $set: {
-        input: nextInput,
-        summary: summaryPatch,
-        meta,
-        status: "running",
-        resultMessage:
-          "Pre-validation completed. Final product upload/create stage start ho gayi hai.",
-        lastHeartbeatAt: now,
-        completedAt: null,
-        lockToken: "",
-        lockExpiresAt: null,
-        progress: {
-          totalItems: executionTotal,
-          processedItems: 0,
-          successItems: 0,
-          failedItems: 0,
-          skippedItems: 0,
-          validItems: executionTotal,
-          batchSize: executionBatchSize,
-          batchCount:
-            executionTotal > 0
-              ? Math.ceil(executionTotal / executionBatchSize)
-              : 0,
-          currentBatchNumber: 0,
-          lastProcessedIndex: -1,
-        },
-        lastBatch: {
-          batchNumber: 0,
-          fromIndex: -1,
-          toIndex: -1,
-          attempted: 0,
-          success: 0,
-          failed: 0,
-          skipped: 0,
-          startedAt: null,
-          endedAt: null,
-          note: "Execution stage initialized after pre-validation completion.",
-        },
+        "progress.totalItems": executionTotalRows,
+        "progress.processedItems": executionProcessedRows,
+        "progress.batchSize": EXECUTION_BATCH_SIZE,
+        "progress.batchCount": batchCount,
+        "progress.currentBatchNumber": currentBatchNumber,
+        "progress.lastProcessedIndex": executionProcessedRows - 1,
+        lastHeartbeatAt: new Date(),
       },
     },
     { new: true }
   );
 
-  if (!updated) {
-    throw new Error("Failed to switch job from pre-validation to execution stage");
-  }
-
-  return updated;
+  return updated || job;
 }
 
-async function processSingleBatch(jobDoc: any) {
+async function maybePrepareExecutionProgressWindow(jobId: string, createdBy: string) {
+  const job = await getOwnedJob(jobId, createdBy);
+  if (!job) return null;
+
+  if (getBulkDetailsDetailedStage(job) !== "execution") {
+    return job;
+  }
+
+  const executionTotalRows = getExecutionTotalRows(job);
+  const currentTotalItems = safeNum(job?.progress?.totalItems, 0);
+  const currentBatchSize = safeNum(job?.progress?.batchSize, 0);
+
+  if (
+    currentTotalItems !== executionTotalRows ||
+    currentBatchSize !== EXECUTION_BATCH_SIZE
+  ) {
+    return prepareExecutionProgressWindow(jobId, createdBy);
+  }
+
+  return job;
+}
+
+async function processSingleStep(jobDoc: any) {
   const jobId = safeStr(jobDoc?._id);
   const createdBy = safeStr(jobDoc?.createdBy);
 
@@ -563,7 +379,7 @@ async function processSingleBatch(jobDoc: any) {
     };
   }
 
-  const lockedJob = claim.job;
+  let lockedJob: any = claim.job;
 
   if (isCancelRequested(lockedJob)) {
     const cancelledJob = await applyCancelIfRequested(jobId, createdBy);
@@ -597,10 +413,9 @@ async function processSingleBatch(jobDoc: any) {
     };
   }
 
-  const totalItems = safeNum(lockedJob?.progress?.totalItems, 0);
-  const processedItems = safeNum(lockedJob?.progress?.processedItems, 0);
+  const currentStage = getBulkDetailsDetailedStage(lockedJob);
 
-  if (totalItems <= 0 || processedItems >= totalItems) {
+  if (currentStage === "completed") {
     const finalJob = await finalizeBulkUploadJob({
       jobId,
       createdBy,
@@ -614,54 +429,95 @@ async function processSingleBatch(jobDoc: any) {
       jobId,
       createdBy,
       updatedJob: finalJob,
-      reason: "No pending rows left",
+      reason: "Job already completed",
     };
   }
 
-  const stage = getCurrentPipelineStage(lockedJob);
-  const batchSize = Math.max(1, safeNum(getStageBatchSize(lockedJob), 1));
-  const fromIndex = processedItems;
-  const toIndex = Math.min(totalItems - 1, fromIndex + batchSize - 1);
-  const batchNumber = safeNum(lockedJob?.progress?.currentBatchNumber, 0) + 1;
+  if (currentStage === "execution") {
+    lockedJob = await maybePrepareExecutionProgressWindow(jobId, createdBy);
+
+    const executionTotalRows = getExecutionTotalRows(lockedJob);
+    const executionProcessedRows = getExecutionProcessedRows(lockedJob);
+
+    if (executionTotalRows <= 0 || executionProcessedRows >= executionTotalRows) {
+      const finalJob = await finalizeBulkUploadJob({
+        jobId,
+        createdBy,
+        message:
+          executionTotalRows <= 0
+            ? "Prevalidation ke baad koi valid row final upload/create ke liye nahi bachi."
+            : "Bulk job completed successfully.",
+      });
+
+      return {
+        ok: true as const,
+        blocked: true,
+        finished: true,
+        jobId,
+        createdBy,
+        updatedJob: finalJob,
+        reason: "No pending execution rows left",
+      };
+    }
+  }
+
+  let fromIndex = 0;
+  let toIndex = 0;
+
+  if (currentStage === "execution") {
+    const processedRows = getExecutionProcessedRows(lockedJob);
+    const totalRows = getExecutionTotalRows(lockedJob);
+
+    fromIndex = processedRows;
+    toIndex = Math.min(totalRows - 1, fromIndex + EXECUTION_BATCH_SIZE - 1);
+  }
 
   try {
-    const batchResult: BulkDetailsBatchProcessResult =
-      await processBulkDetailsJobBatch({
-        job: lockedJob,
-        batchNumber,
-        fromIndex,
-        toIndex,
-      });
+    const batchResult = await processBulkDetailsJobBatch({
+      job: lockedJob,
+      batchNumber: safeNum(lockedJob?.progress?.currentBatchNumber, 0) + 1,
+      fromIndex,
+      toIndex,
+    });
 
-    let updatedJob: any = null;
+    const nextPipelineStage = safeStr(batchResult?.summaryPatch?.pipelineStage).toLowerCase();
+    const isExecutionStage = nextPipelineStage === "execution";
+    const isCompletedStage = nextPipelineStage === "completed";
 
-    if (stage === "prevalidation" && batchResult?.nextStage === "execution") {
-      updatedJob = await transitionPrevalidationToExecution({
+    const updatedJob = await completeBulkUploadJobBatch({
+      jobId,
+      createdBy,
+      lockToken: claim.lockToken,
+      processedDelta: currentStage === "execution" ? batchResult.processedDelta : 0,
+      successDelta: currentStage === "execution" ? batchResult.successDelta : 0,
+      failedDelta: batchResult.failedDelta,
+      skippedDelta: batchResult.skippedDelta,
+      validDelta: batchResult.validDelta,
+      nextLastProcessedIndex:
+        currentStage === "execution"
+          ? batchResult.nextLastProcessedIndex
+          : Math.max(-1, safeNum(lockedJob?.progress?.lastProcessedIndex, -1)),
+      batchNumber: batchResult.batchNumber,
+      fromIndex: batchResult.fromIndex,
+      toIndex: batchResult.toIndex,
+      attempted: batchResult.attempted,
+      failures: batchResult.failures,
+      note: batchResult.note,
+      summaryPatch: batchResult.summaryPatch,
+    });
+
+    let finalUpdatedJob = updatedJob;
+
+    if (isExecutionStage) {
+      finalUpdatedJob = await maybePrepareExecutionProgressWindow(jobId, createdBy);
+    }
+
+    if (isCompletedStage) {
+      finalUpdatedJob = await finalizeBulkUploadJob({
         jobId,
         createdBy,
-        lockToken: claim.lockToken,
-        batchResult,
-      });
-    } else {
-      updatedJob = await completeBulkUploadJobBatch({
-        jobId,
-        createdBy,
-        lockToken: claim.lockToken,
-        processedDelta: batchResult.processedDelta,
-        successDelta: batchResult.successDelta,
-        failedDelta: batchResult.failedDelta,
-        skippedDelta: batchResult.skippedDelta,
-        validDelta: batchResult.validDelta,
-        nextLastProcessedIndex: batchResult.nextLastProcessedIndex,
-        batchNumber: batchResult.batchNumber,
-        fromIndex: batchResult.fromIndex,
-        toIndex: batchResult.toIndex,
-        attempted: batchResult.attempted,
-        failures: batchResult.failures,
-        note: batchResult.note,
+        message: safeStr(batchResult.note || "Bulk job completed successfully."),
         summaryPatch: batchResult.summaryPatch,
-        inputPatch: batchResult.inputPatch || {},
-        inputAppendPatch: batchResult.inputAppendPatch || {},
       });
     }
 
@@ -670,7 +526,7 @@ async function processSingleBatch(jobDoc: any) {
       blocked: false,
       jobId,
       createdBy,
-      updatedJob,
+      updatedJob: finalUpdatedJob,
       batchResult,
     };
   } catch (error: any) {
@@ -678,7 +534,7 @@ async function processSingleBatch(jobDoc: any) {
       jobId,
       createdBy,
       lockToken: claim.lockToken,
-      message: safeStr(error?.message || "Bulk details batch processing failed"),
+      message: safeStr(error?.message || "Bulk details processing failed"),
     });
 
     return {
@@ -687,7 +543,7 @@ async function processSingleBatch(jobDoc: any) {
       jobId,
       createdBy,
       failedJob,
-      reason: safeStr(error?.message || "Bulk details batch processing failed"),
+      reason: safeStr(error?.message || "Bulk details processing failed"),
     };
   }
 }
@@ -723,6 +579,8 @@ async function runManualProcessor(req: NextRequest) {
     );
   }
 
+  job = await maybePrepareExecutionProgressWindow(jobId, createdBy);
+
   if (isFinalBulkJobStatus(job.status)) {
     return NextResponse.json(
       {
@@ -731,7 +589,6 @@ async function runManualProcessor(req: NextRequest) {
         processingState: "finished",
         stats: {
           processedSteps: 0,
-          processedItems: 0,
           failedSteps: 0,
           elapsedMs: 0,
           maxSteps,
@@ -752,7 +609,6 @@ async function runManualProcessor(req: NextRequest) {
         processingState: "cancelled",
         stats: {
           processedSteps: 0,
-          processedItems: 0,
           failedSteps: 0,
           elapsedMs: 0,
           maxSteps,
@@ -777,7 +633,6 @@ async function runManualProcessor(req: NextRequest) {
         processingState: "paused",
         stats: {
           processedSteps: 0,
-          processedItems: 0,
           failedSteps: 0,
           elapsedMs: 0,
           maxSteps,
@@ -802,7 +657,6 @@ async function runManualProcessor(req: NextRequest) {
         processingState: "finished",
         stats: {
           processedSteps: 0,
-          processedItems: 0,
           failedSteps: 0,
           elapsedMs: 0,
           maxSteps,
@@ -815,7 +669,6 @@ async function runManualProcessor(req: NextRequest) {
 
   const startedAtMs = Date.now();
   let processedSteps = 0;
-  let processedItems = 0;
   let failedSteps = 0;
   let lastMessage = "";
 
@@ -833,7 +686,7 @@ async function runManualProcessor(req: NextRequest) {
       );
     }
 
-    job = currentJob;
+    job = await maybePrepareExecutionProgressWindow(jobId, createdBy);
 
     if (isFinalBulkJobStatus(job.status)) {
       break;
@@ -865,15 +718,12 @@ async function runManualProcessor(req: NextRequest) {
       break;
     }
 
-    const result = await processSingleBatch(job);
+    const result = await processSingleStep(job);
 
     if (result.ok && !result.blocked) {
       processedSteps += 1;
-      processedItems += safeNum(result.batchResult?.processedDelta, 0);
       job = result.updatedJob || job;
-      lastMessage = safeStr(
-        result.batchResult?.note || "One batch processed successfully."
-      );
+      lastMessage = safeStr(result.batchResult?.note || "One processing step completed.");
       continue;
     }
 
@@ -885,13 +735,14 @@ async function runManualProcessor(req: NextRequest) {
 
     failedSteps += 1;
     job = result.failedJob || job;
-    lastMessage = safeStr(result.reason || "Batch processing failed.");
+    lastMessage = safeStr(result.reason || "Processing failed.");
     break;
   }
 
   const latestJob = await getOwnedJob(jobId, createdBy);
   const finalJob = latestJob || job;
   const finalStatus = safeStr(finalJob?.status);
+  const finalStage = getBulkDetailsDetailedStage(finalJob);
 
   let processingState = "idle";
 
@@ -903,10 +754,10 @@ async function runManualProcessor(req: NextRequest) {
     processingState = "cancelled";
   } else if (isPauseRequested(finalJob)) {
     processingState = "paused";
-  } else if (processedSteps > 0) {
-    processingState = "processed";
+  } else if (finalStage === "execution") {
+    processingState = processedSteps > 0 ? "processed" : "ready";
   } else {
-    processingState = "ready";
+    processingState = processedSteps > 0 ? "processed" : "ready";
   }
 
   return NextResponse.json(
@@ -915,12 +766,11 @@ async function runManualProcessor(req: NextRequest) {
       message:
         lastMessage ||
         (processedSteps > 0
-          ? `${processedSteps} batch(es) processed successfully.`
-          : "No batches processed in this request."),
+          ? `${processedSteps} processing step(s) completed successfully.`
+          : "No steps processed in this request."),
       processingState,
       stats: {
         processedSteps,
-        processedItems,
         failedSteps,
         elapsedMs: Date.now() - startedAtMs,
         maxSteps,

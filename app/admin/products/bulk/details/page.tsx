@@ -19,8 +19,7 @@ import {
   Server,
   FileUp,
   Activity,
-  ClipboardCheck,
-  Boxes,
+  RotateCcw,
   Trash2,
 } from "lucide-react";
 import { CATEGORY_CONFIG, PHYSICAL_CATEGORY } from "@/lib/productCatalog";
@@ -93,55 +92,25 @@ type BulkJobLastBatch = {
   note?: string;
 } | null;
 
-type PipelineStageName = "prevalidation" | "execution" | "completed";
-
-type BulkPipelineStageSummary = {
+type SummaryStageBlock = {
   totalRows?: number;
   processedRows?: number;
   validRows?: number;
   failedRows?: number;
   skippedRows?: number;
-  duplicateUploadRows?: number;
-  readyRows?: number;
-  createdRows?: number;
-  updatedRows?: number;
-  successRows?: number;
   startedAt?: string | null;
   completedAt?: string | null;
   lastNote?: string;
+  duplicateRows?: number;
+  remainingRows?: number;
+  siteDuplicateRows?: number;
+  sheetDuplicateRows?: number;
 };
 
-type BulkJobSummary = {
-  totalRows?: number;
-  validRows?: number;
+type SummaryExecutionBlock = SummaryStageBlock & {
   createdRows?: number;
   updatedRows?: number;
-  skippedRows?: number;
-  failedRows?: number;
-  duplicateStrategy?: string;
-  dryRun?: boolean;
-  category?: string;
-  pipelineStage?: PipelineStageName | string;
-  needsManualResume?: boolean;
-  resumeCount?: number;
-  lastResumeRequestedAt?: string | null;
-  lastPausedAt?: string | null;
-  prevalidation?: BulkPipelineStageSummary;
-  execution?: BulkPipelineStageSummary;
-  comboSync?: {
-    attempted?: number;
-    succeeded?: number;
-    failed?: number;
-    errors?: string[];
-    mode?: string;
-  };
-  hardcopySync?: {
-    attempted?: number;
-    succeeded?: number;
-    failed?: number;
-    errors?: string[];
-    mode?: string;
-  };
+  successRows?: number;
 };
 
 type BulkJob = {
@@ -152,7 +121,7 @@ type BulkJob = {
   createdBy?: string;
   meta?: Record<string, any>;
   config?: Record<string, any>;
-  summary?: BulkJobSummary;
+  summary?: Record<string, any>;
   progress?: BulkJobProgress;
   lastBatch?: BulkJobLastBatch;
   failuresCount?: number;
@@ -185,11 +154,13 @@ type CreateJobResponse = {
   job?: BulkJob | null;
 };
 
+type JobActionName = "pause" | "resume" | "cancel" | "restart" | "delete";
+
 type JobActionResponse = {
   ok?: boolean;
   error?: string;
   message?: string;
-  action?: string;
+  action?: JobActionName;
   job?: BulkJob | null;
 };
 
@@ -200,7 +171,6 @@ type ProcessJobResponse = {
   processingState?: string;
   stats?: {
     processedSteps?: number;
-    processedItems?: number;
     failedSteps?: number;
     elapsedMs?: number;
     maxSteps?: number;
@@ -208,12 +178,14 @@ type ProcessJobResponse = {
   job?: BulkJob | null;
 };
 
-type DeleteJobResponse = {
-  ok?: boolean;
-  error?: string;
-  message?: string;
-  deletedJobId?: string;
-};
+type DetailedStage =
+  | "sku_scan"
+  | "course_validation"
+  | "session_validation"
+  | "subject_validation"
+  | "pricing_validation"
+  | "execution"
+  | "completed";
 
 const DEFAULT_NOTE =
   "Please verify the question paper shown in the preview/thumbnail before purchasing. Purchase only if it matches your subject code, medium, session, and questions.";
@@ -244,9 +216,20 @@ BHIC132HIN202526,BHIC 132,2025-2026,Hindi,BAHIH
 BEGC101ENG202526,BEGC 101,2025-2026,English,BAEGH
 BPSC101ENG202526,BPSC 101,2025-2026,English,"BAPSH, BAG"`;
 
-const POLL_INTERVAL_MS = 5000;
-const PROCESS_MAX_STEPS_PER_REQUEST = 20;
-const PROCESS_LOOP_DELAY_MS = 150;
+// UI same rakhi gayi hai, lekin processing ko zyada responsive aur timeout-safe
+// banane ke liye ye values low rakhi gayi hain.
+const POLL_INTERVAL_MS = 3000;
+const PROCESS_MAX_STEPS_PER_REQUEST = 1;
+const PROCESS_LOOP_DELAY_MS = 180;
+
+const STAGE_ORDER: DetailedStage[] = [
+  "sku_scan",
+  "course_validation",
+  "session_validation",
+  "subject_validation",
+  "pricing_validation",
+  "execution",
+];
 
 function notifyLongTaskStart() {
   if (typeof window !== "undefined") {
@@ -502,92 +485,164 @@ function buildRecentFailuresCsv(rows: BulkJobFailureRow[]) {
   return [header.map(csvCell).join(","), ...body].join("\n");
 }
 
-function getPipelineStage(summary?: BulkJobSummary | null): PipelineStageName {
+function getDetailedStage(summary: Record<string, any> | undefined | null): DetailedStage {
   const stage = safeStr(summary?.pipelineStage).toLowerCase();
-  if (stage === "execution") return "execution";
-  if (stage === "completed") return "completed";
-  return "prevalidation";
+
+  if (
+    stage === "sku_scan" ||
+    stage === "course_validation" ||
+    stage === "session_validation" ||
+    stage === "subject_validation" ||
+    stage === "pricing_validation" ||
+    stage === "execution" ||
+    stage === "completed"
+  ) {
+    return stage as DetailedStage;
+  }
+
+  return "sku_scan";
 }
 
-function getPrevalidationSummary(
-  summary?: BulkJobSummary | null
-): BulkPipelineStageSummary {
-  return {
-    totalRows: safeNum(summary?.prevalidation?.totalRows, safeNum(summary?.totalRows, 0)),
-    processedRows: safeNum(summary?.prevalidation?.processedRows, 0),
-    validRows: safeNum(summary?.prevalidation?.validRows, 0),
-    failedRows: safeNum(summary?.prevalidation?.failedRows, 0),
-    skippedRows: safeNum(summary?.prevalidation?.skippedRows, 0),
-    duplicateUploadRows: safeNum(summary?.prevalidation?.duplicateUploadRows, 0),
-    readyRows: safeNum(summary?.prevalidation?.readyRows, 0),
-    startedAt: summary?.prevalidation?.startedAt || null,
-    completedAt: summary?.prevalidation?.completedAt || null,
-    lastNote: safeStr(summary?.prevalidation?.lastNote),
+function getDetailedStageLabel(stage: DetailedStage) {
+  if (stage === "sku_scan") return "Unique SKU Scan";
+  if (stage === "course_validation") return "Master Course Validation";
+  if (stage === "session_validation") return "Master Session Validation";
+  if (stage === "subject_validation") return "Master Subject Validation";
+  if (stage === "pricing_validation") return "Pricing Validation";
+  if (stage === "execution") return "Final Product Upload/Create";
+  return "Completed";
+}
+
+function getSummaryStageBlock(summary: Record<string, any> | undefined | null, key: string) {
+  const raw = summary?.[key];
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    return raw as SummaryStageBlock;
+  }
+  return {} as SummaryStageBlock;
+}
+
+function getExecutionBlock(summary: Record<string, any> | undefined | null) {
+  const raw = summary?.execution;
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    return raw as SummaryExecutionBlock;
+  }
+  return {} as SummaryExecutionBlock;
+}
+
+function getBlockPercent(block: SummaryStageBlock | SummaryExecutionBlock) {
+  const total = safeNum(block?.totalRows, 0);
+  const processed = safeNum(block?.processedRows, 0);
+  if (!total) {
+    return block?.completedAt ? 100 : 0;
+  }
+  return Math.max(0, Math.min(100, Math.round((processed / total) * 100)));
+}
+
+function getStageVisualState(
+  currentStage: DetailedStage,
+  stage: DetailedStage,
+  summary: Record<string, any> | undefined | null
+) {
+  const currentIndex = STAGE_ORDER.indexOf(currentStage);
+  const stageIndex = STAGE_ORDER.indexOf(stage);
+
+  if (stage === "execution") {
+    const block = getExecutionBlock(summary);
+    if (safeStr(block?.completedAt)) return "completed";
+    if (currentStage === "execution") return "running";
+    if (currentStage === "completed") return "completed";
+    if (stageIndex < currentIndex) return "completed";
+    return "pending";
+  }
+
+  const keyMap: Record<string, string> = {
+    sku_scan: "skuScan",
+    course_validation: "courseValidation",
+    session_validation: "sessionValidation",
+    subject_validation: "subjectValidation",
+    pricing_validation: "pricingValidation",
   };
+
+  const block = getSummaryStageBlock(summary, keyMap[stage]);
+
+  if (safeStr(block?.completedAt)) return "completed";
+  if (currentStage === stage) return "running";
+  if (stageIndex < currentIndex) return "completed";
+  if (currentStage === "completed") return "completed";
+  return "pending";
 }
 
-function getExecutionSummary(
-  summary?: BulkJobSummary | null
-): BulkPipelineStageSummary {
-  return {
-    totalRows: safeNum(summary?.execution?.totalRows, 0),
-    processedRows: safeNum(summary?.execution?.processedRows, 0),
-    createdRows: safeNum(summary?.execution?.createdRows, 0),
-    updatedRows: safeNum(summary?.execution?.updatedRows, 0),
-    skippedRows: safeNum(summary?.execution?.skippedRows, 0),
-    failedRows: safeNum(summary?.execution?.failedRows, 0),
-    successRows: safeNum(summary?.execution?.successRows, 0),
-    startedAt: summary?.execution?.startedAt || null,
-    completedAt: summary?.execution?.completedAt || null,
-    lastNote: safeStr(summary?.execution?.lastNote),
-  };
+function getStageCardClasses(state: string) {
+  if (state === "completed") {
+    return "border-emerald-200 bg-emerald-50";
+  }
+  if (state === "running") {
+    return "border-blue-200 bg-blue-50";
+  }
+  return "border-slate-200 bg-slate-50";
 }
 
-function getPercent(processed: number, total: number) {
+function computePrevalidationPercent(summary: Record<string, any> | undefined | null) {
+  const blocks = [
+    getSummaryStageBlock(summary, "skuScan"),
+    getSummaryStageBlock(summary, "courseValidation"),
+    getSummaryStageBlock(summary, "sessionValidation"),
+    getSummaryStageBlock(summary, "subjectValidation"),
+    getSummaryStageBlock(summary, "pricingValidation"),
+  ];
+
+  const total = blocks.reduce((acc, block) => acc + safeNum(block?.totalRows, 0), 0);
+  const processed = blocks.reduce(
+    (acc, block) =>
+      acc + Math.min(safeNum(block?.processedRows, 0), safeNum(block?.totalRows, 0)),
+    0
+  );
+
   if (!total) return 0;
   return Math.max(0, Math.min(100, Math.round((processed / total) * 100)));
 }
 
-function getCurrentStageLabel(stage: PipelineStageName) {
-  if (stage === "execution") return "Final Product Upload/Create";
-  if (stage === "completed") return "Completed";
-  return "Pre-validation";
+function computeExecutionPercent(summary: Record<string, any> | undefined | null) {
+  return getBlockPercent(getExecutionBlock(summary));
 }
 
-function getStageDescription(stage: PipelineStageName, dryRun: boolean) {
-  if (stage === "execution") {
-    return "Ab sirf pre-validated valid rows ka final create/update ho raha hai.";
+function computeOverallVisualPercent(summary: Record<string, any> | undefined | null) {
+  const currentStage = getDetailedStage(summary);
+  if (currentStage === "completed") return 100;
+
+  const currentIndex = STAGE_ORDER.indexOf(currentStage);
+  const completedStages = Math.max(0, currentIndex);
+  let currentStagePercent = 0;
+
+  if (currentStage === "execution") {
+    currentStagePercent = computeExecutionPercent(summary);
+  } else {
+    const keyMap: Record<string, string> = {
+      sku_scan: "skuScan",
+      course_validation: "courseValidation",
+      session_validation: "sessionValidation",
+      subject_validation: "subjectValidation",
+      pricing_validation: "pricingValidation",
+      execution: "execution",
+      completed: "execution",
+    };
+
+    currentStagePercent = getBlockPercent(
+      getSummaryStageBlock(summary, keyMap[currentStage])
+    );
   }
-  if (stage === "completed") {
-    return dryRun
-      ? "Dry run complete ho chuki hai. Final product create/update stage intentionally run nahi hui."
-      : "Pre-validation aur final upload/create dono stages complete ho chuki hain.";
-  }
-  return "Uploaded sheet ka duplicate check, master validation aur pricing validation chal raha hai.";
+
+  return Math.max(
+    0,
+    Math.min(
+      100,
+      Math.round(((completedStages + currentStagePercent / 100) / STAGE_ORDER.length) * 100)
+    )
+  );
 }
 
-function extractDownloadFileName(
-  contentDisposition: string | null,
-  fallback: string
-) {
-  const raw = safeStr(contentDisposition);
-  if (!raw) return fallback;
-
-  const utf8Match = raw.match(/filename\*=UTF-8''([^;]+)/i);
-  if (utf8Match?.[1]) {
-    try {
-      return decodeURIComponent(utf8Match[1]);
-    } catch {
-      return utf8Match[1];
-    }
-  }
-
-  const normalMatch = raw.match(/filename="?([^"]+)"?/i);
-  if (normalMatch?.[1]) {
-    return normalMatch[1];
-  }
-
-  return fallback;
+function pickJobFromActiveResponse(data: ActiveJobResponse | null | undefined) {
+  return data?.job || data?.activeJob || data?.latestJob || null;
 }
 
 export default function BulkDetailsPage() {
@@ -620,8 +675,7 @@ export default function BulkDetailsPage() {
   const [isProcessingJob, setIsProcessingJob] = useState(false);
   const [isPausingJob, setIsPausingJob] = useState(false);
   const [isResumingJob, setIsResumingJob] = useState(false);
-  const [isDownloadingSavedFailures, setIsDownloadingSavedFailures] =
-    useState(false);
+  const [isRestartingJob, setIsRestartingJob] = useState(false);
   const [isDeletingJob, setIsDeletingJob] = useState(false);
   const [defaultsHydrated, setDefaultsHydrated] = useState(false);
 
@@ -792,6 +846,8 @@ export default function BulkDetailsPage() {
       !isPausingJob &&
       !isResumingJob &&
       !isCancellingJob &&
+      !isRestartingJob &&
+      !isDeletingJob &&
       !activeJobExists &&
       canSubmit
     );
@@ -801,6 +857,8 @@ export default function BulkDetailsPage() {
     isPausingJob,
     isResumingJob,
     isCancellingJob,
+    isRestartingJob,
+    isDeletingJob,
     activeJobExists,
     canSubmit,
   ]);
@@ -812,16 +870,14 @@ export default function BulkDetailsPage() {
     ? currentJob.recentFailures
     : [];
 
-  const pipelineStage = getPipelineStage(summary);
-  const prevalidation = getPrevalidationSummary(summary);
-  const execution = getExecutionSummary(summary);
-  const prevalidationPercent = getPercent(
-    safeNum(prevalidation.processedRows),
-    safeNum(prevalidation.totalRows)
+  const currentDetailedStage = useMemo(
+    () => getDetailedStage(summary),
+    [summary]
   );
-  const executionPercent = getPercent(
-    safeNum(execution.processedRows),
-    safeNum(execution.totalRows)
+
+  const currentDetailedStageLabel = useMemo(
+    () => getDetailedStageLabel(currentDetailedStage),
+    [currentDetailedStage]
   );
 
   const needsManualResume = useMemo(() => {
@@ -851,7 +907,9 @@ export default function BulkDetailsPage() {
         !isSubmittingJob &&
         !isPausingJob &&
         !isResumingJob &&
-        !isCancellingJob
+        !isCancellingJob &&
+        !isRestartingJob &&
+        !isDeletingJob
     );
   }, [
     currentJob,
@@ -860,6 +918,8 @@ export default function BulkDetailsPage() {
     isPausingJob,
     isResumingJob,
     isCancellingJob,
+    isRestartingJob,
+    isDeletingJob,
   ]);
 
   const canPauseSavedJob = useMemo(() => {
@@ -869,38 +929,103 @@ export default function BulkDetailsPage() {
         !needsManualResume &&
         !isPausingJob &&
         !isResumingJob &&
-        !isCancellingJob
+        !isCancellingJob &&
+        !isRestartingJob &&
+        !isDeletingJob
     );
-  }, [currentJob, needsManualResume, isPausingJob, isResumingJob, isCancellingJob]);
+  }, [
+    currentJob,
+    needsManualResume,
+    isPausingJob,
+    isResumingJob,
+    isCancellingJob,
+    isRestartingJob,
+    isDeletingJob,
+  ]);
+
+  const canCancelSavedJob = useMemo(() => {
+    return Boolean(
+      currentJob &&
+        !isFinalJobStatus(safeStr(currentJob.status)) &&
+        !isCancellingJob &&
+        !isRestartingJob &&
+        !isDeletingJob
+    );
+  }, [currentJob, isCancellingJob, isRestartingJob, isDeletingJob]);
+
+  const canRestartSavedJob = useMemo(() => {
+    return Boolean(
+      currentJob &&
+        !isSubmittingJob &&
+        !isPausingJob &&
+        !isResumingJob &&
+        !isCancellingJob &&
+        !isRestartingJob &&
+        !isDeletingJob
+    );
+  }, [
+    currentJob,
+    isSubmittingJob,
+    isPausingJob,
+    isResumingJob,
+    isCancellingJob,
+    isRestartingJob,
+    isDeletingJob,
+  ]);
 
   const canDeleteSavedJob = useMemo(() => {
     return Boolean(
       currentJob &&
-        isFinalJobStatus(safeStr(currentJob.status)) &&
-        !isDeletingJob &&
         !isSubmittingJob &&
-        !isProcessingJob &&
         !isPausingJob &&
         !isResumingJob &&
-        !isCancellingJob
+        !isCancellingJob &&
+        !isRestartingJob &&
+        !isDeletingJob
     );
   }, [
     currentJob,
-    isDeletingJob,
     isSubmittingJob,
-    isProcessingJob,
     isPausingJob,
     isResumingJob,
     isCancellingJob,
+    isRestartingJob,
+    isDeletingJob,
   ]);
 
-  const stageAwareProgressPercent = useMemo(() => {
-    if (pipelineStage === "completed") return 100;
-    if (pipelineStage === "execution") {
-      return Math.round(50 + executionPercent / 2);
-    }
-    return Math.round(prevalidationPercent / 2);
-  }, [pipelineStage, prevalidationPercent, executionPercent]);
+  const prevalidationPercent = useMemo(
+    () => computePrevalidationPercent(summary),
+    [summary]
+  );
+
+  const executionPercent = useMemo(
+    () => computeExecutionPercent(summary),
+    [summary]
+  );
+
+  const overallVisualPercent = useMemo(
+    () => computeOverallVisualPercent(summary),
+    [summary]
+  );
+
+  const skuScan = useMemo(() => getSummaryStageBlock(summary, "skuScan"), [summary]);
+  const courseValidation = useMemo(
+    () => getSummaryStageBlock(summary, "courseValidation"),
+    [summary]
+  );
+  const sessionValidation = useMemo(
+    () => getSummaryStageBlock(summary, "sessionValidation"),
+    [summary]
+  );
+  const subjectValidation = useMemo(
+    () => getSummaryStageBlock(summary, "subjectValidation"),
+    [summary]
+  );
+  const pricingValidation = useMemo(
+    () => getSummaryStageBlock(summary, "pricingValidation"),
+    [summary]
+  );
+  const executionSummary = useMemo(() => getExecutionBlock(summary), [summary]);
 
   async function fetchCurrentJob(showSpinner = false) {
     if (showSpinner) setIsRefreshingJob(true);
@@ -918,7 +1043,7 @@ export default function BulkDetailsPage() {
 
       if (!res.ok || !data?.ok) return;
 
-      setCurrentJob(data?.job || null);
+      setCurrentJob(pickJobFromActiveResponse(data));
     } catch {
       // ignore
     } finally {
@@ -928,7 +1053,7 @@ export default function BulkDetailsPage() {
 
   async function sendJobAction(
     jobId: string,
-    action: "pause" | "resume" | "cancel",
+    action: JobActionName,
     silent = false
   ) {
     const res = await fetch(`/api/admin/bulk-jobs/${encodeURIComponent(jobId)}`, {
@@ -944,7 +1069,9 @@ export default function BulkDetailsPage() {
       throw new Error(safeStr(data?.error || data?.message || `${action} failed`));
     }
 
-    if (data?.job) {
+    if (action === "delete") {
+      setCurrentJob(null);
+    } else if (data?.job) {
       setCurrentJob(data.job);
     }
 
@@ -993,32 +1120,18 @@ export default function BulkDetailsPage() {
           break;
         }
 
-        if (data?.job) {
-          setCurrentJob(data.job);
+        const nextJob = data?.job || null;
+        if (nextJob) {
+          setCurrentJob(nextJob);
         }
 
-        const processingState = safeStr(data?.processingState);
+        const processingState = safeStr(data?.processingState).toLowerCase();
         const message = safeStr(data?.message);
-        const finalJobStatus = safeStr(data?.job?.status);
-
-        if (processingState === "processed") {
-          await sleep(PROCESS_LOOP_DELAY_MS);
-          continue;
-        }
-
-        if (processingState === "finished") {
-          setServerMessage(message || "Bulk job completed.");
-          setServerMessageType(
-            finalJobStatus === "completed" ? "success" : "info"
-          );
-          break;
-        }
-
-        if (processingState === "paused") {
-          setServerMessage(message || "Bulk job paused.");
-          setServerMessageType("info");
-          break;
-        }
+        const finalJobStatus = safeStr(nextJob?.status);
+        const nextNeedsManualResume = safeBool(
+          nextJob?.summary?.needsManualResume,
+          false
+        );
 
         if (processingState === "cancelled") {
           setServerMessage(message || "Bulk job cancelled.");
@@ -1032,11 +1145,37 @@ export default function BulkDetailsPage() {
           break;
         }
 
+        if (processingState === "paused" || nextNeedsManualResume) {
+          setServerMessage(message || "Bulk job paused.");
+          setServerMessageType("info");
+          break;
+        }
+
+        if (processingState === "finished" || isFinalJobStatus(finalJobStatus)) {
+          setServerMessage(
+            message ||
+              (finalJobStatus === "completed"
+                ? "Bulk job completed."
+                : finalJobStatus === "completed_with_errors"
+                ? "Bulk job completed with errors."
+                : finalJobStatus === "failed"
+                ? "Bulk job failed."
+                : finalJobStatus === "cancelled"
+                ? "Bulk job cancelled."
+                : "Bulk job finished.")
+          );
+          setServerMessageType(
+            finalJobStatus === "completed" ? "success" : finalJobStatus === "failed" ? "error" : "info"
+          );
+          break;
+        }
+
         if (message) {
           setServerMessage(message);
           setServerMessageType("info");
         }
-        break;
+
+        await sleep(PROCESS_LOOP_DELAY_MS);
       }
     } finally {
       if (processorRunIdRef.current === runId) {
@@ -1055,16 +1194,8 @@ export default function BulkDetailsPage() {
     try {
       const resumedJob = await sendJobAction(jobId, "resume", silentResumeMessage);
       if (!silentResumeMessage) {
-        const stage = getPipelineStage(resumedJob?.summary || {});
-        const stageLabel =
-          stage === "execution"
-            ? "final product upload/create stage"
-            : stage === "completed"
-            ? "completed stage"
-            : "pre-validation stage";
-
         setServerMessage(
-          `Saved job resume ho gayi hai. Ab ${stageLabel} continue hogi.`
+          "Saved job resume ho gayi hai. Ab staged processing continue hogi."
         );
         setServerMessageType("info");
       }
@@ -1092,7 +1223,7 @@ export default function BulkDetailsPage() {
 
     if (activeJobExists) {
       alert(
-        "Ek bulk product details job already saved hai. Pehle usko resume, complete ya cancel hone do."
+        "Ek bulk product details job already saved hai. Pehle usko complete, cancel, restart ya delete karo."
       );
       return;
     }
@@ -1155,7 +1286,7 @@ export default function BulkDetailsPage() {
 
       setCurrentJob(data.job);
       setServerMessage(
-        "Bulk job save ho gayi hai. Ab pre-validation immediately start ki ja rahi hai."
+        "Bulk job save ho gayi hai. Ab staged pre-validation aur final upload/create process start ki ja rahi hai."
       );
       setServerMessageType("success");
 
@@ -1184,7 +1315,7 @@ export default function BulkDetailsPage() {
       const pausedJob = await sendJobAction(jobId, "pause", true);
       setCurrentJob(pausedJob || currentJob);
       setServerMessage(
-        "Pause request save ho gayi hai. Current running batch complete hone ke baad job ruk jayegi."
+        "Pause request save ho gayi hai. Current processing request complete hone ke baad job ruk jayegi."
       );
       setServerMessageType("info");
     } catch (error: any) {
@@ -1210,7 +1341,7 @@ export default function BulkDetailsPage() {
 
     try {
       const cancelledJob = await sendJobAction(jobId, "cancel", true);
-      setCurrentJob(cancelledJob || null);
+      setCurrentJob(cancelledJob || currentJob);
       setServerMessage("Current bulk job cancelled.");
       setServerMessageType("info");
     } catch (error: any) {
@@ -1221,13 +1352,67 @@ export default function BulkDetailsPage() {
     }
   }
 
+  async function restartCurrentJob() {
+    const jobId = safeStr(currentJob?._id);
+    if (!jobId) return;
+
+    const ok = window.confirm(
+      "Kya aap current job ko Stage 1 se dubara restart karna chahte hain? Saved failures clear ho jayengi."
+    );
+    if (!ok) return;
+
+    setIsRestartingJob(true);
+    resetMessages();
+    processorStopRef.current = true;
+
+    try {
+      const restartedJob = await sendJobAction(jobId, "restart", true);
+      setCurrentJob(restartedJob || currentJob);
+      setServerMessage(
+        "Job restart ho gayi hai. Ab ye Unique SKU Scan stage se dubara chalegi."
+      );
+      setServerMessageType("success");
+    } catch (error: any) {
+      setServerMessage(safeStr(error?.message || "Restart failed"));
+      setServerMessageType("error");
+    } finally {
+      setIsRestartingJob(false);
+    }
+  }
+
+  async function deleteCurrentJob() {
+    const jobId = safeStr(currentJob?._id);
+    if (!jobId) return;
+
+    const ok = window.confirm(
+      "Kya aap is saved bulk job ko permanently delete karna chahte hain?"
+    );
+    if (!ok) return;
+
+    setIsDeletingJob(true);
+    resetMessages();
+    processorStopRef.current = true;
+
+    try {
+      await sendJobAction(jobId, "delete", true);
+      setServerMessage("Saved bulk job permanently delete ho gayi.");
+      setServerMessageType("success");
+      setCurrentJob(null);
+    } catch (error: any) {
+      setServerMessage(safeStr(error?.message || "Delete failed"));
+      setServerMessageType("error");
+    } finally {
+      setIsDeletingJob(false);
+    }
+  }
+
   function downloadRecentFailuresCsv() {
     const rows = Array.isArray(currentJob?.recentFailures)
       ? currentJob?.recentFailures
       : [];
 
     if (!rows.length) {
-      alert("Abhi visible recent failures available nahi hain.");
+      alert("Abhi download ke liye recent failures available nahi hain.");
       return;
     }
 
@@ -1236,113 +1421,12 @@ export default function BulkDetailsPage() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "bulk-product-details-visible-failures.csv";
+    a.download =
+      safeStr(currentJob?.downloadFileName || "bulk-product-details-failures") + ".csv";
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
-  }
-
-  async function downloadSavedFailuresCsv() {
-    const jobId = safeStr(currentJob?._id);
-    if (!jobId) {
-      alert("Job not found.");
-      return;
-    }
-
-    if (safeNum(currentJob?.failuresCount, 0) <= 0) {
-      alert("Is job me saved failures available nahi hain.");
-      return;
-    }
-
-    setIsDownloadingSavedFailures(true);
-    resetMessages();
-
-    try {
-      const res = await fetch(
-        `/api/admin/bulk-jobs/${encodeURIComponent(jobId)}/failures-csv`,
-        {
-          method: "GET",
-          credentials: "include",
-          cache: "no-store",
-        }
-      );
-
-      if (!res.ok) {
-        const data = await safeReadJson(res);
-        throw new Error(
-          safeStr(data?.error || data?.message || "CSV download failed")
-        );
-      }
-
-      const blob = await res.blob();
-      const url = URL.createObjectURL(blob);
-      const fileName = extractDownloadFileName(
-        res.headers.get("content-disposition"),
-        "bulk-job-failures.csv"
-      );
-
-      const a = document.createElement("a");
-      a.href = url;
-      a.download = fileName;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-
-      setServerMessage("Full saved failures CSV download start ho gayi.");
-      setServerMessageType("success");
-    } catch (error: any) {
-      setServerMessage(safeStr(error?.message || "CSV download failed"));
-      setServerMessageType("error");
-    } finally {
-      setIsDownloadingSavedFailures(false);
-    }
-  }
-
-  async function deleteSavedJob() {
-    const jobId = safeStr(currentJob?._id);
-    if (!jobId) return;
-
-    if (!isFinalJobStatus(safeStr(currentJob?.status))) {
-      alert("Active job ko delete nahi kar sakte.");
-      return;
-    }
-
-    const ok = window.confirm(
-      "Kya aap is saved bulk job ko permanently delete karna chahte hain? Iske summary aur saved failures reports bhi remove ho jayengi."
-    );
-    if (!ok) return;
-
-    setIsDeletingJob(true);
-    resetMessages();
-
-    try {
-      const res = await fetch(`/api/admin/bulk-jobs/${encodeURIComponent(jobId)}`, {
-        method: "DELETE",
-        credentials: "include",
-      });
-
-      const data = (await safeReadJson(res)) as DeleteJobResponse;
-
-      if (!res.ok || !data?.ok) {
-        throw new Error(
-          safeStr(data?.error || data?.message || "Delete failed")
-        );
-      }
-
-      setServerMessage(
-        safeStr(data?.message || "Saved job deleted successfully.")
-      );
-      setServerMessageType("success");
-      setCurrentJob(null);
-      await fetchCurrentJob(false);
-    } catch (error: any) {
-      setServerMessage(safeStr(error?.message || "Delete failed"));
-      setServerMessageType("error");
-    } finally {
-      setIsDeletingJob(false);
-    }
   }
 
   useEffect(() => {
@@ -1363,7 +1447,7 @@ export default function BulkDetailsPage() {
       isProcessingJob ||
       isPausingJob ||
       isResumingJob ||
-      isDownloadingSavedFailures ||
+      isRestartingJob ||
       isDeletingJob;
 
     if (active && !longTaskActiveRef.current) {
@@ -1382,7 +1466,7 @@ export default function BulkDetailsPage() {
     isProcessingJob,
     isPausingJob,
     isResumingJob,
-    isDownloadingSavedFailures,
+    isRestartingJob,
     isDeletingJob,
   ]);
 
@@ -1454,10 +1538,10 @@ export default function BulkDetailsPage() {
                 Bulk Product Details Upload
               </h1>
               <p className="text-sm text-slate-600 mt-1">
-                Save stage lightweight rakhi gayi hai. Excel/CSV upload hone ke
-                baad job save hoti hai, aur Start/Resume par pehle{" "}
-                <b>Pre-validation</b> chalegi, uske baad{" "}
-                <b>Final Product Upload/Create</b> stage start hogi.
+                Job database me save rehti hai. Flow stages me chalega: pehle
+                <b> Unique SKU Scan</b>, phir <b>Master Course</b>, <b>Master Session</b>,
+                <b> Master Subject</b>, <b>Pricing Validation</b>, aur sabse last me
+                <b> Final Product Upload/Create</b>.
               </p>
             </div>
 
@@ -1591,8 +1675,8 @@ export default function BulkDetailsPage() {
                 <div>
                   <div className="text-sm font-extrabold">Current Job Status</div>
                   <div className="text-xs text-slate-500 mt-1">
-                    Job database me save rehti hai. Ab flow do stages me chalega:
-                    pehle pre-validation, phir final product upload/create.
+                    Job database me save rehti hai. Browser close ya logout hone par
+                    process ruk sakti hai, aur baad me Resume se continue ho sakti hai.
                   </div>
                 </div>
               </div>
@@ -1629,14 +1713,20 @@ export default function BulkDetailsPage() {
                         ? "bg-amber-500"
                         : "bg-sky-600"
                     }`}
-                    style={{ width: `${stageAwareProgressPercent}%` }}
+                    style={{ width: `${overallVisualPercent}%` }}
                   />
                 </div>
 
                 <div className="mt-3 text-xs text-slate-500 leading-6">
-                  Current stage: <b>{getCurrentStageLabel(pipelineStage)}</b>
+                  Current stage: <b>{currentDetailedStageLabel}</b>
                   <br />
-                  {getStageDescription(pipelineStage, safeBool(summary.dryRun, false))}
+                  {needsManualResume
+                    ? "Job paused/saved state me hai. Resume button dabane par wahi se continue hogi."
+                    : isProcessingJob
+                    ? "Is browser session me staged processing chal rahi hai."
+                    : !isFinalJobStatus(safeStr(currentJob.status))
+                    ? "Job saved hai aur ready state me hai."
+                    : "Job final state me pahunch chuki hai."}
                 </div>
 
                 <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
@@ -1654,10 +1744,10 @@ export default function BulkDetailsPage() {
                       Current Stage
                     </div>
                     <div className="mt-2 text-sm font-bold">
-                      {getCurrentStageLabel(pipelineStage)}
+                      {currentDetailedStageLabel}
                     </div>
                     <div className="mt-1 text-xs text-slate-500">
-                      Overall visual progress {stageAwareProgressPercent}%
+                      Overall visual progress {overallVisualPercent}%
                     </div>
                   </div>
 
@@ -1683,104 +1773,203 @@ export default function BulkDetailsPage() {
                   </div>
                 </div>
 
-                <div className="mt-5 grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-4">
                   <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
-                    <div className="flex items-center gap-2 text-sm font-extrabold text-blue-900">
-                      <ClipboardCheck size={16} />
-                      Pre-validation Progress
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-lg font-extrabold text-blue-900">
+                        Pre-validation Progress
+                      </div>
+                      <div className="text-sm font-bold text-blue-700">
+                        {prevalidationPercent}%
+                      </div>
                     </div>
 
-                    <div className="mt-3 h-3 w-full overflow-hidden rounded-full bg-white/80">
+                    <div className="mt-4 h-4 w-full overflow-hidden rounded-full bg-white/70">
                       <div
                         className="h-full rounded-full bg-blue-600 transition-all"
                         style={{ width: `${prevalidationPercent}%` }}
                       />
                     </div>
 
-                    <div className="mt-3 text-sm text-blue-800 leading-6">
-                      Processed: <b>{safeNum(prevalidation.processedRows)}</b> /{" "}
-                      <b>{safeNum(prevalidation.totalRows)}</b>
+                    <div className="mt-4 text-sm text-blue-900 leading-7">
+                      Processed:{" "}
+                      <b>
+                        {safeNum(skuScan.processedRows) +
+                          safeNum(courseValidation.processedRows) +
+                          safeNum(sessionValidation.processedRows) +
+                          safeNum(subjectValidation.processedRows) +
+                          safeNum(pricingValidation.processedRows)}
+                      </b>
                       <br />
-                      Valid: <b>{safeNum(prevalidation.validRows)}</b>
-                      <br />
-                      Ready for Upload: <b>{safeNum(prevalidation.readyRows)}</b>
+                      Ready for Upload: <b>{safeNum(executionSummary.totalRows)}</b>
                       <br />
                       Duplicate Upload Rows Skipped:{" "}
-                      <b>{safeNum(prevalidation.duplicateUploadRows)}</b>
+                      <b>{safeNum(skuScan.duplicateRows)}</b>
                       <br />
-                      Failed: <b>{safeNum(prevalidation.failedRows)}</b>
+                      Site Duplicate Rows: <b>{safeNum(skuScan.siteDuplicateRows)}</b>
                       <br />
-                      Other Skipped: <b>{safeNum(prevalidation.skippedRows)}</b>
+                      Sheet Duplicate Rows: <b>{safeNum(skuScan.sheetDuplicateRows)}</b>
                       <br />
-                      Started: <b>{formatDateTime(prevalidation.startedAt)}</b>
+                      Failed:{" "}
+                      <b>
+                        {safeNum(skuScan.failedRows) +
+                          safeNum(courseValidation.failedRows) +
+                          safeNum(sessionValidation.failedRows) +
+                          safeNum(subjectValidation.failedRows) +
+                          safeNum(pricingValidation.failedRows)}
+                      </b>
                       <br />
-                      Completed: <b>{formatDateTime(prevalidation.completedAt)}</b>
+                      Started: <b>{formatDateTime(currentJob.startedAt)}</b>
+                      <br />
+                      Completed:{" "}
+                      <b>
+                        {safeStr(pricingValidation.completedAt)
+                          ? formatDateTime(pricingValidation.completedAt)
+                          : "—"}
+                      </b>
                     </div>
 
-                    <div className="mt-3 text-xs text-blue-800">
-                      {safeStr(
-                        prevalidation.lastNote ||
-                          "Pre-validation abhi start hone ke liye ready hai."
-                      )}
+                    <div className="mt-4 text-sm text-blue-800">
+                      {safeStr(pricingValidation.lastNote) ||
+                        safeStr(subjectValidation.lastNote) ||
+                        safeStr(sessionValidation.lastNote) ||
+                        safeStr(courseValidation.lastNote) ||
+                        safeStr(skuScan.lastNote) ||
+                        "Uploaded sheet ka duplicate check, master validation aur pricing validation chal rahi hai."}
                     </div>
                   </div>
 
                   <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
-                    <div className="flex items-center gap-2 text-sm font-extrabold text-emerald-900">
-                      <Boxes size={16} />
-                      Final Product Upload/Create Progress
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="text-lg font-extrabold text-emerald-900">
+                        Final Product Upload/Create Progress
+                      </div>
+                      <div className="text-sm font-bold text-emerald-700">
+                        {executionPercent}%
+                      </div>
                     </div>
 
-                    <div className="mt-3 h-3 w-full overflow-hidden rounded-full bg-white/80">
+                    <div className="mt-4 h-4 w-full overflow-hidden rounded-full bg-white/70">
                       <div
                         className="h-full rounded-full bg-emerald-600 transition-all"
                         style={{ width: `${executionPercent}%` }}
                       />
                     </div>
 
-                    <div className="mt-3 text-sm text-emerald-800 leading-6">
-                      Processed: <b>{safeNum(execution.processedRows)}</b> /{" "}
-                      <b>{safeNum(execution.totalRows)}</b>
+                    <div className="mt-4 text-sm text-emerald-900 leading-7">
+                      Processed: <b>{safeNum(executionSummary.processedRows)}</b>
                       <br />
-                      Created: <b>{safeNum(execution.createdRows)}</b>
+                      Created: <b>{safeNum(executionSummary.createdRows)}</b>
                       <br />
-                      Updated: <b>{safeNum(execution.updatedRows)}</b>
+                      Updated: <b>{safeNum(executionSummary.updatedRows)}</b>
                       <br />
-                      Success: <b>{safeNum(execution.successRows)}</b>
+                      Success: <b>{safeNum(executionSummary.successRows)}</b>
                       <br />
-                      Failed: <b>{safeNum(execution.failedRows)}</b>
+                      Failed: <b>{safeNum(executionSummary.failedRows)}</b>
                       <br />
-                      Skipped: <b>{safeNum(execution.skippedRows)}</b>
+                      Skipped: <b>{safeNum(executionSummary.skippedRows)}</b>
                       <br />
-                      Started: <b>{formatDateTime(execution.startedAt)}</b>
+                      Started: <b>{formatDateTime(executionSummary.startedAt)}</b>
                       <br />
-                      Completed: <b>{formatDateTime(execution.completedAt)}</b>
+                      Completed: <b>{formatDateTime(executionSummary.completedAt)}</b>
                     </div>
 
-                    <div className="mt-3 text-xs text-emerald-800">
-                      {safeStr(
-                        execution.lastNote ||
-                          "Pre-validation complete hone ke baad yeh stage automatically start hogi."
-                      )}
+                    <div className="mt-4 text-sm text-emerald-800">
+                      {safeStr(executionSummary.lastNote) ||
+                        "Pre-validation complete hone ke baad final product upload/create stage start hogi."}
                     </div>
                   </div>
                 </div>
 
-                <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-4">
+                <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+                  {STAGE_ORDER.map((stage) => {
+                    const state = getStageVisualState(currentDetailedStage, stage, summary);
+                    const block =
+                      stage === "execution"
+                        ? executionSummary
+                        : getSummaryStageBlock(
+                            summary,
+                            stage === "sku_scan"
+                              ? "skuScan"
+                              : stage === "course_validation"
+                              ? "courseValidation"
+                              : stage === "session_validation"
+                              ? "sessionValidation"
+                              : stage === "subject_validation"
+                              ? "subjectValidation"
+                              : "pricingValidation"
+                          );
+
+                    return (
+                      <div
+                        key={stage}
+                        className={`rounded-2xl border p-4 ${getStageCardClasses(state)}`}
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <div className="text-sm font-extrabold text-slate-900">
+                            {getDetailedStageLabel(stage)}
+                          </div>
+                          <div
+                            className={`text-[11px] font-extrabold px-2 py-1 rounded-full ${
+                              state === "completed"
+                                ? "bg-emerald-100 text-emerald-700"
+                                : state === "running"
+                                ? "bg-blue-100 text-blue-700"
+                                : "bg-slate-200 text-slate-700"
+                            }`}
+                          >
+                            {state === "completed"
+                              ? "Completed"
+                              : state === "running"
+                              ? "Running"
+                              : "Pending"}
+                          </div>
+                        </div>
+
+                        <div className="mt-3 h-3 w-full overflow-hidden rounded-full bg-white/70">
+                          <div
+                            className={`h-full rounded-full transition-all ${
+                              state === "completed"
+                                ? "bg-emerald-600"
+                                : state === "running"
+                                ? "bg-blue-600"
+                                : "bg-slate-300"
+                            }`}
+                            style={{ width: `${getBlockPercent(block)}%` }}
+                          />
+                        </div>
+
+                        <div className="mt-3 text-sm text-slate-700 leading-6">
+                          Total: <b>{safeNum(block?.totalRows)}</b>
+                          <br />
+                          Processed: <b>{safeNum(block?.processedRows)}</b>
+                          <br />
+                          Valid: <b>{safeNum(block?.validRows)}</b>
+                          <br />
+                          Failed: <b>{safeNum(block?.failedRows)}</b>
+                          <br />
+                          Skipped: <b>{safeNum(block?.skippedRows)}</b>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+
+                <div className="mt-4 grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-4">
                   <div className="rounded-2xl border border-indigo-200 bg-indigo-50 p-4">
                     <div className="text-xs uppercase tracking-wide font-extrabold text-indigo-700">
                       Total Rows
                     </div>
-                    <div className="mt-2 text-sm font-bold text-slate-900">
+                    <div className="mt-2 text-xl font-extrabold text-slate-900">
                       {safeNum(summary.totalRows)}
                     </div>
                   </div>
 
-                  <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4">
-                    <div className="text-xs uppercase tracking-wide font-extrabold text-sky-700">
+                  <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
+                    <div className="text-xs uppercase tracking-wide font-extrabold text-blue-700">
                       Validated
                     </div>
-                    <div className="mt-2 text-sm font-bold text-slate-900">
+                    <div className="mt-2 text-xl font-extrabold text-slate-900">
                       {safeNum(summary.validRows)}
                     </div>
                   </div>
@@ -1789,16 +1978,16 @@ export default function BulkDetailsPage() {
                     <div className="text-xs uppercase tracking-wide font-extrabold text-emerald-700">
                       Created
                     </div>
-                    <div className="mt-2 text-sm font-bold text-slate-900">
+                    <div className="mt-2 text-xl font-extrabold text-slate-900">
                       {safeNum(summary.createdRows)}
                     </div>
                   </div>
 
-                  <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
-                    <div className="text-xs uppercase tracking-wide font-extrabold text-blue-700">
+                  <div className="rounded-2xl border border-cyan-200 bg-cyan-50 p-4">
+                    <div className="text-xs uppercase tracking-wide font-extrabold text-cyan-700">
                       Updated
                     </div>
-                    <div className="mt-2 text-sm font-bold text-slate-900">
+                    <div className="mt-2 text-xl font-extrabold text-slate-900">
                       {safeNum(summary.updatedRows)}
                     </div>
                   </div>
@@ -1807,7 +1996,7 @@ export default function BulkDetailsPage() {
                     <div className="text-xs uppercase tracking-wide font-extrabold text-rose-700">
                       Failed
                     </div>
-                    <div className="mt-2 text-sm font-bold text-slate-900">
+                    <div className="mt-2 text-xl font-extrabold text-slate-900">
                       {safeNum(summary.failedRows)}
                     </div>
                   </div>
@@ -1816,7 +2005,7 @@ export default function BulkDetailsPage() {
                     <div className="text-xs uppercase tracking-wide font-extrabold text-amber-700">
                       Saved Failures
                     </div>
-                    <div className="mt-2 text-sm font-bold text-slate-900">
+                    <div className="mt-2 text-xl font-extrabold text-slate-900">
                       {safeNum(currentJob.failuresCount)}
                     </div>
                   </div>
@@ -1835,7 +2024,7 @@ export default function BulkDetailsPage() {
                       <br />
                       Resume Needed: <b>{needsManualResume ? "Yes" : "No"}</b>
                       <br />
-                      Pipeline Stage: <b>{getCurrentStageLabel(pipelineStage)}</b>
+                      Current Stage: <b>{currentDetailedStageLabel}</b>
                       <br />
                       Started: <b>{formatDateTime(currentJob.startedAt)}</b>
                       <br />
@@ -1848,10 +2037,7 @@ export default function BulkDetailsPage() {
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <div className="text-sm font-extrabold">Last Processing Note</div>
                     <div className="mt-3 text-sm text-slate-700 leading-7">
-                      Current Stage Progress Count:{" "}
-                      <b>
-                        {safeNum(progress.processedItems)} / {safeNum(progress.totalItems)}
-                      </b>
+                      Current Batch: <b>{safeNum(lastBatch?.batchNumber)}</b>
                       <br />
                       Attempted: <b>{safeNum(lastBatch?.attempted)}</b>
                       <br />
@@ -1886,10 +2072,10 @@ export default function BulkDetailsPage() {
                       {needsManualResume
                         ? isResumingJob || isProcessingJob
                           ? "Resuming..."
-                          : `Resume ${getCurrentStageLabel(pipelineStage)}`
+                          : "Resume Saved Job"
                         : isResumingJob || isProcessingJob
                         ? "Starting..."
-                        : `Start / Continue ${getCurrentStageLabel(pipelineStage)}`}
+                        : "Start / Continue Processing"}
                     </button>
                   ) : null}
 
@@ -1909,7 +2095,7 @@ export default function BulkDetailsPage() {
                     </button>
                   ) : null}
 
-                  {!isFinalJobStatus(safeStr(currentJob.status)) ? (
+                  {canCancelSavedJob ? (
                     <button
                       type="button"
                       onClick={cancelCurrentJob}
@@ -1921,7 +2107,39 @@ export default function BulkDetailsPage() {
                       ) : (
                         <PauseCircle size={18} />
                       )}
-                      {isCancellingJob ? "Cancelling..." : "Cancel Current Job"}
+                      {isCancellingJob ? "Cancelling..." : "Cancel Job"}
+                    </button>
+                  ) : null}
+
+                  {canRestartSavedJob ? (
+                    <button
+                      type="button"
+                      onClick={restartCurrentJob}
+                      disabled={isRestartingJob}
+                      className="inline-flex items-center gap-2 px-4 py-3 rounded-2xl bg-blue-600 hover:bg-blue-700 text-white transition font-extrabold disabled:opacity-60"
+                    >
+                      {isRestartingJob ? (
+                        <LoaderCircle size={18} className="animate-spin" />
+                      ) : (
+                        <RotateCcw size={18} />
+                      )}
+                      {isRestartingJob ? "Restarting..." : "Restart Job"}
+                    </button>
+                  ) : null}
+
+                  {canDeleteSavedJob ? (
+                    <button
+                      type="button"
+                      onClick={deleteCurrentJob}
+                      disabled={isDeletingJob}
+                      className="inline-flex items-center gap-2 px-4 py-3 rounded-2xl bg-white hover:bg-gray-50 border border-gray-200 text-slate-900 transition font-extrabold disabled:opacity-60"
+                    >
+                      {isDeletingJob ? (
+                        <LoaderCircle size={18} className="animate-spin" />
+                      ) : (
+                        <Trash2 size={18} />
+                      )}
+                      {isDeletingJob ? "Deleting..." : "Delete Saved Job"}
                     </button>
                   ) : null}
 
@@ -1932,43 +2150,8 @@ export default function BulkDetailsPage() {
                     className="inline-flex items-center gap-2 px-4 py-3 rounded-2xl bg-white hover:bg-gray-50 border border-gray-200 transition font-extrabold disabled:opacity-60"
                   >
                     <Download size={18} />
-                    Download Visible Failures CSV
+                    Download Failures CSV
                   </button>
-
-                  <button
-                    type="button"
-                    onClick={downloadSavedFailuresCsv}
-                    disabled={
-                      isDownloadingSavedFailures ||
-                      safeNum(currentJob.failuresCount, 0) <= 0
-                    }
-                    className="inline-flex items-center gap-2 px-4 py-3 rounded-2xl bg-white hover:bg-gray-50 border border-gray-200 transition font-extrabold disabled:opacity-60"
-                  >
-                    {isDownloadingSavedFailures ? (
-                      <LoaderCircle size={18} className="animate-spin" />
-                    ) : (
-                      <Download size={18} />
-                    )}
-                    {isDownloadingSavedFailures
-                      ? "Preparing CSV..."
-                      : "Download Full Saved Failures CSV"}
-                  </button>
-
-                  {canDeleteSavedJob ? (
-                    <button
-                      type="button"
-                      onClick={deleteSavedJob}
-                      disabled={!canDeleteSavedJob}
-                      className="inline-flex items-center gap-2 px-4 py-3 rounded-2xl bg-white hover:bg-gray-50 border border-rose-200 text-rose-700 transition font-extrabold disabled:opacity-60"
-                    >
-                      {isDeletingJob ? (
-                        <LoaderCircle size={18} className="animate-spin" />
-                      ) : (
-                        <Trash2 size={18} />
-                      )}
-                      {isDeletingJob ? "Deleting..." : "Delete Saved Job"}
-                    </button>
-                  ) : null}
                 </div>
 
                 {recentFailures.length ? (
@@ -1988,7 +2171,7 @@ export default function BulkDetailsPage() {
                           </tr>
                         </thead>
                         <tbody>
-                          {recentFailures.slice(-10).map((row, idx) => (
+                          {recentFailures.slice(-20).map((row, idx) => (
                             <tr
                               key={`${row.rowNumber}-${row.sku}-${idx}`}
                               className="border-t border-amber-200 align-top"
@@ -2009,12 +2192,6 @@ export default function BulkDetailsPage() {
                           ))}
                         </tbody>
                       </table>
-                    </div>
-
-                    <div className="mt-3 text-xs text-amber-800">
-                      Full saved failures CSV alag se database se download ki ja
-                      sakti hai. Job report tab tak save rahegi jab tak aap Delete
-                      Saved Job nahi dabate.
                     </div>
                   </div>
                 ) : null}
@@ -2268,7 +2445,8 @@ export default function BulkDetailsPage() {
                 </div>
 
                 <div className="mt-4 rounded-xl border border-sky-200 bg-sky-50 p-3 text-xs leading-5 text-sky-800">
-                  New flow: save → pre-validation → final upload/create
+                  New flow me pehle full-stage pre-validation hogi, uske baad hi final
+                  product upload/create stage chalegi.
                 </div>
               </div>
 
@@ -2288,7 +2466,7 @@ export default function BulkDetailsPage() {
                   )}
                   {isSubmittingJob
                     ? "Saving Job..."
-                    : "Save Job & Start Pre-validation"}
+                    : "Save Job & Start Processing"}
                 </button>
 
                 {canResumeSavedJob ? (
@@ -2306,10 +2484,10 @@ export default function BulkDetailsPage() {
                     {needsManualResume
                       ? isResumingJob || isProcessingJob
                         ? "Resuming..."
-                        : `Resume ${getCurrentStageLabel(pipelineStage)}`
+                        : "Resume Saved Job"
                       : isResumingJob || isProcessingJob
                       ? "Starting..."
-                      : `Start / Continue ${getCurrentStageLabel(pipelineStage)}`}
+                      : "Start / Continue Saved Job"}
                   </button>
                 ) : null}
 
@@ -2329,12 +2507,44 @@ export default function BulkDetailsPage() {
                   </button>
                 ) : null}
 
+                {canCancelSavedJob ? (
+                  <button
+                    type="button"
+                    disabled={isCancellingJob}
+                    onClick={cancelCurrentJob}
+                    className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-rose-600 hover:bg-rose-700 text-white transition font-extrabold disabled:opacity-60"
+                  >
+                    {isCancellingJob ? (
+                      <LoaderCircle size={18} className="animate-spin" />
+                    ) : (
+                      <PauseCircle size={18} />
+                    )}
+                    {isCancellingJob ? "Cancelling..." : "Cancel Job"}
+                  </button>
+                ) : null}
+
+                {canRestartSavedJob ? (
+                  <button
+                    type="button"
+                    disabled={isRestartingJob}
+                    onClick={restartCurrentJob}
+                    className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-indigo-600 hover:bg-indigo-700 text-white transition font-extrabold disabled:opacity-60"
+                  >
+                    {isRestartingJob ? (
+                      <LoaderCircle size={18} className="animate-spin" />
+                    ) : (
+                      <RotateCcw size={18} />
+                    )}
+                    {isRestartingJob ? "Restarting..." : "Restart From Stage 1"}
+                  </button>
+                ) : null}
+
                 {canDeleteSavedJob ? (
                   <button
                     type="button"
-                    disabled={!canDeleteSavedJob}
-                    onClick={deleteSavedJob}
-                    className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-white hover:bg-gray-50 border border-rose-200 text-rose-700 transition font-extrabold disabled:opacity-60"
+                    disabled={isDeletingJob}
+                    onClick={deleteCurrentJob}
+                    className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-white hover:bg-gray-50 border border-gray-200 transition font-extrabold disabled:opacity-60"
                   >
                     {isDeletingJob ? (
                       <LoaderCircle size={18} className="animate-spin" />
@@ -2360,10 +2570,8 @@ export default function BulkDetailsPage() {
                 </button>
 
                 <div className="mt-4 text-[11px] text-slate-500 leading-5">
-                  Save stage fast rakhi gayi hai. Run/Resume par pehle pre-validation
-                  hogi. Uske baad final product upload/create stage start hogi.
-                  Completed ya cancelled jobs ki reports save rahengi jab tak aap
-                  Delete Saved Job nahi karte.
+                  Galat Excel upload hone par Pause, Cancel, Restart aur Delete options
+                  available hain.
                 </div>
               </div>
 
@@ -2373,6 +2581,8 @@ export default function BulkDetailsPage() {
                   Important
                 </div>
                 <div className="text-sm text-amber-800 mt-2 leading-6">
+                  Unique SKU Scan me live site products ke against duplicate SKU check hoti hai.
+                  <br />
                   Subject code master subjects me hona chahiye.
                   <br />
                   Course code master courses me hona chahiye.
@@ -2380,24 +2590,24 @@ export default function BulkDetailsPage() {
                   Multiple course codes comma separated allowed hain.
                   <br />
                   Session selected category ke master sessions me valid hona chahiye.
-                  <br />
-                  Sheet ke andar duplicate SKU rows pre-validation stage me hi skip ho jayengi.
                 </div>
               </div>
 
               <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
                 <div className="inline-flex items-center gap-2 text-sm font-extrabold text-blue-900">
                   <Database size={16} />
-                  Current stage summary
+                  Current progress summary
                 </div>
                 <div className="text-sm text-blue-800 mt-2 leading-6">
-                  Current Stage: <b>{getCurrentStageLabel(pipelineStage)}</b>
+                  API Progress Processed: <b>{safeNum(progress.processedItems)}</b>
                   <br />
-                  Pre-validation: <b>{prevalidationPercent}%</b>
+                  API Progress Success: <b>{safeNum(progress.successItems)}</b>
                   <br />
-                  Final Upload/Create: <b>{executionPercent}%</b>
+                  API Progress Failed: <b>{safeNum(progress.failedItems)}</b>
                   <br />
-                  Saved Failures Count: <b>{safeNum(currentJob?.failuresCount)}</b>
+                  API Progress Skipped: <b>{safeNum(progress.skippedItems)}</b>
+                  <br />
+                  API Progress Valid: <b>{safeNum(progress.validItems)}</b>
                 </div>
               </div>
 
@@ -2409,13 +2619,17 @@ export default function BulkDetailsPage() {
                 <div className="text-sm text-sky-800 mt-2 leading-6">
                   Step 1: Excel/CSV upload/save
                   <br />
-                  Step 2: Job database me create
+                  Step 2: Unique SKU Scan
                   <br />
-                  Step 3: Pre-validation start
+                  Step 3: Master Course Validation
                   <br />
-                  Step 4: Final product upload/create start
+                  Step 4: Master Session Validation
                   <br />
-                  Step 5: Report save rahegi jab tak delete na karo
+                  Step 5: Master Subject Validation
+                  <br />
+                  Step 6: Pricing Validation
+                  <br />
+                  Step 7: Final Product Upload/Create
                 </div>
               </div>
             </div>
