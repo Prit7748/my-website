@@ -19,6 +19,9 @@ import {
   Server,
   FileUp,
   Activity,
+  ClipboardCheck,
+  Boxes,
+  Trash2,
 } from "lucide-react";
 import { CATEGORY_CONFIG, PHYSICAL_CATEGORY } from "@/lib/productCatalog";
 
@@ -90,6 +93,57 @@ type BulkJobLastBatch = {
   note?: string;
 } | null;
 
+type PipelineStageName = "prevalidation" | "execution" | "completed";
+
+type BulkPipelineStageSummary = {
+  totalRows?: number;
+  processedRows?: number;
+  validRows?: number;
+  failedRows?: number;
+  skippedRows?: number;
+  duplicateUploadRows?: number;
+  readyRows?: number;
+  createdRows?: number;
+  updatedRows?: number;
+  successRows?: number;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  lastNote?: string;
+};
+
+type BulkJobSummary = {
+  totalRows?: number;
+  validRows?: number;
+  createdRows?: number;
+  updatedRows?: number;
+  skippedRows?: number;
+  failedRows?: number;
+  duplicateStrategy?: string;
+  dryRun?: boolean;
+  category?: string;
+  pipelineStage?: PipelineStageName | string;
+  needsManualResume?: boolean;
+  resumeCount?: number;
+  lastResumeRequestedAt?: string | null;
+  lastPausedAt?: string | null;
+  prevalidation?: BulkPipelineStageSummary;
+  execution?: BulkPipelineStageSummary;
+  comboSync?: {
+    attempted?: number;
+    succeeded?: number;
+    failed?: number;
+    errors?: string[];
+    mode?: string;
+  };
+  hardcopySync?: {
+    attempted?: number;
+    succeeded?: number;
+    failed?: number;
+    errors?: string[];
+    mode?: string;
+  };
+};
+
 type BulkJob = {
   _id: string;
   jobType?: string;
@@ -98,7 +152,7 @@ type BulkJob = {
   createdBy?: string;
   meta?: Record<string, any>;
   config?: Record<string, any>;
-  summary?: Record<string, any>;
+  summary?: BulkJobSummary;
   progress?: BulkJobProgress;
   lastBatch?: BulkJobLastBatch;
   failuresCount?: number;
@@ -146,11 +200,19 @@ type ProcessJobResponse = {
   processingState?: string;
   stats?: {
     processedSteps?: number;
+    processedItems?: number;
     failedSteps?: number;
     elapsedMs?: number;
     maxSteps?: number;
   };
   job?: BulkJob | null;
+};
+
+type DeleteJobResponse = {
+  ok?: boolean;
+  error?: string;
+  message?: string;
+  deletedJobId?: string;
 };
 
 const DEFAULT_NOTE =
@@ -440,6 +502,94 @@ function buildRecentFailuresCsv(rows: BulkJobFailureRow[]) {
   return [header.map(csvCell).join(","), ...body].join("\n");
 }
 
+function getPipelineStage(summary?: BulkJobSummary | null): PipelineStageName {
+  const stage = safeStr(summary?.pipelineStage).toLowerCase();
+  if (stage === "execution") return "execution";
+  if (stage === "completed") return "completed";
+  return "prevalidation";
+}
+
+function getPrevalidationSummary(
+  summary?: BulkJobSummary | null
+): BulkPipelineStageSummary {
+  return {
+    totalRows: safeNum(summary?.prevalidation?.totalRows, safeNum(summary?.totalRows, 0)),
+    processedRows: safeNum(summary?.prevalidation?.processedRows, 0),
+    validRows: safeNum(summary?.prevalidation?.validRows, 0),
+    failedRows: safeNum(summary?.prevalidation?.failedRows, 0),
+    skippedRows: safeNum(summary?.prevalidation?.skippedRows, 0),
+    duplicateUploadRows: safeNum(summary?.prevalidation?.duplicateUploadRows, 0),
+    readyRows: safeNum(summary?.prevalidation?.readyRows, 0),
+    startedAt: summary?.prevalidation?.startedAt || null,
+    completedAt: summary?.prevalidation?.completedAt || null,
+    lastNote: safeStr(summary?.prevalidation?.lastNote),
+  };
+}
+
+function getExecutionSummary(
+  summary?: BulkJobSummary | null
+): BulkPipelineStageSummary {
+  return {
+    totalRows: safeNum(summary?.execution?.totalRows, 0),
+    processedRows: safeNum(summary?.execution?.processedRows, 0),
+    createdRows: safeNum(summary?.execution?.createdRows, 0),
+    updatedRows: safeNum(summary?.execution?.updatedRows, 0),
+    skippedRows: safeNum(summary?.execution?.skippedRows, 0),
+    failedRows: safeNum(summary?.execution?.failedRows, 0),
+    successRows: safeNum(summary?.execution?.successRows, 0),
+    startedAt: summary?.execution?.startedAt || null,
+    completedAt: summary?.execution?.completedAt || null,
+    lastNote: safeStr(summary?.execution?.lastNote),
+  };
+}
+
+function getPercent(processed: number, total: number) {
+  if (!total) return 0;
+  return Math.max(0, Math.min(100, Math.round((processed / total) * 100)));
+}
+
+function getCurrentStageLabel(stage: PipelineStageName) {
+  if (stage === "execution") return "Final Product Upload/Create";
+  if (stage === "completed") return "Completed";
+  return "Pre-validation";
+}
+
+function getStageDescription(stage: PipelineStageName, dryRun: boolean) {
+  if (stage === "execution") {
+    return "Ab sirf pre-validated valid rows ka final create/update ho raha hai.";
+  }
+  if (stage === "completed") {
+    return dryRun
+      ? "Dry run complete ho chuki hai. Final product create/update stage intentionally run nahi hui."
+      : "Pre-validation aur final upload/create dono stages complete ho chuki hain.";
+  }
+  return "Uploaded sheet ka duplicate check, master validation aur pricing validation chal raha hai.";
+}
+
+function extractDownloadFileName(
+  contentDisposition: string | null,
+  fallback: string
+) {
+  const raw = safeStr(contentDisposition);
+  if (!raw) return fallback;
+
+  const utf8Match = raw.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch {
+      return utf8Match[1];
+    }
+  }
+
+  const normalMatch = raw.match(/filename="?([^"]+)"?/i);
+  if (normalMatch?.[1]) {
+    return normalMatch[1];
+  }
+
+  return fallback;
+}
+
 export default function BulkDetailsPage() {
   const allowedCategories = useMemo(
     () =>
@@ -470,6 +620,9 @@ export default function BulkDetailsPage() {
   const [isProcessingJob, setIsProcessingJob] = useState(false);
   const [isPausingJob, setIsPausingJob] = useState(false);
   const [isResumingJob, setIsResumingJob] = useState(false);
+  const [isDownloadingSavedFailures, setIsDownloadingSavedFailures] =
+    useState(false);
+  const [isDeletingJob, setIsDeletingJob] = useState(false);
   const [defaultsHydrated, setDefaultsHydrated] = useState(false);
 
   const [defaultTemplateMap, setDefaultTemplateMap] =
@@ -659,6 +812,18 @@ export default function BulkDetailsPage() {
     ? currentJob.recentFailures
     : [];
 
+  const pipelineStage = getPipelineStage(summary);
+  const prevalidation = getPrevalidationSummary(summary);
+  const execution = getExecutionSummary(summary);
+  const prevalidationPercent = getPercent(
+    safeNum(prevalidation.processedRows),
+    safeNum(prevalidation.totalRows)
+  );
+  const executionPercent = getPercent(
+    safeNum(execution.processedRows),
+    safeNum(execution.totalRows)
+  );
+
   const needsManualResume = useMemo(() => {
     return Boolean(
       currentJob &&
@@ -708,15 +873,34 @@ export default function BulkDetailsPage() {
     );
   }, [currentJob, needsManualResume, isPausingJob, isResumingJob, isCancellingJob]);
 
-  const jobProgressPercent = useMemo(() => {
-    const fromApi = safeNum(currentJob?.progress?.progressPercent, -1);
-    if (fromApi >= 0) return Math.max(0, Math.min(100, fromApi));
+  const canDeleteSavedJob = useMemo(() => {
+    return Boolean(
+      currentJob &&
+        isFinalJobStatus(safeStr(currentJob.status)) &&
+        !isDeletingJob &&
+        !isSubmittingJob &&
+        !isProcessingJob &&
+        !isPausingJob &&
+        !isResumingJob &&
+        !isCancellingJob
+    );
+  }, [
+    currentJob,
+    isDeletingJob,
+    isSubmittingJob,
+    isProcessingJob,
+    isPausingJob,
+    isResumingJob,
+    isCancellingJob,
+  ]);
 
-    const total = safeNum(currentJob?.progress?.totalItems, 0);
-    const processed = safeNum(currentJob?.progress?.processedItems, 0);
-    if (!total) return 0;
-    return Math.min(100, Math.round((processed / total) * 100));
-  }, [currentJob]);
+  const stageAwareProgressPercent = useMemo(() => {
+    if (pipelineStage === "completed") return 100;
+    if (pipelineStage === "execution") {
+      return Math.round(50 + executionPercent / 2);
+    }
+    return Math.round(prevalidationPercent / 2);
+  }, [pipelineStage, prevalidationPercent, executionPercent]);
 
   async function fetchCurrentJob(showSpinner = false) {
     if (showSpinner) setIsRefreshingJob(true);
@@ -871,8 +1055,16 @@ export default function BulkDetailsPage() {
     try {
       const resumedJob = await sendJobAction(jobId, "resume", silentResumeMessage);
       if (!silentResumeMessage) {
+        const stage = getPipelineStage(resumedJob?.summary || {});
+        const stageLabel =
+          stage === "execution"
+            ? "final product upload/create stage"
+            : stage === "completed"
+            ? "completed stage"
+            : "pre-validation stage";
+
         setServerMessage(
-          "Saved job resume ho gayi hai. Ab rows one-by-one process hongi."
+          `Saved job resume ho gayi hai. Ab ${stageLabel} continue hogi.`
         );
         setServerMessageType("info");
       }
@@ -963,7 +1155,7 @@ export default function BulkDetailsPage() {
 
       setCurrentJob(data.job);
       setServerMessage(
-        "Bulk job save ho gayi hai. Ab current session me one-by-one processing start ki ja rahi hai."
+        "Bulk job save ho gayi hai. Ab pre-validation immediately start ki ja rahi hai."
       );
       setServerMessageType("success");
 
@@ -992,7 +1184,7 @@ export default function BulkDetailsPage() {
       const pausedJob = await sendJobAction(jobId, "pause", true);
       setCurrentJob(pausedJob || currentJob);
       setServerMessage(
-        "Pause request save ho gayi hai. Current row complete hone ke baad job ruk jayegi."
+        "Pause request save ho gayi hai. Current running batch complete hone ke baad job ruk jayegi."
       );
       setServerMessageType("info");
     } catch (error: any) {
@@ -1035,7 +1227,7 @@ export default function BulkDetailsPage() {
       : [];
 
     if (!rows.length) {
-      alert("Abhi download ke liye recent failures available nahi hain.");
+      alert("Abhi visible recent failures available nahi hain.");
       return;
     }
 
@@ -1044,11 +1236,113 @@ export default function BulkDetailsPage() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "bulk-product-details-recent-failures.csv";
+    a.download = "bulk-product-details-visible-failures.csv";
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
     URL.revokeObjectURL(url);
+  }
+
+  async function downloadSavedFailuresCsv() {
+    const jobId = safeStr(currentJob?._id);
+    if (!jobId) {
+      alert("Job not found.");
+      return;
+    }
+
+    if (safeNum(currentJob?.failuresCount, 0) <= 0) {
+      alert("Is job me saved failures available nahi hain.");
+      return;
+    }
+
+    setIsDownloadingSavedFailures(true);
+    resetMessages();
+
+    try {
+      const res = await fetch(
+        `/api/admin/bulk-jobs/${encodeURIComponent(jobId)}/failures-csv`,
+        {
+          method: "GET",
+          credentials: "include",
+          cache: "no-store",
+        }
+      );
+
+      if (!res.ok) {
+        const data = await safeReadJson(res);
+        throw new Error(
+          safeStr(data?.error || data?.message || "CSV download failed")
+        );
+      }
+
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const fileName = extractDownloadFileName(
+        res.headers.get("content-disposition"),
+        "bulk-job-failures.csv"
+      );
+
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      setServerMessage("Full saved failures CSV download start ho gayi.");
+      setServerMessageType("success");
+    } catch (error: any) {
+      setServerMessage(safeStr(error?.message || "CSV download failed"));
+      setServerMessageType("error");
+    } finally {
+      setIsDownloadingSavedFailures(false);
+    }
+  }
+
+  async function deleteSavedJob() {
+    const jobId = safeStr(currentJob?._id);
+    if (!jobId) return;
+
+    if (!isFinalJobStatus(safeStr(currentJob?.status))) {
+      alert("Active job ko delete nahi kar sakte.");
+      return;
+    }
+
+    const ok = window.confirm(
+      "Kya aap is saved bulk job ko permanently delete karna chahte hain? Iske summary aur saved failures reports bhi remove ho jayengi."
+    );
+    if (!ok) return;
+
+    setIsDeletingJob(true);
+    resetMessages();
+
+    try {
+      const res = await fetch(`/api/admin/bulk-jobs/${encodeURIComponent(jobId)}`, {
+        method: "DELETE",
+        credentials: "include",
+      });
+
+      const data = (await safeReadJson(res)) as DeleteJobResponse;
+
+      if (!res.ok || !data?.ok) {
+        throw new Error(
+          safeStr(data?.error || data?.message || "Delete failed")
+        );
+      }
+
+      setServerMessage(
+        safeStr(data?.message || "Saved job deleted successfully.")
+      );
+      setServerMessageType("success");
+      setCurrentJob(null);
+      await fetchCurrentJob(false);
+    } catch (error: any) {
+      setServerMessage(safeStr(error?.message || "Delete failed"));
+      setServerMessageType("error");
+    } finally {
+      setIsDeletingJob(false);
+    }
   }
 
   useEffect(() => {
@@ -1068,7 +1362,9 @@ export default function BulkDetailsPage() {
       isRefreshingJob ||
       isProcessingJob ||
       isPausingJob ||
-      isResumingJob;
+      isResumingJob ||
+      isDownloadingSavedFailures ||
+      isDeletingJob;
 
     if (active && !longTaskActiveRef.current) {
       notifyLongTaskStart();
@@ -1086,6 +1382,8 @@ export default function BulkDetailsPage() {
     isProcessingJob,
     isPausingJob,
     isResumingJob,
+    isDownloadingSavedFailures,
+    isDeletingJob,
   ]);
 
   useEffect(() => {
@@ -1156,10 +1454,10 @@ export default function BulkDetailsPage() {
                 Bulk Product Details Upload
               </h1>
               <p className="text-sm text-slate-600 mt-1">
-                Excel/CSV upload hone ke baad job database me save rahegi.
-                Processing current browser session me row-by-row chalegi. Logout,
-                browser close, session expire ya PC off hone par process pause ho
-                jayegi. Dobara login karke Resume se wahi se continue kar sakte ho.
+                Save stage lightweight rakhi gayi hai. Excel/CSV upload hone ke
+                baad job save hoti hai, aur Start/Resume par pehle{" "}
+                <b>Pre-validation</b> chalegi, uske baad{" "}
+                <b>Final Product Upload/Create</b> stage start hogi.
               </p>
             </div>
 
@@ -1293,9 +1591,8 @@ export default function BulkDetailsPage() {
                 <div>
                   <div className="text-sm font-extrabold">Current Job Status</div>
                   <div className="text-xs text-slate-500 mt-1">
-                    Ye status database se aa raha hai. Same saved job dusre device
-                    par bhi dikh sakti hai, lekin processing tabhi chalegi jab
-                    kisi device se Resume/Start kiya jayega.
+                    Job database me save rehti hai. Ab flow do stages me chalega:
+                    pehle pre-validation, phir final product upload/create.
                   </div>
                 </div>
               </div>
@@ -1332,18 +1629,14 @@ export default function BulkDetailsPage() {
                         ? "bg-amber-500"
                         : "bg-sky-600"
                     }`}
-                    style={{ width: `${jobProgressPercent}%` }}
+                    style={{ width: `${stageAwareProgressPercent}%` }}
                   />
                 </div>
 
                 <div className="mt-3 text-xs text-slate-500 leading-6">
-                  {needsManualResume
-                    ? "Job paused/saved state me hai. Resume button dabane par wahi se continue hogi."
-                    : isProcessingJob
-                    ? "Is browser session me row-by-row processing chal rahi hai."
-                    : !isFinalJobStatus(safeStr(currentJob.status))
-                    ? "Job saved hai aur ready state me hai."
-                    : "Job final state me pahunch chuki hai."}
+                  Current stage: <b>{getCurrentStageLabel(pipelineStage)}</b>
+                  <br />
+                  {getStageDescription(pipelineStage, safeBool(summary.dryRun, false))}
                 </div>
 
                 <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
@@ -1358,26 +1651,25 @@ export default function BulkDetailsPage() {
 
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <div className="text-xs uppercase tracking-wide font-extrabold text-slate-500">
-                      Progress
+                      Current Stage
                     </div>
                     <div className="mt-2 text-sm font-bold">
-                      {safeNum(progress.processedItems)} /{" "}
-                      {safeNum(progress.totalItems)}
+                      {getCurrentStageLabel(pipelineStage)}
                     </div>
                     <div className="mt-1 text-xs text-slate-500">
-                      {jobProgressPercent}% complete
+                      Overall visual progress {stageAwareProgressPercent}%
                     </div>
                   </div>
 
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <div className="text-xs uppercase tracking-wide font-extrabold text-slate-500">
-                      Last Processed Row
+                      Last Batch
                     </div>
                     <div className="mt-2 text-sm font-bold">
-                      {safeNum(progress.lastProcessedIndex, -1) + 1}
+                      {safeNum(lastBatch?.batchNumber)}
                     </div>
                     <div className="mt-1 text-xs text-slate-500">
-                      Next continue yahi ke baad se hogi
+                      Current stage ke hisaab se
                     </div>
                   </div>
 
@@ -1391,7 +1683,108 @@ export default function BulkDetailsPage() {
                   </div>
                 </div>
 
-                <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-4">
+                <div className="mt-5 grid grid-cols-1 lg:grid-cols-2 gap-4">
+                  <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
+                    <div className="flex items-center gap-2 text-sm font-extrabold text-blue-900">
+                      <ClipboardCheck size={16} />
+                      Pre-validation Progress
+                    </div>
+
+                    <div className="mt-3 h-3 w-full overflow-hidden rounded-full bg-white/80">
+                      <div
+                        className="h-full rounded-full bg-blue-600 transition-all"
+                        style={{ width: `${prevalidationPercent}%` }}
+                      />
+                    </div>
+
+                    <div className="mt-3 text-sm text-blue-800 leading-6">
+                      Processed: <b>{safeNum(prevalidation.processedRows)}</b> /{" "}
+                      <b>{safeNum(prevalidation.totalRows)}</b>
+                      <br />
+                      Valid: <b>{safeNum(prevalidation.validRows)}</b>
+                      <br />
+                      Ready for Upload: <b>{safeNum(prevalidation.readyRows)}</b>
+                      <br />
+                      Duplicate Upload Rows Skipped:{" "}
+                      <b>{safeNum(prevalidation.duplicateUploadRows)}</b>
+                      <br />
+                      Failed: <b>{safeNum(prevalidation.failedRows)}</b>
+                      <br />
+                      Other Skipped: <b>{safeNum(prevalidation.skippedRows)}</b>
+                      <br />
+                      Started: <b>{formatDateTime(prevalidation.startedAt)}</b>
+                      <br />
+                      Completed: <b>{formatDateTime(prevalidation.completedAt)}</b>
+                    </div>
+
+                    <div className="mt-3 text-xs text-blue-800">
+                      {safeStr(
+                        prevalidation.lastNote ||
+                          "Pre-validation abhi start hone ke liye ready hai."
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
+                    <div className="flex items-center gap-2 text-sm font-extrabold text-emerald-900">
+                      <Boxes size={16} />
+                      Final Product Upload/Create Progress
+                    </div>
+
+                    <div className="mt-3 h-3 w-full overflow-hidden rounded-full bg-white/80">
+                      <div
+                        className="h-full rounded-full bg-emerald-600 transition-all"
+                        style={{ width: `${executionPercent}%` }}
+                      />
+                    </div>
+
+                    <div className="mt-3 text-sm text-emerald-800 leading-6">
+                      Processed: <b>{safeNum(execution.processedRows)}</b> /{" "}
+                      <b>{safeNum(execution.totalRows)}</b>
+                      <br />
+                      Created: <b>{safeNum(execution.createdRows)}</b>
+                      <br />
+                      Updated: <b>{safeNum(execution.updatedRows)}</b>
+                      <br />
+                      Success: <b>{safeNum(execution.successRows)}</b>
+                      <br />
+                      Failed: <b>{safeNum(execution.failedRows)}</b>
+                      <br />
+                      Skipped: <b>{safeNum(execution.skippedRows)}</b>
+                      <br />
+                      Started: <b>{formatDateTime(execution.startedAt)}</b>
+                      <br />
+                      Completed: <b>{formatDateTime(execution.completedAt)}</b>
+                    </div>
+
+                    <div className="mt-3 text-xs text-emerald-800">
+                      {safeStr(
+                        execution.lastNote ||
+                          "Pre-validation complete hone ke baad yeh stage automatically start hogi."
+                      )}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-6 gap-4">
+                  <div className="rounded-2xl border border-indigo-200 bg-indigo-50 p-4">
+                    <div className="text-xs uppercase tracking-wide font-extrabold text-indigo-700">
+                      Total Rows
+                    </div>
+                    <div className="mt-2 text-sm font-bold text-slate-900">
+                      {safeNum(summary.totalRows)}
+                    </div>
+                  </div>
+
+                  <div className="rounded-2xl border border-sky-200 bg-sky-50 p-4">
+                    <div className="text-xs uppercase tracking-wide font-extrabold text-sky-700">
+                      Validated
+                    </div>
+                    <div className="mt-2 text-sm font-bold text-slate-900">
+                      {safeNum(summary.validRows)}
+                    </div>
+                  </div>
+
                   <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4">
                     <div className="text-xs uppercase tracking-wide font-extrabold text-emerald-700">
                       Created
@@ -1410,15 +1803,6 @@ export default function BulkDetailsPage() {
                     </div>
                   </div>
 
-                  <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
-                    <div className="text-xs uppercase tracking-wide font-extrabold text-amber-700">
-                      Skipped
-                    </div>
-                    <div className="mt-2 text-sm font-bold text-slate-900">
-                      {safeNum(summary.skippedRows)}
-                    </div>
-                  </div>
-
                   <div className="rounded-2xl border border-rose-200 bg-rose-50 p-4">
                     <div className="text-xs uppercase tracking-wide font-extrabold text-rose-700">
                       Failed
@@ -1428,12 +1812,12 @@ export default function BulkDetailsPage() {
                     </div>
                   </div>
 
-                  <div className="rounded-2xl border border-indigo-200 bg-indigo-50 p-4">
-                    <div className="text-xs uppercase tracking-wide font-extrabold text-indigo-700">
-                      Validated
+                  <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4">
+                    <div className="text-xs uppercase tracking-wide font-extrabold text-amber-700">
+                      Saved Failures
                     </div>
                     <div className="mt-2 text-sm font-bold text-slate-900">
-                      {safeNum(summary.validRows)}
+                      {safeNum(currentJob.failuresCount)}
                     </div>
                   </div>
                 </div>
@@ -1451,6 +1835,8 @@ export default function BulkDetailsPage() {
                       <br />
                       Resume Needed: <b>{needsManualResume ? "Yes" : "No"}</b>
                       <br />
+                      Pipeline Stage: <b>{getCurrentStageLabel(pipelineStage)}</b>
+                      <br />
                       Started: <b>{formatDateTime(currentJob.startedAt)}</b>
                       <br />
                       Completed: <b>{formatDateTime(currentJob.completedAt)}</b>
@@ -1462,7 +1848,10 @@ export default function BulkDetailsPage() {
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <div className="text-sm font-extrabold">Last Processing Note</div>
                     <div className="mt-3 text-sm text-slate-700 leading-7">
-                      Last Row Index: <b>{safeNum(progress.lastProcessedIndex, -1)}</b>
+                      Current Stage Progress Count:{" "}
+                      <b>
+                        {safeNum(progress.processedItems)} / {safeNum(progress.totalItems)}
+                      </b>
                       <br />
                       Attempted: <b>{safeNum(lastBatch?.attempted)}</b>
                       <br />
@@ -1497,10 +1886,10 @@ export default function BulkDetailsPage() {
                       {needsManualResume
                         ? isResumingJob || isProcessingJob
                           ? "Resuming..."
-                          : "Resume Saved Job"
+                          : `Resume ${getCurrentStageLabel(pipelineStage)}`
                         : isResumingJob || isProcessingJob
                         ? "Starting..."
-                        : "Start / Continue Processing"}
+                        : `Start / Continue ${getCurrentStageLabel(pipelineStage)}`}
                     </button>
                   ) : null}
 
@@ -1543,8 +1932,43 @@ export default function BulkDetailsPage() {
                     className="inline-flex items-center gap-2 px-4 py-3 rounded-2xl bg-white hover:bg-gray-50 border border-gray-200 transition font-extrabold disabled:opacity-60"
                   >
                     <Download size={18} />
-                    Download Recent Failures CSV
+                    Download Visible Failures CSV
                   </button>
+
+                  <button
+                    type="button"
+                    onClick={downloadSavedFailuresCsv}
+                    disabled={
+                      isDownloadingSavedFailures ||
+                      safeNum(currentJob.failuresCount, 0) <= 0
+                    }
+                    className="inline-flex items-center gap-2 px-4 py-3 rounded-2xl bg-white hover:bg-gray-50 border border-gray-200 transition font-extrabold disabled:opacity-60"
+                  >
+                    {isDownloadingSavedFailures ? (
+                      <LoaderCircle size={18} className="animate-spin" />
+                    ) : (
+                      <Download size={18} />
+                    )}
+                    {isDownloadingSavedFailures
+                      ? "Preparing CSV..."
+                      : "Download Full Saved Failures CSV"}
+                  </button>
+
+                  {canDeleteSavedJob ? (
+                    <button
+                      type="button"
+                      onClick={deleteSavedJob}
+                      disabled={!canDeleteSavedJob}
+                      className="inline-flex items-center gap-2 px-4 py-3 rounded-2xl bg-white hover:bg-gray-50 border border-rose-200 text-rose-700 transition font-extrabold disabled:opacity-60"
+                    >
+                      {isDeletingJob ? (
+                        <LoaderCircle size={18} className="animate-spin" />
+                      ) : (
+                        <Trash2 size={18} />
+                      )}
+                      {isDeletingJob ? "Deleting..." : "Delete Saved Job"}
+                    </button>
+                  ) : null}
                 </div>
 
                 {recentFailures.length ? (
@@ -1585,6 +2009,12 @@ export default function BulkDetailsPage() {
                           ))}
                         </tbody>
                       </table>
+                    </div>
+
+                    <div className="mt-3 text-xs text-amber-800">
+                      Full saved failures CSV alag se database se download ki ja
+                      sakti hai. Job report tab tak save rahegi jab tak aap Delete
+                      Saved Job nahi dabate.
                     </div>
                   </div>
                 ) : null}
@@ -1838,8 +2268,7 @@ export default function BulkDetailsPage() {
                 </div>
 
                 <div className="mt-4 rounded-xl border border-sky-200 bg-sky-50 p-3 text-xs leading-5 text-sky-800">
-                  Processing row-by-row hi hogi. Lekin ab ye cron/runner se nahi,
-                  current logged-in session ke Start/Resume flow se chalegi.
+                  New flow: save → pre-validation → final upload/create
                 </div>
               </div>
 
@@ -1859,7 +2288,7 @@ export default function BulkDetailsPage() {
                   )}
                   {isSubmittingJob
                     ? "Saving Job..."
-                    : "Save Job & Start Processing"}
+                    : "Save Job & Start Pre-validation"}
                 </button>
 
                 {canResumeSavedJob ? (
@@ -1877,10 +2306,10 @@ export default function BulkDetailsPage() {
                     {needsManualResume
                       ? isResumingJob || isProcessingJob
                         ? "Resuming..."
-                        : "Resume Saved Job"
+                        : `Resume ${getCurrentStageLabel(pipelineStage)}`
                       : isResumingJob || isProcessingJob
                       ? "Starting..."
-                      : "Start / Continue Saved Job"}
+                      : `Start / Continue ${getCurrentStageLabel(pipelineStage)}`}
                   </button>
                 ) : null}
 
@@ -1900,6 +2329,22 @@ export default function BulkDetailsPage() {
                   </button>
                 ) : null}
 
+                {canDeleteSavedJob ? (
+                  <button
+                    type="button"
+                    disabled={!canDeleteSavedJob}
+                    onClick={deleteSavedJob}
+                    className="w-full mt-3 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-white hover:bg-gray-50 border border-rose-200 text-rose-700 transition font-extrabold disabled:opacity-60"
+                  >
+                    {isDeletingJob ? (
+                      <LoaderCircle size={18} className="animate-spin" />
+                    ) : (
+                      <Trash2 size={18} />
+                    )}
+                    {isDeletingJob ? "Deleting..." : "Delete Saved Job"}
+                  </button>
+                ) : null}
+
                 <button
                   type="button"
                   disabled={isSubmittingJob || activeJobExists}
@@ -1915,9 +2360,10 @@ export default function BulkDetailsPage() {
                 </button>
 
                 <div className="mt-4 text-[11px] text-slate-500 leading-5">
-                  New job save karne ke baad aap page close, logout ya device change
-                  kar sakte ho. Progress save rahegi, lekin processing pause ho
-                  jayegi. Baad me Resume se wahi se continue kar sakte ho.
+                  Save stage fast rakhi gayi hai. Run/Resume par pehle pre-validation
+                  hogi. Uske baad final product upload/create stage start hogi.
+                  Completed ya cancelled jobs ki reports save rahengi jab tak aap
+                  Delete Saved Job nahi karte.
                 </div>
               </div>
 
@@ -1935,25 +2381,23 @@ export default function BulkDetailsPage() {
                   <br />
                   Session selected category ke master sessions me valid hona chahiye.
                   <br />
-                  Failed ya skipped rows current job report me dikhengi.
+                  Sheet ke andar duplicate SKU rows pre-validation stage me hi skip ho jayengi.
                 </div>
               </div>
 
               <div className="rounded-2xl border border-blue-200 bg-blue-50 p-4">
                 <div className="inline-flex items-center gap-2 text-sm font-extrabold text-blue-900">
                   <Database size={16} />
-                  Current progress summary
+                  Current stage summary
                 </div>
                 <div className="text-sm text-blue-800 mt-2 leading-6">
-                  Total Entries: <b>{safeNum(progress.totalItems)}</b>
+                  Current Stage: <b>{getCurrentStageLabel(pipelineStage)}</b>
                   <br />
-                  Processed Entries: <b>{safeNum(progress.processedItems)}</b>
+                  Pre-validation: <b>{prevalidationPercent}%</b>
                   <br />
-                  Success Entries: <b>{safeNum(progress.successItems)}</b>
+                  Final Upload/Create: <b>{executionPercent}%</b>
                   <br />
-                  Skipped Entries: <b>{safeNum(progress.skippedItems)}</b>
-                  <br />
-                  Failed Entries: <b>{safeNum(progress.failedItems)}</b>
+                  Saved Failures Count: <b>{safeNum(currentJob?.failuresCount)}</b>
                 </div>
               </div>
 
@@ -1967,11 +2411,11 @@ export default function BulkDetailsPage() {
                   <br />
                   Step 2: Job database me create
                   <br />
-                  Step 3: Start/Resume dabane par current session me row-by-row process
+                  Step 3: Pre-validation start
                   <br />
-                  Step 4: Logout / close par pause
+                  Step 4: Final product upload/create start
                   <br />
-                  Step 5: Dobara login karke Resume
+                  Step 5: Report save rahegi jab tak delete na karo
                 </div>
               </div>
             </div>

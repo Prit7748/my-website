@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+
 import { getAuthUser, hasPermission } from "@/lib/auth";
 import {
   buildBulkJobFailuresCsv,
@@ -6,21 +7,22 @@ import {
 } from "@/lib/bulkUploadJob";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 function safeStr(x: any) {
   return String(x ?? "").trim();
 }
 
-function safeFileName(input: string) {
-  return (
-    safeStr(input)
-      .replace(/[^a-zA-Z0-9-_]+/g, "-")
-      .replace(/-+/g, "-")
-      .replace(/^-|-$/g, "") || "bulk-job-failures"
-  );
+type ParamsMaybePromise = {
+  params: Promise<{ jobId: string }> | { jobId: string };
+};
+
+async function getJobId(ctx: ParamsMaybePromise) {
+  const p: any = await (ctx as any).params;
+  return safeStr(p?.jobId);
 }
 
-async function assertAdminWriteAccess() {
+async function assertAdminReadAccess() {
   const user = await getAuthUser();
 
   if (!user) {
@@ -33,27 +35,37 @@ async function assertAdminWriteAccess() {
     };
   }
 
-  if (!hasPermission(user, "products:write")) {
+  if (!hasPermission(user, "products:read") && !hasPermission(user, "products:write")) {
     return {
       ok: false as const,
-      res: NextResponse.json({ ok: false, error: "Forbidden" }, { status: 403 }),
+      res: NextResponse.json(
+        { ok: false, error: "Forbidden" },
+        { status: 403 }
+      ),
     };
   }
 
   return { ok: true as const, user };
 }
 
-type ParamsMaybePromise = {
-  params: Promise<{ jobId: string }> | { jobId: string };
-};
+function buildDownloadName(job: any) {
+  const base =
+    safeStr(job?.downloadFileName) ||
+    safeStr(job?.jobType) ||
+    "bulk-job-failures";
 
-async function getJobId(ctx: ParamsMaybePromise) {
-  const p: any = await (ctx as any).params;
-  return safeStr(p?.jobId);
+  const cleanBase = base
+    .toLowerCase()
+    .replace(/[^a-z0-9-_]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+
+  const suffix = safeStr(job?._id).slice(-8).toLowerCase() || "report";
+  return `${cleanBase}-${suffix}.csv`;
 }
 
 export async function GET(_req: NextRequest, ctx: ParamsMaybePromise) {
-  const guard = await assertAdminWriteAccess();
+  const guard = await assertAdminReadAccess();
   if (!guard.ok) return guard.res;
 
   const jobId = await getJobId(ctx);
@@ -64,7 +76,9 @@ export async function GET(_req: NextRequest, ctx: ParamsMaybePromise) {
     );
   }
 
-  const job = await getBulkUploadJob(jobId, safeStr(guard.user.email));
+  const createdBy = safeStr(guard.user.email);
+  const job = await getBulkUploadJob(jobId, createdBy);
+
   if (!job) {
     return NextResponse.json(
       { ok: false, error: "Job not found" },
@@ -73,16 +87,16 @@ export async function GET(_req: NextRequest, ctx: ParamsMaybePromise) {
   }
 
   const csv = buildBulkJobFailuresCsv(job);
-  const fileNameBase =
-    safeFileName(safeStr((job as any)?.downloadFileName)) ||
-    safeFileName(`${safeStr((job as any)?.jobType)}-failures`);
+  const fileName = buildDownloadName(job);
 
-  return new Response(csv, {
+  return new NextResponse(csv, {
     status: 200,
     headers: {
       "Content-Type": "text/csv; charset=utf-8",
-      "Content-Disposition": `attachment; filename="${fileNameBase}.csv"`,
-      "Cache-Control": "no-store",
+      "Content-Disposition": `attachment; filename="${fileName}"`,
+      "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
+      Pragma: "no-cache",
+      Expires: "0",
     },
   });
 }

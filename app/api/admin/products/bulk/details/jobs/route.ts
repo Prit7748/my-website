@@ -19,7 +19,7 @@ export const maxDuration = 60;
 
 const MAX_UPLOAD_FILE_BYTES = 6 * 1024 * 1024;
 const MAX_ROWS_PER_JOB = 10000;
-const ROW_BY_ROW_BATCH_SIZE = 1;
+const PREVALIDATION_BATCH_SIZE = 25;
 
 function safeStr(x: any) {
   return String(x ?? "").trim();
@@ -132,6 +132,83 @@ async function parseInputFromJson(req: Request) {
   };
 }
 
+function buildInitialSummary(args: {
+  totalRows: number;
+  config: ReturnType<typeof normalizeBulkDetailsConfig>;
+}) {
+  const totalRows = Math.max(0, Number(args.totalRows || 0));
+  const config = args.config;
+
+  return {
+    totalRows,
+    validRows: 0,
+    createdRows: 0,
+    updatedRows: 0,
+    skippedRows: 0,
+    failedRows: 0,
+    duplicateStrategy: config.duplicateStrategy,
+    dryRun: config.dryRun,
+    category: config.category,
+    pipelineStage: "prevalidation",
+
+    prevalidation: {
+      totalRows,
+      processedRows: 0,
+      validRows: 0,
+      failedRows: 0,
+      skippedRows: 0,
+      duplicateUploadRows: 0,
+      readyRows: 0,
+      startedAt: null,
+      completedAt: null,
+      lastNote: "Job saved. Run karte hi pre-validation start hogi.",
+    },
+
+    execution: {
+      totalRows: 0,
+      processedRows: 0,
+      createdRows: 0,
+      updatedRows: 0,
+      skippedRows: 0,
+      failedRows: 0,
+      successRows: 0,
+      startedAt: null,
+      completedAt: null,
+      lastNote:
+        "Pre-validation complete hone ke baad final product upload/create stage start hogi.",
+    },
+
+    comboSync: {
+      attempted: 0,
+      succeeded: 0,
+      failed: 0,
+      errors: [],
+      mode: "none",
+    },
+
+    hardcopySync: {
+      attempted: 0,
+      succeeded: 0,
+      failed: 0,
+      errors: [],
+      mode: "none",
+    },
+
+    needsManualResume: true,
+    resumeCount: 0,
+    lastResumeRequestedAt: null,
+    lastPausedAt: null,
+  };
+}
+
+function buildInitialInput(args: { rows: any[] }) {
+  return {
+    rows: Array.isArray(args.rows) ? args.rows : [],
+    prevalidationSeenSkus: [],
+    prevalidatedRows: [],
+  };
+}
+
 export async function POST(req: Request) {
   const guard = await assertAdminWriteAccess();
   if (!guard.ok) return guard.res;
@@ -195,61 +272,33 @@ export async function POST(req: Request) {
       jobType: "product_details",
       createdBy,
       jobLabel: config.dryRun
-        ? "Bulk Product Details Validation (Manual Resume)"
-        : "Bulk Product Details Upload (Manual Resume)",
-      batchSize: ROW_BY_ROW_BATCH_SIZE,
+        ? "Bulk Product Details Validation + Upload Pipeline (Dry Run)"
+        : "Bulk Product Details Validation + Upload Pipeline",
+      batchSize: PREVALIDATION_BATCH_SIZE,
       totalItems: rows.length,
       meta: {
         dryRun: config.dryRun,
         category: config.category,
         duplicateStrategy: config.duplicateStrategy,
-        processingMode: "manual_row_by_row_resume",
+        processingMode: "manual_resume_stage_pipeline",
         executionMode: "manual_only",
         autoRunnerEnabled: false,
         createdVia: "bulk_details_page",
         jobSavedAt: now,
+        currentStage: "prevalidation",
+        stageMode: "save_then_prevalidate_then_execute",
       },
       config: {
         ...config,
-        processingMode: "manual_row_by_row_resume",
+        processingMode: "manual_resume_stage_pipeline",
         executionMode: "manual_only",
         autoRunnerEnabled: false,
       },
-      input: {
-        rows,
-      },
-      summary: {
+      input: buildInitialInput({ rows }),
+      summary: buildInitialSummary({
         totalRows: rows.length,
-        validRows: 0,
-        createdRows: 0,
-        updatedRows: 0,
-        skippedRows: 0,
-        failedRows: 0,
-        duplicateStrategy: config.duplicateStrategy,
-        dryRun: config.dryRun,
-        category: config.category,
-        processingMode: "manual_row_by_row_resume",
-        executionMode: "manual_only",
-        autoRunnerEnabled: false,
-        needsManualResume: true,
-        resumeCount: 0,
-        lastResumeRequestedAt: null,
-        lastPausedAt: null,
-        comboSync: {
-          attempted: 0,
-          succeeded: 0,
-          failed: 0,
-          errors: [],
-          mode: "none",
-        },
-        hardcopySync: {
-          attempted: 0,
-          succeeded: 0,
-          failed: 0,
-          errors: [],
-          mode: "none",
-        },
-      },
+        config,
+      }),
       downloadFileName: config.dryRun
         ? "bulk-product-details-validation-failures"
         : "bulk-product-details-upload-failures",
@@ -259,7 +308,7 @@ export async function POST(req: Request) {
       {
         ok: true,
         message:
-          "Bulk details job save ho gayi hai. Excel/CSV database me stored hai. Ab ye job manual resume/start flow se row-by-row process hogi.",
+          "Bulk details job save ho gayi hai. Save stage lightweight rakhi gayi hai. Ab Run/Resume karte hi pre-validation immediately start hogi.",
         job: toPlainBulkJob(created),
       },
       { status: 201 }

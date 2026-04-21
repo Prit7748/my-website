@@ -28,6 +28,20 @@ function cloneRecord(input: any) {
     : {};
 }
 
+function getPipelineStage(job: any) {
+  const stage = safeStr(job?.summary?.pipelineStage).toLowerCase();
+  if (stage === "execution") return "execution";
+  if (stage === "completed") return "completed";
+  return "prevalidation";
+}
+
+function getStageLabel(job: any) {
+  const stage = getPipelineStage(job);
+  if (stage === "execution") return "final product upload/create stage";
+  if (stage === "completed") return "completed stage";
+  return "pre-validation stage";
+}
+
 async function assertAdminWriteAccess() {
   const user = await getAuthUser();
 
@@ -89,6 +103,7 @@ async function requestPause(jobId: string, createdBy: string) {
     };
   }
 
+  const stageLabel = getStageLabel(job);
   const now = new Date();
   const summary = cloneRecord(job.summary);
   const meta = cloneRecord(job.meta);
@@ -108,8 +123,7 @@ async function requestPause(jobId: string, createdBy: string) {
         $set: {
           summary,
           meta,
-          resultMessage:
-            "Pause requested. Current row complete hone ke baad processing ruk jayegi.",
+          resultMessage: `Pause requested. Current ${stageLabel} batch complete hone ke baad processing ruk jayegi.`,
           lastHeartbeatAt: now,
         },
       },
@@ -118,8 +132,7 @@ async function requestPause(jobId: string, createdBy: string) {
 
     return {
       ok: true as const,
-      message:
-        "Pause request save ho gayi. Current row finish hone ke baad job ruk jayegi.",
+      message: `Pause request save ho gayi. Current ${stageLabel} batch finish hone ke baad job ruk jayegi.`,
       job: updated,
     };
   }
@@ -134,7 +147,7 @@ async function requestPause(jobId: string, createdBy: string) {
         status: "queued",
         summary,
         meta,
-        resultMessage: "Bulk job paused. Resume karke wahi se continue kar sakte ho.",
+        resultMessage: `Bulk job paused. Resume karke ${stageLabel} wahi se continue kar sakte ho.`,
         lockToken: "",
         lockExpiresAt: null,
         lastHeartbeatAt: now,
@@ -145,7 +158,7 @@ async function requestPause(jobId: string, createdBy: string) {
 
   return {
     ok: true as const,
-    message: "Bulk job paused successfully.",
+    message: `Bulk job paused successfully. Resume karoge to ${stageLabel} wahi se continue hogi.`,
     job: updated,
   };
 }
@@ -181,6 +194,7 @@ async function requestResume(jobId: string, createdBy: string) {
     };
   }
 
+  const stageLabel = getStageLabel(job);
   const now = new Date();
   const summary = cloneRecord(job.summary);
   const meta = cloneRecord(job.meta);
@@ -203,8 +217,7 @@ async function requestResume(jobId: string, createdBy: string) {
         $set: {
           summary,
           meta,
-          resultMessage:
-            "Resume request save ho gayi. Current row ke baad processing continue rahegi.",
+          resultMessage: `Resume request save ho gayi. Current ${stageLabel} batch ke baad processing continue rahegi.`,
           lastHeartbeatAt: now,
         },
       },
@@ -213,8 +226,7 @@ async function requestResume(jobId: string, createdBy: string) {
 
     return {
       ok: true as const,
-      message:
-        "Resume request save ho gayi. Active processing row ke baad job continue rahegi.",
+      message: `Resume request save ho gayi. Active ${stageLabel} batch ke baad job continue rahegi.`,
       job: updated,
     };
   }
@@ -229,8 +241,7 @@ async function requestResume(jobId: string, createdBy: string) {
         status: "queued",
         summary,
         meta,
-        resultMessage:
-          "Resume requested. Start/Resume button se processing wahi se continue hogi.",
+        resultMessage: `Resume requested. Start/Resume button se ${stageLabel} wahi se continue hogi.`,
         lockToken: "",
         lockExpiresAt: null,
         lastHeartbeatAt: now,
@@ -241,7 +252,7 @@ async function requestResume(jobId: string, createdBy: string) {
 
   return {
     ok: true as const,
-    message: "Bulk job resume-ready state me set ho gayi.",
+    message: `Bulk job resume-ready state me set ho gayi. Ab ${stageLabel} continue hogi.`,
     job: updated,
   };
 }
@@ -262,6 +273,7 @@ async function requestCancel(jobId: string, createdBy: string) {
   }
 
   const status = safeStr(job.status);
+  const stageLabel = getStageLabel(job);
 
   if (status === "processing_batch") {
     const now = new Date();
@@ -281,8 +293,7 @@ async function requestCancel(jobId: string, createdBy: string) {
         $set: {
           summary,
           meta,
-          resultMessage:
-            "Cancel requested. Current row complete hone ke baad job cancel hogi.",
+          resultMessage: `Cancel requested. Current ${stageLabel} batch complete hone ke baad job cancel hogi.`,
           lastHeartbeatAt: now,
         },
       },
@@ -291,8 +302,7 @@ async function requestCancel(jobId: string, createdBy: string) {
 
     return {
       ok: true as const,
-      message:
-        "Cancel request save ho gayi. Current row finish hone ke baad job cancel hogi.",
+      message: `Cancel request save ho gayi. Current ${stageLabel} batch finish hone ke baad job cancel hogi.`,
       job: updated,
     };
   }
@@ -314,6 +324,39 @@ async function requestCancel(jobId: string, createdBy: string) {
     ok: true as const,
     message: "Bulk job cancelled.",
     job: cancelled.job,
+  };
+}
+
+async function deleteOwnedJob(jobId: string, createdBy: string) {
+  await dbConnect();
+
+  const job: any = await BulkUploadJob.findOne({
+    _id: safeStr(jobId),
+    createdBy: safeStr(createdBy),
+  });
+
+  if (!job) {
+    return { ok: false as const, status: 404, error: "Job not found" };
+  }
+
+  if (!isFinalBulkJobStatus(job.status)) {
+    return {
+      ok: false as const,
+      status: 409,
+      error:
+        "Active job ko delete nahi kar sakte. Pehle job ko complete, cancel ya fail state me lao.",
+    };
+  }
+
+  await BulkUploadJob.deleteOne({
+    _id: String(job._id),
+    createdBy: safeStr(createdBy),
+  });
+
+  return {
+    ok: true as const,
+    message:
+      "Bulk job permanently delete ho gayi. Iske saved summary, failures aur CSV report references bhi remove ho gaye.",
   };
 }
 
@@ -408,6 +451,38 @@ export async function POST(req: NextRequest, ctx: ParamsMaybePromise) {
       message: result.message,
       action,
       job: toPlainBulkJob(result.job),
+    },
+    { status: 200 }
+  );
+}
+
+export async function DELETE(_req: NextRequest, ctx: ParamsMaybePromise) {
+  const guard = await assertAdminWriteAccess();
+  if (!guard.ok) return guard.res;
+
+  const jobId = await getJobId(ctx);
+  if (!jobId) {
+    return NextResponse.json(
+      { ok: false, error: "jobId required" },
+      { status: 400 }
+    );
+  }
+
+  const createdBy = safeStr(guard.user.email);
+  const result = await deleteOwnedJob(jobId, createdBy);
+
+  if (!result.ok) {
+    return NextResponse.json(
+      { ok: false, error: result.error },
+      { status: result.status }
+    );
+  }
+
+  return NextResponse.json(
+    {
+      ok: true,
+      message: result.message,
+      deletedJobId: jobId,
     },
     { status: 200 }
   );
