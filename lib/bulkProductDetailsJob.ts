@@ -5,6 +5,7 @@ import Course from "@/models/Course";
 import Session from "@/models/Session";
 import BulkUploadJob from "@/models/BulkUploadJob";
 import ProductPricingRule from "@/models/ProductPricingRule";
+import { syncProductAvailabilityBySku } from "@/lib/productAvailability";
 import {
   CATEGORY_CONFIG,
   normalizeProductCategory,
@@ -129,6 +130,7 @@ const MANUAL_HARDCOPY_BULK_BLOCK_MESSAGE =
 
 const MASTER_CACHE_TTL_MS = 2 * 60 * 1000;
 const PREVALIDATION_STAGE_CHUNK_SIZE = 250;
+const INLINE_AVAILABILITY_ERROR_LIMIT = 50;
 
 const PRODUCT_SYNC_SELECT = [
   "_id",
@@ -1598,6 +1600,51 @@ function buildNextStageLabel(stage: BulkDetailsDetailedStage) {
   return "Completed";
 }
 
+function getAvailabilitySyncSummary(summary: any) {
+  const current = summary?.availabilitySync;
+  if (current && typeof current === "object" && !Array.isArray(current)) {
+    return {
+      mode: safeStr(current.mode || "inline_after_execution") || "inline_after_execution",
+      attempted: safeNum(current.attempted, 0),
+      succeeded: safeNum(current.succeeded, 0),
+      failed: safeNum(current.failed, 0),
+      skipped: safeNum(current.skipped, 0),
+      errors: Array.isArray(current.errors) ? [...current.errors] : [],
+      startedAt: current.startedAt || null,
+      completedAt: current.completedAt || null,
+      lastMessage: safeStr(current.lastMessage || ""),
+    };
+  }
+
+  return {
+    mode: "inline_after_execution",
+    attempted: 0,
+    succeeded: 0,
+    failed: 0,
+    skipped: 0,
+    errors: [] as Array<{
+      sku: string;
+      rowNumber: number;
+      reason: string;
+    }>,
+    startedAt: null as string | null,
+    completedAt: null as string | null,
+    lastMessage: "",
+  };
+}
+
+function pushAvailabilitySyncError(
+  errors: Array<{ sku: string; rowNumber: number; reason: string }>,
+  entry: { sku: string; rowNumber: number; reason: string }
+) {
+  if (errors.length >= INLINE_AVAILABILITY_ERROR_LIMIT) return;
+  errors.push({
+    sku: safeStr(entry.sku),
+    rowNumber: safeNum(entry.rowNumber, 0),
+    reason: safeStr(entry.reason),
+  });
+}
+
 export async function processBulkDetailsJobBatch(args: {
   job: any;
   batchNumber: number;
@@ -2186,6 +2233,12 @@ export async function processBulkDetailsJobBatch(args: {
   let failedRows = 0;
   let skippedRows = 0;
 
+  const availabilitySync = getAvailabilitySyncSummary(summary);
+  if (!availabilitySync.startedAt) {
+    availabilitySync.startedAt = new Date().toISOString();
+  }
+  availabilitySync.mode = "inline_after_execution";
+
   for (const row of batchExecutionRows) {
     try {
       const generated = buildProductPayload(config, row);
@@ -2193,6 +2246,8 @@ export async function processBulkDetailsJobBatch(args: {
 
       if (config.dryRun) {
         skippedRows++;
+        availabilitySync.skipped += 1;
+
         pushFailureRow(failures, {
           itemIndex: row.itemIndex,
           rowNumber: row.rowNumber,
@@ -2252,6 +2307,8 @@ export async function processBulkDetailsJobBatch(args: {
       if (existing) {
         if (config.duplicateStrategy === "ignore") {
           skippedRows++;
+          availabilitySync.skipped += 1;
+
           pushFailureRow(failures, {
             itemIndex: row.itemIndex,
             rowNumber: row.rowNumber,
@@ -2301,26 +2358,48 @@ export async function processBulkDetailsJobBatch(args: {
         );
 
         updatedRows++;
-        continue;
+      } else {
+        const finalSlug = await ensureSlugAvailable(generated.slugBase);
+
+        await Product.create({
+          ...payload,
+          slug: finalSlug,
+          pages: 0,
+          pdfKey: "",
+          pdfUrl: "",
+          images: [],
+          thumbnailUrl: "",
+          quickUrl: "",
+          deliverWithinMinutes: 20,
+          onDemandNote: "",
+          autoMakeAvailableOnUpload: true,
+        });
+
+        createdRows++;
       }
 
-      const finalSlug = await ensureSlugAvailable(generated.slugBase);
+      availabilitySync.attempted += 1;
 
-      await Product.create({
-        ...payload,
-        slug: finalSlug,
-        pages: 0,
-        pdfKey: "",
-        pdfUrl: "",
-        images: [],
-        thumbnailUrl: "",
-        quickUrl: "",
-        deliverWithinMinutes: 20,
-        onDemandNote: "",
-        autoMakeAvailableOnUpload: true,
-      });
-
-      createdRows++;
+      try {
+        const availabilityResult = await syncProductAvailabilityBySku(row.sku);
+        if (availabilityResult?.ok) {
+          availabilitySync.succeeded += 1;
+        } else {
+          availabilitySync.failed += 1;
+          pushAvailabilitySyncError(availabilitySync.errors, {
+            sku: row.sku,
+            rowNumber: row.rowNumber,
+            reason: safeStr(availabilityResult?.reason || "Availability sync failed"),
+          });
+        }
+      } catch (syncError: any) {
+        availabilitySync.failed += 1;
+        pushAvailabilitySyncError(availabilitySync.errors, {
+          sku: row.sku,
+          rowNumber: row.rowNumber,
+          reason: sanitizeUnexpectedRowError(syncError),
+        });
+      }
     } catch (error: any) {
       failedRows++;
       pushFailureRow(failures, {
@@ -2354,12 +2433,21 @@ export async function processBulkDetailsJobBatch(args: {
       endIndex >= executionInputRows.length - 1 ? new Date().toISOString() : null,
     lastNote:
       endIndex >= executionInputRows.length - 1
-        ? `Final product upload/create complete. Created ${safeNum(summary?.execution?.createdRows, 0) + createdRows}, Updated ${safeNum(summary?.execution?.updatedRows, 0) + updatedRows}, Skipped ${safeNum(summary?.execution?.skippedRows, 0) + skippedRows}, Failed ${safeNum(summary?.execution?.failedRows, 0) + failedRows}. Post-upload syncs alag se run hongi.`
+        ? `Final product upload/create complete. Created ${safeNum(summary?.execution?.createdRows, 0) + createdRows}, Updated ${safeNum(summary?.execution?.updatedRows, 0) + updatedRows}, Skipped ${safeNum(summary?.execution?.skippedRows, 0) + skippedRows}, Failed ${safeNum(summary?.execution?.failedRows, 0) + failedRows}. Inline availability sync attempted ${availabilitySync.attempted}, succeeded ${availabilitySync.succeeded}, failed ${availabilitySync.failed}.`
         : `Final product upload/create running: ${Math.min(
             executionInputRows.length,
             safeNum(summary?.execution?.processedRows, 0) + batchExecutionRows.length
-          )}/${executionInputRows.length} rows processed. Created ${safeNum(summary?.execution?.createdRows, 0) + createdRows}, Updated ${safeNum(summary?.execution?.updatedRows, 0) + updatedRows}. Post-upload syncs abhi intentionally skip hain.`,
+          )}/${executionInputRows.length} rows processed. Created ${safeNum(summary?.execution?.createdRows, 0) + createdRows}, Updated ${safeNum(summary?.execution?.updatedRows, 0) + updatedRows}. Inline availability sync attempted ${availabilitySync.attempted}, failed ${availabilitySync.failed}.`,
   };
+
+  availabilitySync.lastMessage =
+    availabilitySync.failed > 0
+      ? `Inline availability sync attempted ${availabilitySync.attempted}, succeeded ${availabilitySync.succeeded}, failed ${availabilitySync.failed}.`
+      : `Inline availability sync successful for ${availabilitySync.succeeded}/${availabilitySync.attempted}.`;
+
+  if (endIndex >= executionInputRows.length - 1) {
+    availabilitySync.completedAt = new Date().toISOString();
+  }
 
   const nextSummary = {
     ...summary,
@@ -2374,6 +2462,7 @@ export async function processBulkDetailsJobBatch(args: {
     ),
     nextStageTotalItems: 0,
     execution,
+    availabilitySync,
     comboSync: {
       attempted: 0,
       succeeded: 0,
@@ -2382,13 +2471,6 @@ export async function processBulkDetailsJobBatch(args: {
       mode: "deferred",
     },
     hardcopySync: {
-      attempted: 0,
-      succeeded: 0,
-      failed: 0,
-      errors: [],
-      mode: "deferred",
-    },
-    availabilitySync: {
       attempted: 0,
       succeeded: 0,
       failed: 0,

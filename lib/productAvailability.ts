@@ -29,6 +29,164 @@ export function deriveAvailabilityFromFlags(args: {
   return "want_to_buy";
 }
 
+function buildLinkedRecordPatch(product: any | null) {
+  const now = new Date();
+
+  if (!product || product.deletedAt) {
+    return {
+      productExists: false,
+      productId: null,
+      productSku: "",
+      productSlug: "",
+      titleColor: "red",
+      updatedAt: now,
+    };
+  }
+
+  return {
+    productExists: true,
+    productId: product._id,
+    productSku: safeStr(product.sku).toUpperCase(),
+    productSlug: safeStr(product.slug),
+    titleColor: "green",
+    updatedAt: now,
+  };
+}
+
+async function findLiveProductBySku(skuInput: string) {
+  const skuNormalized = normalizeSkuLike(skuInput);
+  if (!skuNormalized) return null;
+
+  await dbConnect();
+
+  const exactUpper = safeStr(skuInput).toUpperCase();
+
+  let product: any = await Product.findOne({
+    sku: exactUpper,
+    deletedAt: null,
+  });
+
+  if (product) return product;
+
+  product = await Product.findOne({
+    sku: {
+      $regex: `^${safeStr(skuInput).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
+      $options: "i",
+    },
+    deletedAt: null,
+  });
+
+  return product || null;
+}
+
+async function syncSolvedVaultRecordLinkBySku(skuInput: string, product: any | null) {
+  const skuNormalized = normalizeSkuLike(skuInput);
+  if (!skuNormalized) {
+    return {
+      ok: false,
+      type: "solved_pdf",
+      reason: "SKU missing",
+      matchedCount: 0,
+      linked: false,
+      row: null,
+    };
+  }
+
+  await dbConnect();
+
+  const patch = buildLinkedRecordPatch(product);
+
+  const updateRes: any = await PdfVaultFile.updateMany(
+    {
+      skuNormalized,
+      deletedAt: null,
+    },
+    {
+      $set: patch,
+    }
+  );
+
+  const row: any = await PdfVaultFile.findOne({
+    skuNormalized,
+    deletedAt: null,
+  })
+    .select(
+      "_id skuNormalized s3Key s3Bucket pageCount productExists productId productSku productSlug titleColor"
+    )
+    .lean();
+
+  return {
+    ok: true,
+    type: "solved_pdf",
+    matchedCount:
+      Number(updateRes?.modifiedCount || 0) ||
+      Number(updateRes?.matchedCount || 0) ||
+      (row ? 1 : 0),
+    linked: Boolean(product && !product.deletedAt && row),
+    row: row || null,
+  };
+}
+
+async function syncOfficialPaperRecordLinkBySku(skuInput: string, product: any | null) {
+  const skuNormalized = normalizeSkuLike(skuInput);
+  if (!skuNormalized) {
+    return {
+      ok: false,
+      type: "official_paper",
+      reason: "SKU missing",
+      matchedCount: 0,
+      linked: false,
+      row: null,
+    };
+  }
+
+  await dbConnect();
+
+  const patch = buildLinkedRecordPatch(product);
+
+  const updateRes: any = await OfficialPaper.updateMany(
+    {
+      skuNormalized,
+      deletedAt: null,
+    },
+    {
+      $set: patch,
+    }
+  );
+
+  const row: any = await OfficialPaper.findOne({
+    skuNormalized,
+    deletedAt: null,
+  })
+    .select(
+      "_id skuNormalized s3Key s3Bucket pageCount productExists productId productSku productSlug titleColor"
+    )
+    .lean();
+
+  return {
+    ok: true,
+    type: "official_paper",
+    matchedCount:
+      Number(updateRes?.modifiedCount || 0) ||
+      Number(updateRes?.matchedCount || 0) ||
+      (row ? 1 : 0),
+    linked: Boolean(product && !product.deletedAt && row),
+    row: row || null,
+  };
+}
+
+async function syncAllLinkedRecordsBySku(skuInput: string, product: any | null) {
+  const [solvedPdfLink, officialPaperLink] = await Promise.all([
+    syncSolvedVaultRecordLinkBySku(skuInput, product),
+    syncOfficialPaperRecordLinkBySku(skuInput, product),
+  ]);
+
+  return {
+    solvedPdfLink,
+    officialPaperLink,
+  };
+}
+
 export async function findSolvedVaultFileBySku(skuInput: string) {
   const skuNormalized = normalizeSkuLike(skuInput);
   if (!skuNormalized) return null;
@@ -105,38 +263,53 @@ export async function getDerivedAvailabilitySnapshotBySku(skuInput: string) {
 
 export async function syncProductAvailabilityBySku(skuInput: string) {
   const skuNormalized = normalizeSkuLike(skuInput);
+
   if (!skuNormalized) {
     return {
       ok: false,
       reason: "SKU missing",
+      skuNormalized: "",
     };
   }
 
   await dbConnect();
 
-  const product: any = await Product.findOne({
-    sku: safeStr(skuInput).toUpperCase(),
-    deletedAt: null,
-  });
+  const product: any = await findLiveProductBySku(skuNormalized);
 
   if (!product) {
-    const fallbackProduct: any = await Product.findOne({
-      sku: {
-        $regex: `^${safeStr(skuInput).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`,
-        $options: "i",
+    const snapshot = await getDerivedAvailabilitySnapshotBySku(skuNormalized);
+    const linkedRecords = await syncAllLinkedRecordsBySku(skuNormalized, null);
+
+    return {
+      ok: true,
+      reason: "Product not found. Linked records unlinked.",
+      productId: "",
+      productSku: "",
+      skuNormalized,
+      before: {
+        availability: "",
+        pdfKey: "",
+        pages: 0,
       },
-      deletedAt: null,
-    });
-
-    if (!fallbackProduct) {
-      return {
-        ok: false,
+      after: {
+        availability: "",
+        pdfKey: "",
+        pages: 0,
+      },
+      snapshot,
+      linkedRecords,
+      autoResolvedWantToBuy: {
+        ok: true,
+        reason: "product_missing",
+        deletedCount: 0,
+        emails: [] as string[],
+      },
+      hardcopySync: {
+        ok: true,
+        action: "skipped",
         reason: "Product not found",
-        skuNormalized,
-      };
-    }
-
-    return syncProductAvailabilityByProductId(String(fallbackProduct._id));
+      },
+    };
   }
 
   return syncProductAvailabilityByProductId(String(product._id));
@@ -155,8 +328,9 @@ export async function syncProductAvailabilityByProductId(productId: string) {
   }
 
   const beforeProduct = product.toObject ? product.toObject() : { ...product };
+  const skuNormalized = normalizeSkuLike(safeStr(product.sku));
 
-  const snapshot = await getDerivedAvailabilitySnapshotBySku(safeStr(product.sku));
+  const snapshot = await getDerivedAvailabilitySnapshotBySku(skuNormalized);
   const beforeAvailability = safeStr(product.availability || "");
   const beforePdfKey = safeStr(product.pdfKey || "");
   const beforePages = Math.max(0, Math.trunc(safeNum(product.pages, 0)));
@@ -179,6 +353,8 @@ export async function syncProductAvailabilityByProductId(productId: string) {
     : product.toObject
     ? product.toObject()
     : product;
+
+  const linkedRecords = await syncAllLinkedRecordsBySku(skuNormalized, afterProductDoc || product);
 
   const resolveResult = await autoResolveWantToBuyForProduct({
     productId: product._id,
@@ -216,6 +392,7 @@ export async function syncProductAvailabilityByProductId(productId: string) {
       pages: Math.max(0, Math.trunc(safeNum(product.pages, 0))),
     },
     snapshot,
+    linkedRecords,
     autoResolvedWantToBuy: resolveResult,
     hardcopySync,
   };

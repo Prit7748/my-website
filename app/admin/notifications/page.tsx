@@ -107,6 +107,13 @@ type ActionResponse = {
   };
 };
 
+type ProgressInfo = {
+  percent: number | null;
+  label: string;
+  currentPhase?: string;
+  hasMoreWork?: boolean;
+};
+
 function safeStr(x: any) {
   return String(x ?? "").trim();
 }
@@ -211,8 +218,8 @@ function buildFallbackData(): NotificationsApiResponse {
     source: "fallback",
     autoRefreshSeconds: 30,
     summary: {
-      totalTasks: 4,
-      pendingTasks: 1,
+      totalTasks: 7,
+      pendingTasks: 3,
       runningTasks: 0,
       needsAttentionTasks: 0,
     },
@@ -228,7 +235,7 @@ function buildFallbackData(): NotificationsApiResponse {
             key: "availability-sync",
             title: "Availability Sync",
             description:
-              "Solved PDF aur official paper flags ke basis par products ki final availability sync karo.",
+              "Solved PDF aur official paper flags ke basis par latest uploaded products ki final availability sync karo.",
             sectionKey: "post-upload-syncs",
             status: "pending",
             pendingCount: 1,
@@ -236,8 +243,11 @@ function buildFallbackData(): NotificationsApiResponse {
             note: "Product upload ke baad sabse pehle ye run karna better rahega.",
             hint: "Agar products recent bulk upload se aaye hain to ye task pending ho sakta hai.",
             stats: [
-              { label: "Mode", value: "Hybrid" },
-              { label: "Priority", value: "High" },
+              { label: "Target SKUs", value: 0 },
+              { label: "Progress", value: "0/0 (0%)" },
+              { label: "Synced", value: 0 },
+              { label: "Failed", value: 0 },
+              { label: "Batch Size", value: 250 },
             ],
             actions: [
               { key: "run", label: "Run Now", intent: "primary" },
@@ -255,8 +265,10 @@ function buildFallbackData(): NotificationsApiResponse {
             autoMode: "hybrid",
             note: "Ye task availability sync ke baad run karna aur bhi safe hota hai.",
             stats: [
-              { label: "Mode", value: "Hybrid" },
-              { label: "Priority", value: "High" },
+              { label: "Phases", value: "0/0 (0%)" },
+              { label: "Result Buckets", value: 0 },
+              { label: "Include PYQ", value: "Yes" },
+              { label: "Include Generic", value: "Yes" },
             ],
             actions: [
               { key: "run", label: "Run Now", intent: "primary" },
@@ -274,8 +286,11 @@ function buildFallbackData(): NotificationsApiResponse {
             autoMode: "hybrid",
             note: "Ye task hardcopy auto-generation integrity ke liye important hai.",
             stats: [
-              { label: "Mode", value: "Hybrid" },
-              { label: "Priority", value: "High" },
+              { label: "Eligible Sources", value: "—" },
+              { label: "Progress", value: "0/0 (0%)" },
+              { label: "Created", value: 0 },
+              { label: "Updated", value: 0 },
+              { label: "Failed", value: 0 },
             ],
             actions: [
               { key: "run", label: "Run Now", intent: "primary" },
@@ -293,11 +308,69 @@ function buildFallbackData(): NotificationsApiResponse {
             autoMode: "manual",
             hint: "Emergency recovery ya bulk upload ke turant baad useful.",
             stats: [
-              { label: "Includes", value: "3 sync tasks" },
-              { label: "Mode", value: "Manual" },
+              { label: "Includes", value: "3 tasks" },
+              { label: "Latest Category", value: "—" },
+              { label: "Progress", value: "0/0 (0%)" },
+            ],
+            actions: [{ key: "run", label: "Run Full Sync", intent: "primary" }],
+          },
+        ],
+      },
+      {
+        key: "availability-rule-repair",
+        title: "Availability Rule Repair",
+        description:
+          'Rule: only details = "Want to Buy", details + official paper = "On Demand", details + solved PDF = "Available". Ye section stale status mismatch ko repair karne ke liye hai.',
+        tone: "violet",
+        tasks: [
+          {
+            key: "availability-rule-sync-all-products",
+            title: "Availability Rule Sync (All Products)",
+            description:
+              "Pure live product catalog par availability rule dobara run karo.",
+            sectionKey: "availability-rule-repair",
+            status: "idle",
+            pendingCount: 0,
+            autoMode: "manual",
+            note: "Ye large repair mode hai. Jab poore catalog ko re-check karna ho tab use karo.",
+            hint: "Manual repair sync. Safe to rerun.",
+            stats: [
+              { label: "Scope", value: "All live products" },
+              { label: "Target Products", value: 0 },
+              { label: "Progress", value: "0/0 (0%)" },
+              { label: "Synced", value: 0 },
+              { label: "Failed", value: 0 },
+              { label: "Available", value: 0 },
+              { label: "On Demand", value: 0 },
+              { label: "Want to Buy", value: 0 },
             ],
             actions: [
-              { key: "run", label: "Run Full Sync", intent: "primary" },
+              { key: "run", label: "Run All Products Sync", intent: "primary" },
+            ],
+          },
+          {
+            key: "availability-rule-sync-want-to-buy-only",
+            title: "Availability Rule Sync (Only Want to Buy Products)",
+            description:
+              'Sirf current "Want to Buy" products ko re-check karo. PYQ mismatch fix karne ke liye ye fastest option hai.',
+            sectionKey: "availability-rule-repair",
+            status: "pending",
+            pendingCount: 1,
+            autoMode: "manual",
+            note: 'Agar PYQ products galat tarah se "Want to Buy" dikh rahe hon, to ye option pehle run karo.',
+            hint: "Manual repair sync. Safe to rerun.",
+            stats: [
+              { label: "Scope", value: 'Only current "Want to Buy" products' },
+              { label: "Target Products", value: 0 },
+              { label: "Progress", value: "0/0 (0%)" },
+              { label: "Synced", value: 0 },
+              { label: "Failed", value: 0 },
+              { label: "Available", value: 0 },
+              { label: "On Demand", value: 0 },
+              { label: "Want to Buy", value: 0 },
+            ],
+            actions: [
+              { key: "run", label: "Run Want to Buy Repair", intent: "primary" },
             ],
           },
         ],
@@ -323,9 +396,7 @@ function buildFallbackData(): NotificationsApiResponse {
               { label: "Type", value: "Admin Reminder" },
               { label: "Expandable", value: "Yes" },
             ],
-            actions: [
-              { key: "refresh", label: "Refresh Status" },
-            ],
+            actions: [{ key: "refresh", label: "Refresh Status" }],
           },
         ],
       },
@@ -336,11 +407,63 @@ function buildFallbackData(): NotificationsApiResponse {
         level: "info",
         title: "Fallback UI active",
         message:
-          "Notifications page design ready hai. Buttons ko full backend se wire karne ke liye next API file lagegi.",
+          "Notifications UI preview mode me loaded hai. Backend data milte hi live tasks yahin show hongi.",
         createdAt: new Date().toISOString(),
       },
     ],
   };
+}
+
+function getTaskStatValue(task: NotificationTask, label: string) {
+  const target = safeStr(label).toLowerCase();
+  const item = (task.stats || []).find(
+    (x) => safeStr(x.label).toLowerCase() === target
+  );
+  return item?.value;
+}
+
+function getTaskProgressInfo(task: NotificationTask): ProgressInfo | null {
+  const progressRaw = getTaskStatValue(task, "Progress");
+  const progressLabel = safeStr(progressRaw);
+
+  if (!progressLabel) return null;
+
+  const percentMatch = progressLabel.match(/(\d+)\s*%/);
+  const percent =
+    percentMatch && Number.isFinite(Number(percentMatch[1]))
+      ? Math.max(0, Math.min(100, Number(percentMatch[1])))
+      : null;
+
+  const currentPhase = safeStr(getTaskStatValue(task, "Current Phase"));
+  const hasMoreWorkValue = safeStr(getTaskStatValue(task, "Has More Work")).toLowerCase();
+
+  return {
+    percent,
+    label: progressLabel,
+    currentPhase: currentPhase || undefined,
+    hasMoreWork:
+      hasMoreWorkValue === "yes"
+        ? true
+        : hasMoreWorkValue === "no"
+        ? false
+        : undefined,
+  };
+}
+
+function progressTrackClasses(status: TaskStatus) {
+  if (status === "completed") return "bg-emerald-100";
+  if (status === "needs_attention") return "bg-rose-100";
+  if (status === "running") return "bg-blue-100";
+  if (status === "pending") return "bg-amber-100";
+  return "bg-slate-100";
+}
+
+function progressBarClasses(status: TaskStatus) {
+  if (status === "completed") return "bg-emerald-500";
+  if (status === "needs_attention") return "bg-rose-500";
+  if (status === "running") return "bg-blue-500";
+  if (status === "pending") return "bg-amber-500";
+  return "bg-slate-400";
 }
 
 export default function AdminNotificationsPage() {
@@ -354,9 +477,7 @@ export default function AdminNotificationsPage() {
   >("info");
 
   const [query, setQuery] = useState("");
-  const [statusFilter, setStatusFilter] = useState<
-    "all" | TaskStatus
-  >("all");
+  const [statusFilter, setStatusFilter] = useState<"all" | TaskStatus>("all");
   const [runningActionKey, setRunningActionKey] = useState("");
 
   async function safeReadJson(res: Response) {
@@ -383,7 +504,7 @@ export default function AdminNotificationsPage() {
         const fallback = buildFallbackData();
         setData(fallback);
         setServerMessage(
-          "Notifications backend route abhi ready nahi hai. Fallback preview UI show ho rahi hai."
+          "Notifications backend temporarily unavailable hai. Fallback preview UI show ho rahi hai."
         );
         setServerMessageType("info");
         return;
@@ -448,10 +569,20 @@ export default function AdminNotificationsPage() {
 
       if (!res.ok || !json?.ok) {
         setServerMessage(
-          safeStr(json?.error) ||
-            "Task backend abhi wire nahi hui. UI design ready hai, next API file required hogi."
+          safeStr(json?.error) || "Task run request fail hui."
         );
         setServerMessageType("error");
+
+        if (Array.isArray(json.sections) && json.sections.length) {
+          setData((prev) => ({
+            ...prev,
+            sections: json.sections,
+            recentEvents: Array.isArray(json.recentEvents)
+              ? json.recentEvents
+              : prev.recentEvents,
+            summary: json.summary || prev.summary,
+          }));
+        }
         return;
       }
 
@@ -473,9 +604,7 @@ export default function AdminNotificationsPage() {
         await loadNotifications(true);
       }
     } catch {
-      setServerMessage(
-        "Task run request fail hui. Backend action route ko next step me connect karna hoga."
-      );
+      setServerMessage("Task run request fail hui. Please retry.");
       setServerMessageType("error");
     } finally {
       setRunningActionKey("");
@@ -488,7 +617,7 @@ export default function AdminNotificationsPage() {
 
   useEffect(() => {
     const seconds = Number(data?.autoRefreshSeconds || 0);
-    if (!seconds || seconds < 10) return;
+    if (!seconds || seconds < 3) return;
 
     const t = setInterval(() => {
       loadNotifications(true);
@@ -544,6 +673,7 @@ export default function AdminNotificationsPage() {
             task.note,
             task.hint,
             section.title,
+            ...(task.stats || []).flatMap((s) => [s.label, String(s.value ?? "")]),
           ]
             .map((x) => safeStr(x).toLowerCase())
             .join(" ");
@@ -562,6 +692,7 @@ export default function AdminNotificationsPage() {
   }, [data, query, statusFilter]);
 
   const recentEvents = Array.isArray(data?.recentEvents) ? data.recentEvents : [];
+  const anyRunningTask = summary.runningTasks > 0;
 
   return (
     <main className="min-h-screen bg-[#F8FAFC] text-slate-900">
@@ -576,8 +707,8 @@ export default function AdminNotificationsPage() {
 
               <h1 className="text-2xl font-extrabold mt-3">Notifications</h1>
               <p className="text-sm text-slate-600 mt-1">
-                Ye page future-ready design par banaya gaya hai. Yahin par post-upload syncs,
-                alerts, repair jobs, reminders aur future admin actions add kiye ja sakte hain.
+                Yahin se aap post-upload syncs, repair jobs, reminders aur future admin actions
+                manage kar sakte ho.
               </p>
             </div>
 
@@ -605,6 +736,22 @@ export default function AdminNotificationsPage() {
               </Link>
             </div>
           </div>
+
+          {anyRunningTask ? (
+            <div className="mt-5 rounded-2xl border border-blue-200 bg-blue-50 p-4">
+              <div className="flex items-start gap-3">
+                <LoaderCircle size={18} className="mt-0.5 shrink-0 animate-spin text-blue-700" />
+                <div>
+                  <div className="text-sm font-extrabold text-blue-900">
+                    Live sync in progress
+                  </div>
+                  <div className="text-sm text-blue-800 mt-1">
+                    Page auto-refresh ho rahi hai, isliye current running progress yahin live update hoti rahegi.
+                  </div>
+                </div>
+              </div>
+            </div>
+          ) : null}
 
           {serverMessage ? (
             <div
@@ -680,7 +827,7 @@ export default function AdminNotificationsPage() {
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
                     className="px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none"
-                    placeholder="Search tasks, alerts, descriptions..."
+                    placeholder="Search tasks, repair syncs, alerts..."
                   />
 
                   <select
@@ -739,148 +886,221 @@ export default function AdminNotificationsPage() {
                       </div>
 
                       <div className="mt-5 grid grid-cols-1 xl:grid-cols-2 gap-4">
-                        {section.tasks.map((task) => (
-                          <div
-                            key={task.key}
-                            className="rounded-2xl border border-white/70 bg-white p-5 shadow-sm"
-                          >
-                            <div className="flex items-start justify-between gap-3">
-                              <div className="min-w-0">
-                                <div className="flex items-center gap-2 flex-wrap">
-                                  <div className="font-extrabold text-slate-900">
-                                    {task.title}
+                        {section.tasks.map((task) => {
+                          const progressInfo = getTaskProgressInfo(task);
+                          const filteredStats = (task.stats || []).filter(
+                            (item) =>
+                              !["progress", "current phase", "has more work"].includes(
+                                safeStr(item.label).toLowerCase()
+                              )
+                          );
+
+                          return (
+                            <div
+                              key={task.key}
+                              className="rounded-2xl border border-white/70 bg-white p-5 shadow-sm"
+                            >
+                              <div className="flex items-start justify-between gap-3">
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <div className="font-extrabold text-slate-900">
+                                      {task.title}
+                                    </div>
+                                    <span
+                                      className={`inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-extrabold ${statusClasses(
+                                        task.status
+                                      )}`}
+                                    >
+                                      {task.status === "running" ? (
+                                        <LoaderCircle
+                                          size={12}
+                                          className="mr-1 animate-spin"
+                                        />
+                                      ) : task.status === "completed" ? (
+                                        <CheckCircle2 size={12} className="mr-1" />
+                                      ) : task.status === "pending" ? (
+                                        <Clock3 size={12} className="mr-1" />
+                                      ) : task.status === "needs_attention" ? (
+                                        <AlertTriangle size={12} className="mr-1" />
+                                      ) : (
+                                        <Sparkles size={12} className="mr-1" />
+                                      )}
+                                      {statusLabel(task.status)}
+                                    </span>
+
+                                    {task.autoMode ? (
+                                      <span className="inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-extrabold bg-slate-100 text-slate-700 border border-slate-200">
+                                        <Settings2 size={12} className="mr-1" />
+                                        {task.autoMode === "auto"
+                                          ? "Auto"
+                                          : task.autoMode === "hybrid"
+                                          ? "Hybrid"
+                                          : "Manual"}
+                                      </span>
+                                    ) : null}
                                   </div>
-                                  <span
-                                    className={`inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-extrabold ${statusClasses(
+
+                                  <div className="text-sm text-slate-600 mt-2 leading-6">
+                                    {task.description}
+                                  </div>
+                                </div>
+
+                                {Number(task.pendingCount || 0) > 0 ? (
+                                  <div className="inline-flex items-center rounded-full px-3 py-1 text-xs font-extrabold bg-amber-100 text-amber-800 border border-amber-200 shrink-0">
+                                    {task.pendingCount} pending
+                                  </div>
+                                ) : null}
+                              </div>
+
+                              {progressInfo ? (
+                                <div className="mt-4 rounded-2xl border border-slate-200 bg-slate-50 p-4">
+                                  <div className="flex items-center justify-between gap-3 flex-wrap">
+                                    <div className="text-xs font-extrabold uppercase tracking-wide text-slate-600">
+                                      Sync Progress
+                                    </div>
+                                    <div className="text-xs font-bold text-slate-700">
+                                      {progressInfo.label}
+                                    </div>
+                                  </div>
+
+                                  <div
+                                    className={`mt-3 h-3 w-full overflow-hidden rounded-full ${progressTrackClasses(
                                       task.status
                                     )}`}
                                   >
-                                    {task.status === "running" ? (
-                                      <LoaderCircle
-                                        size={12}
-                                        className="mr-1 animate-spin"
-                                      />
-                                    ) : task.status === "completed" ? (
-                                      <CheckCircle2 size={12} className="mr-1" />
-                                    ) : task.status === "pending" ? (
-                                      <Clock3 size={12} className="mr-1" />
-                                    ) : task.status === "needs_attention" ? (
-                                      <AlertTriangle size={12} className="mr-1" />
-                                    ) : (
-                                      <Sparkles size={12} className="mr-1" />
-                                    )}
-                                    {statusLabel(task.status)}
-                                  </span>
+                                    <div
+                                      className={`h-full rounded-full transition-all duration-500 ${progressBarClasses(
+                                        task.status
+                                      )} ${
+                                        task.status === "running"
+                                          ? "animate-pulse"
+                                          : ""
+                                      }`}
+                                      style={{
+                                        width: `${Math.max(
+                                          0,
+                                          Math.min(100, Number(progressInfo.percent ?? 0))
+                                        )}%`,
+                                      }}
+                                    />
+                                  </div>
 
-                                  {task.autoMode ? (
-                                    <span className="inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-extrabold bg-slate-100 text-slate-700 border border-slate-200">
-                                      <Settings2 size={12} className="mr-1" />
-                                      {task.autoMode === "auto"
-                                        ? "Auto"
-                                        : task.autoMode === "hybrid"
-                                        ? "Hybrid"
-                                        : "Manual"}
-                                    </span>
-                                  ) : null}
-                                </div>
+                                  {(progressInfo.currentPhase ||
+                                    progressInfo.hasMoreWork !== undefined) && (
+                                    <div className="mt-3 flex items-center justify-between gap-3 flex-wrap text-xs">
+                                      {progressInfo.currentPhase ? (
+                                        <div className="text-slate-700">
+                                          <span className="font-extrabold">Phase:</span>{" "}
+                                          {progressInfo.currentPhase}
+                                        </div>
+                                      ) : (
+                                        <div />
+                                      )}
 
-                                <div className="text-sm text-slate-600 mt-2 leading-6">
-                                  {task.description}
-                                </div>
-                              </div>
-
-                              {Number(task.pendingCount || 0) > 0 ? (
-                                <div className="inline-flex items-center rounded-full px-3 py-1 text-xs font-extrabold bg-amber-100 text-amber-800 border border-amber-200 shrink-0">
-                                  {task.pendingCount} pending
+                                      {progressInfo.hasMoreWork !== undefined ? (
+                                        <div
+                                          className={`font-extrabold ${
+                                            progressInfo.hasMoreWork
+                                              ? "text-amber-700"
+                                              : "text-emerald-700"
+                                          }`}
+                                        >
+                                          {progressInfo.hasMoreWork
+                                            ? "More work pending"
+                                            : "No remaining work"}
+                                        </div>
+                                      ) : null}
+                                    </div>
+                                  )}
                                 </div>
                               ) : null}
-                            </div>
 
-                            {(task.note || task.hint) && (
-                              <div className="mt-4 space-y-2">
-                                {task.note ? (
-                                  <div className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
-                                    <span className="font-extrabold">Note:</span>{" "}
-                                    {task.note}
-                                  </div>
-                                ) : null}
+                              {(task.note || task.hint) && (
+                                <div className="mt-4 space-y-2">
+                                  {task.note ? (
+                                    <div className="rounded-xl border border-blue-200 bg-blue-50 px-3 py-2 text-xs text-blue-800">
+                                      <span className="font-extrabold">Note:</span>{" "}
+                                      {task.note}
+                                    </div>
+                                  ) : null}
 
-                                {task.hint ? (
-                                  <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
-                                    <span className="font-extrabold">Hint:</span>{" "}
-                                    {task.hint}
-                                  </div>
-                                ) : null}
-                              </div>
-                            )}
-
-                            <div className="mt-4 grid grid-cols-2 gap-3">
-                              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                                <div className="text-[11px] font-extrabold uppercase tracking-wide text-slate-500">
-                                  Last Run
+                                  {task.hint ? (
+                                    <div className="rounded-xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700">
+                                      <span className="font-extrabold">Hint:</span>{" "}
+                                      {task.hint}
+                                    </div>
+                                  ) : null}
                                 </div>
-                                <div className="mt-1 text-sm font-bold text-slate-900">
-                                  {formatDateTime(task.lastRunAt)}
-                                </div>
-                              </div>
+                              )}
 
-                              <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
-                                <div className="text-[11px] font-extrabold uppercase tracking-wide text-slate-500">
-                                  Suggested Next
-                                </div>
-                                <div className="mt-1 text-sm font-bold text-slate-900">
-                                  {formatDateTime(task.nextSuggestedAt)}
-                                </div>
-                              </div>
-                            </div>
-
-                            {Array.isArray(task.stats) && task.stats.length ? (
                               <div className="mt-4 grid grid-cols-2 gap-3">
-                                {task.stats.map((item) => (
-                                  <div
-                                    key={`${task.key}-${item.label}`}
-                                    className="rounded-xl border border-slate-200 bg-white p-3"
-                                  >
-                                    <div className="text-[11px] font-extrabold uppercase tracking-wide text-slate-500">
-                                      {item.label}
-                                    </div>
-                                    <div className="mt-1 text-sm font-bold text-slate-900">
-                                      {item.value}
-                                    </div>
+                                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                                  <div className="text-[11px] font-extrabold uppercase tracking-wide text-slate-500">
+                                    Last Run
                                   </div>
-                                ))}
+                                  <div className="mt-1 text-sm font-bold text-slate-900">
+                                    {formatDateTime(task.lastRunAt)}
+                                  </div>
+                                </div>
+
+                                <div className="rounded-xl border border-slate-200 bg-slate-50 p-3">
+                                  <div className="text-[11px] font-extrabold uppercase tracking-wide text-slate-500">
+                                    Suggested Next
+                                  </div>
+                                  <div className="mt-1 text-sm font-bold text-slate-900">
+                                    {formatDateTime(task.nextSuggestedAt)}
+                                  </div>
+                                </div>
                               </div>
-                            ) : null}
 
-                            <div className="mt-5 flex items-center gap-2 flex-wrap">
-                              {(task.actions || []).map((action) => {
-                                const actionKey = `${task.key}__${action.key}`;
-                                const isRunning = runningActionKey === actionKey;
+                              {filteredStats.length ? (
+                                <div className="mt-4 grid grid-cols-2 gap-3">
+                                  {filteredStats.map((item) => (
+                                    <div
+                                      key={`${task.key}-${item.label}`}
+                                      className="rounded-xl border border-slate-200 bg-white p-3"
+                                    >
+                                      <div className="text-[11px] font-extrabold uppercase tracking-wide text-slate-500">
+                                        {item.label}
+                                      </div>
+                                      <div className="mt-1 text-sm font-bold text-slate-900">
+                                        {item.value}
+                                      </div>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : null}
 
-                                return (
-                                  <button
-                                    key={actionKey}
-                                    type="button"
-                                    onClick={() => runTask(task, action)}
-                                    disabled={Boolean(runningActionKey)}
-                                    className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl transition font-extrabold shadow-sm disabled:opacity-60 ${actionButtonClasses(
-                                      action.intent || "secondary"
-                                    )}`}
-                                  >
-                                    {isRunning ? (
-                                      <LoaderCircle size={16} className="animate-spin" />
-                                    ) : action.intent === "primary" ? (
-                                      <Play size={16} />
-                                    ) : (
-                                      <ChevronRight size={16} />
-                                    )}
-                                    {isRunning ? "Running..." : action.label}
-                                  </button>
-                                );
-                              })}
+                              <div className="mt-5 flex items-center gap-2 flex-wrap">
+                                {(task.actions || []).map((action) => {
+                                  const actionKey = `${task.key}__${action.key}`;
+                                  const isRunning = runningActionKey === actionKey;
+
+                                  return (
+                                    <button
+                                      key={actionKey}
+                                      type="button"
+                                      onClick={() => runTask(task, action)}
+                                      disabled={Boolean(runningActionKey)}
+                                      className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl transition font-extrabold shadow-sm disabled:opacity-60 ${actionButtonClasses(
+                                        action.intent || "secondary"
+                                      )}`}
+                                    >
+                                      {isRunning ? (
+                                        <LoaderCircle size={16} className="animate-spin" />
+                                      ) : action.intent === "primary" ? (
+                                        <Play size={16} />
+                                      ) : (
+                                        <ChevronRight size={16} />
+                                      )}
+                                      {isRunning ? "Running..." : action.label}
+                                    </button>
+                                  );
+                                })}
+                              </div>
                             </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     </section>
                   );
@@ -965,6 +1185,15 @@ export default function AdminNotificationsPage() {
                   3. Hardcopy Sync
                   <br />
                   ya directly <b>Run Full Sync</b> chalaya ja sakta hai.
+                  <br />
+                  <br />
+                  Agar stale mismatch ho, especially PYQ products me, to:
+                  <br />
+                  <b>Run Want to Buy Repair</b>
+                  <br />
+                  aur zarurat padne par
+                  <br />
+                  <b>Run All Products Sync</b>.
                 </div>
               </div>
 

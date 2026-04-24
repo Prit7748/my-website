@@ -12,7 +12,10 @@ import { findVaultPdfBySku, safeStr as safeVaultStr } from "@/lib/pdfVault";
 import { syncGeneratedCombosForProductChange } from "@/lib/comboAutoSync";
 import { syncGeneratedHardcopyForProductChange } from "@/lib/hardcopyAutoSync";
 import { resolveRequiredProductPricing } from "@/lib/productPricing";
-import { syncProductAvailabilityBySku } from "@/lib/productAvailability";
+import {
+  syncProductAvailabilityByProductId,
+  syncProductAvailabilityBySku,
+} from "@/lib/productAvailability";
 import {
   normalizeProductCategory,
   deriveIsDigitalFromCategory,
@@ -250,6 +253,41 @@ async function getVaultAutofillForSku(sku: string) {
   return {
     pdfKey: safeVaultStr(vaultFile?.s3Key),
     pages: Math.max(0, Math.trunc(Number(vaultFile?.pageCount || 0))),
+  };
+}
+
+async function runInitialAvailabilitySyncForCreatedProduct(doc: any) {
+  const productId = safeStr(doc?._id);
+  const productSku = safeStr(doc?.sku);
+
+  try {
+    if (productId) {
+      const byId = await syncProductAvailabilityByProductId(productId);
+      if (byId?.ok) return byId;
+    }
+  } catch {
+    // fallback below
+  }
+
+  try {
+    if (productSku) {
+      const bySku = await syncProductAvailabilityBySku(productSku);
+      return bySku;
+    }
+  } catch (error: any) {
+    return {
+      ok: false,
+      reason: safeStr(error?.message || "Initial availability sync failed"),
+      productId,
+      productSku,
+    };
+  }
+
+  return {
+    ok: false,
+    reason: "Initial availability sync skipped",
+    productId,
+    productSku,
   };
 }
 
@@ -882,7 +920,7 @@ export async function POST(req: Request) {
       deletedBy: "",
     });
 
-    const availabilitySync = await syncProductAvailabilityBySku(sku);
+    const availabilitySync = await runInitialAvailabilitySyncForCreatedProduct(doc);
     const freshDoc: any = await Product.findById(doc._id);
 
     const finalDoc = freshDoc || doc;
@@ -932,7 +970,9 @@ export async function POST(req: Request) {
           pagesFilled: Number(finalDoc.pages || 0),
         },
         availabilityAutomation: {
-          mode: "derived-and-synced",
+          mode: "derived-and-synced-on-create",
+          syncOk: Boolean(availabilitySync?.ok),
+          syncReason: safeStr(availabilitySync?.reason || ""),
           finalAvailability:
             getAvailabilityAfterSync(availabilitySync) || safeStr(finalDoc.availability || ""),
         },

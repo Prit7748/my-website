@@ -2,10 +2,15 @@ import { NextRequest, NextResponse } from "next/server";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 function safeStr(x: any) {
   return String(x ?? "").trim();
+}
+
+function safeNum(x: any, def = 0) {
+  const n = Number(x);
+  return Number.isFinite(n) ? Math.trunc(n) : def;
 }
 
 function isCronAuthorized(req: NextRequest) {
@@ -29,6 +34,28 @@ function getBaseUrl(req: NextRequest) {
   return safeStr(req.nextUrl.origin).replace(/\/+$/, "");
 }
 
+async function safeReadJson(res: Response) {
+  const text = await res.text();
+  if (!text) {
+    return {
+      text: "",
+      json: null,
+    };
+  }
+
+  try {
+    return {
+      text,
+      json: JSON.parse(text),
+    };
+  } catch {
+    return {
+      text,
+      json: null,
+    };
+  }
+}
+
 async function runAutoNotifications(req: NextRequest) {
   if (!isCronAuthorized(req)) {
     return NextResponse.json(
@@ -46,6 +73,18 @@ async function runAutoNotifications(req: NextRequest) {
   }
 
   const cronSecret = safeStr(process.env.CRON_SECRET);
+  if (!cronSecret) {
+    return NextResponse.json(
+      { ok: false, error: "CRON_SECRET missing" },
+      { status: 500 }
+    );
+  }
+
+  const timeoutMs = Math.max(30_000, safeNum(process.env.NOTIFICATIONS_AUTO_RUN_TIMEOUT_MS, 290_000));
+  const controller = new AbortController();
+  const timeout = setTimeout(() => {
+    controller.abort("Cron upstream timeout");
+  }, timeoutMs);
 
   try {
     const res = await fetch(`${baseUrl}/api/admin/notifications/tasks`, {
@@ -53,22 +92,18 @@ async function runAutoNotifications(req: NextRequest) {
       headers: {
         Authorization: `Bearer ${cronSecret}`,
         "Content-Type": "application/json",
+        "Cache-Control": "no-store",
       },
       body: JSON.stringify({
         taskKey: "auto-run",
         actionKey: "run",
       }),
       cache: "no-store",
+      signal: controller.signal,
     });
 
-    const text = await res.text();
-
-    let data: any = null;
-    try {
-      data = text ? JSON.parse(text) : null;
-    } catch {
-      data = null;
-    }
+    const { text, json } = await safeReadJson(res);
+    const data: any = json;
 
     if (!res.ok) {
       return NextResponse.json(
@@ -79,6 +114,7 @@ async function runAutoNotifications(req: NextRequest) {
             safeStr(text) ||
             "Notifications auto-run failed",
           upstreamStatus: res.status,
+          baseUrl,
         },
         { status: 500 }
       );
@@ -90,19 +126,30 @@ async function runAutoNotifications(req: NextRequest) {
         message:
           safeStr(data?.message) || "Notifications auto-run executed.",
         upstreamStatus: res.status,
+        baseUrl,
         result: data,
       },
       { status: 200 }
     );
   } catch (error: any) {
+    const reason = safeStr(error?.message || error || "Notifications auto-run request failed");
+    const isAbort =
+      safeStr(error?.name).toLowerCase() === "aborterror" ||
+      reason.toLowerCase().includes("timeout") ||
+      reason.toLowerCase().includes("abort");
+
     return NextResponse.json(
       {
         ok: false,
-        error:
-          safeStr(error?.message) || "Notifications auto-run request failed",
+        error: isAbort
+          ? `Notifications auto-run timed out after ${timeoutMs}ms`
+          : reason || "Notifications auto-run request failed",
+        baseUrl,
       },
       { status: 500 }
     );
+  } finally {
+    clearTimeout(timeout);
   }
 }
 
