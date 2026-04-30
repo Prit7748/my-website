@@ -34,6 +34,7 @@ import {
   Type,
   Palette,
   BellRing,
+  Youtube,
 } from "lucide-react";
 import {
   ADMIN_DASHBOARD_TILE_STORAGE_KEY,
@@ -149,6 +150,7 @@ const DEFAULT_TILE_TONES: Record<AdminDashboardTileKey, NonDefaultTone> = {
   orders: "gray",
   "order-reports": "emerald",
   analytics: "fuchsia",
+  youtube: "red",
   blogs: "gray",
   "admin-management": "gray",
   "site-settings": "gray",
@@ -213,7 +215,6 @@ function buildSettingsFromRows(rows: EditorRow[]): AdminDashboardTileSettings {
   const fixedLastRows = rows.filter((row) => row.fixedLast);
 
   const order = [...normalRows, ...fixedLastRows].map((row) => row.key);
-
   const hiddenKeys = rows.filter((row) => row.hidden).map((row) => row.key);
 
   const labelOverrides: Partial<Record<AdminDashboardTileKey, string>> = {};
@@ -743,6 +744,20 @@ export default function DashboardTileOrderPage() {
             <div className={`font-extrabold ${tone.title}`}>{getDisplayTitle(row)}</div>
             <div className="text-xs text-slate-600 mt-1">
               SEO, source buckets, UTM, referrers & attribution report
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    if (row.key === "youtube") {
+      return (
+        <div className="flex items-center gap-3">
+          <Youtube className={tone.icon} />
+          <div>
+            <div className={`font-extrabold ${tone.title}`}>{getDisplayTitle(row)}</div>
+            <div className="text-xs text-slate-600 mt-1">
+              Generate video title, description, pinned comment & thumbnail
             </div>
           </div>
         </div>

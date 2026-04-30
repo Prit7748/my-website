@@ -8,6 +8,7 @@ export type AdminDashboardTileKey =
   | "orders"
   | "order-reports"
   | "analytics"
+  | "youtube"
   | "blogs"
   | "admin-management"
   | "site-settings"
@@ -129,6 +130,12 @@ export const ADMIN_DASHBOARD_TILES: AdminDashboardTileConfig[] = [
     defaultTitle: "Analytics",
     description: "SEO, source buckets, UTM, referrers & attribution report",
     href: "/admin/analytics",
+  },
+  {
+    key: "youtube",
+    defaultTitle: "YouTube",
+    description: "Generate video title, description, pinned comment & thumbnail",
+    href: "/admin/youtube",
   },
   {
     key: "blogs",

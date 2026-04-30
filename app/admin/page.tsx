@@ -29,6 +29,7 @@ import {
   Clock3,
   FileSpreadsheet,
   BellRing,
+  Youtube,
 } from "lucide-react";
 import {
   ADMIN_DASHBOARD_TILE_STORAGE_KEY,
@@ -134,6 +135,7 @@ const DEFAULT_TILE_TONES: Record<AdminDashboardTileKey, NonDefaultTone> = {
   orders: "gray",
   "order-reports": "emerald",
   analytics: "fuchsia",
+  youtube: "red",
   blogs: "gray",
   "admin-management": "gray",
   "site-settings": "gray",
@@ -579,6 +581,15 @@ export default function AdminPage() {
         "/admin/analytics",
         TrendingUp,
         "SEO, source buckets, UTM, referrers & attribution report"
+      );
+    }
+
+    if (tile.key === "youtube") {
+      return renderBasicTile(
+        tile,
+        "/admin/youtube",
+        Youtube,
+        "Video title, description, pinned comment & thumbnail"
       );
     }
 
