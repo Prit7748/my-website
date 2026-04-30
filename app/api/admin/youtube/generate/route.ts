@@ -8,13 +8,12 @@ import {
   buildYoutubeGeneratedPayload,
   getYoutubeContentKindFromCategory,
 } from "@/lib/youtubeContent";
-import {
-  DEFAULT_YOUTUBE_SITE_BASE_URL,
-  DEFAULT_YOUTUBE_SITE_NAME,
-} from "@/lib/youtubeTokens";
+import { DEFAULT_YOUTUBE_SITE_NAME } from "@/lib/youtubeTokens";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+const LIVE_SITE_BASE_URL = "https://www.istudentsportal.com";
 
 function safeStr(x: any) {
   return String(x ?? "").trim();
@@ -28,13 +27,17 @@ function normalizeSku(input: any) {
   return safeStr(input).toUpperCase().replace(/\s+/g, "");
 }
 
-function normalizeSiteBaseUrl(input?: string) {
-  const raw =
-    safeStr(input) ||
-    safeStr(process.env.NEXT_PUBLIC_SITE_URL) ||
-    DEFAULT_YOUTUBE_SITE_BASE_URL;
+function normalizeYoutubeSiteBaseUrl(input?: string) {
+  const raw = safeStr(input).replace(/\/+$/, "");
 
-  return raw.replace(/\/+$/, "") || DEFAULT_YOUTUBE_SITE_BASE_URL;
+  if (
+    raw === "https://www.istudentsportal.com" ||
+    raw === "https://istudentsportal.com"
+  ) {
+    return raw;
+  }
+
+  return LIVE_SITE_BASE_URL;
 }
 
 function getSearchPayloadFromReq(req: NextRequest, body?: any) {
@@ -58,7 +61,7 @@ function getSearchPayloadFromReq(req: NextRequest, body?: any) {
       safeStr(body?.siteName) ||
       safeStr(url.searchParams.get("siteName")) ||
       DEFAULT_YOUTUBE_SITE_NAME,
-    siteBaseUrl: normalizeSiteBaseUrl(
+    siteBaseUrl: normalizeYoutubeSiteBaseUrl(
       safeStr(body?.siteBaseUrl) || safeStr(url.searchParams.get("siteBaseUrl"))
     ),
   };
@@ -191,7 +194,7 @@ async function generateForRequest(req: NextRequest, body?: any) {
     const generated = await buildYoutubeGeneratedPayload({
       product,
       siteName: payload.siteName,
-      siteBaseUrl: payload.siteBaseUrl,
+      siteBaseUrl: LIVE_SITE_BASE_URL,
     });
 
     return NextResponse.json(
