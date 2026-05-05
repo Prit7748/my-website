@@ -327,6 +327,36 @@ function formatDateTime(input?: string | null) {
   return d.toLocaleString("en-IN");
 }
 
+function decodeSafeFileName(input: string) {
+  const raw = safeStr(input);
+
+  if (!raw) return "";
+
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function getFileNameFromContentDisposition(disposition: string) {
+  const header = safeStr(disposition);
+
+  if (!header) return "";
+
+  const encodedMatch = header.match(/filename\*=UTF-8''([^;]+)/i);
+  if (encodedMatch?.[1]) {
+    return decodeSafeFileName(encodedMatch[1].replace(/^"|"$/g, ""));
+  }
+
+  const normalMatch = header.match(/filename="?([^";]+)"?/i);
+  if (normalMatch?.[1]) {
+    return decodeSafeFileName(normalMatch[1].replace(/^"|"$/g, ""));
+  }
+
+  return "";
+}
+
 function isFinalJobStatus(status: string) {
   const s = safeStr(status);
   return (
@@ -490,40 +520,6 @@ function buildFallbackTemplateMap(): Record<string, DefaultTemplateItem> {
       publishNow: false,
     },
   };
-}
-
-function csvCell(input: any) {
-  const raw = safeStr(input).replace(/\r?\n/g, " ");
-  const escaped = raw.replace(/"/g, '""');
-  return `"${escaped}"`;
-}
-
-function buildRecentFailuresCsv(rows: BulkJobFailureRow[]) {
-  const header = [
-    "Item Index",
-    "Row Number",
-    "Batch Number",
-    "Identifier",
-    "SKU",
-    "Status",
-    "Reason",
-    "Created At",
-  ];
-
-  const body = rows.map((row) =>
-    [
-      csvCell(row?.itemIndex),
-      csvCell(row?.rowNumber),
-      csvCell(row?.batchNumber),
-      csvCell(row?.identifier),
-      csvCell(row?.sku),
-      csvCell(row?.status),
-      csvCell(row?.reason),
-      csvCell(row?.createdAt),
-    ].join(",")
-  );
-
-  return [header.map(csvCell).join(","), ...body].join("\n");
 }
 
 function getDetailedStage(summary: Record<string, any> | undefined | null): DetailedStage {
@@ -727,6 +723,7 @@ export default function BulkDetailsPage() {
   const [isResumingJob, setIsResumingJob] = useState(false);
   const [isRestartingJob, setIsRestartingJob] = useState(false);
   const [isDeletingJob, setIsDeletingJob] = useState(false);
+  const [isDownloadingFailuresCsv, setIsDownloadingFailuresCsv] = useState(false);
   const [defaultsHydrated, setDefaultsHydrated] = useState(false);
 
   const [isSavedJobsOpen, setIsSavedJobsOpen] = useState(false);
@@ -905,6 +902,7 @@ export default function BulkDetailsPage() {
       !isCancellingJob &&
       !isRestartingJob &&
       !isDeletingJob &&
+      !isDownloadingFailuresCsv &&
       !activeJobExists &&
       canSubmit
     );
@@ -916,6 +914,7 @@ export default function BulkDetailsPage() {
     isCancellingJob,
     isRestartingJob,
     isDeletingJob,
+    isDownloadingFailuresCsv,
     activeJobExists,
     canSubmit,
   ]);
@@ -966,7 +965,8 @@ export default function BulkDetailsPage() {
         !isResumingJob &&
         !isCancellingJob &&
         !isRestartingJob &&
-        !isDeletingJob
+        !isDeletingJob &&
+        !isDownloadingFailuresCsv
     );
   }, [
     currentJob,
@@ -977,6 +977,7 @@ export default function BulkDetailsPage() {
     isCancellingJob,
     isRestartingJob,
     isDeletingJob,
+    isDownloadingFailuresCsv,
   ]);
 
   const canPauseSavedJob = useMemo(() => {
@@ -988,7 +989,8 @@ export default function BulkDetailsPage() {
         !isResumingJob &&
         !isCancellingJob &&
         !isRestartingJob &&
-        !isDeletingJob
+        !isDeletingJob &&
+        !isDownloadingFailuresCsv
     );
   }, [
     currentJob,
@@ -998,6 +1000,7 @@ export default function BulkDetailsPage() {
     isCancellingJob,
     isRestartingJob,
     isDeletingJob,
+    isDownloadingFailuresCsv,
   ]);
 
   const canCancelSavedJob = useMemo(() => {
@@ -1005,9 +1008,10 @@ export default function BulkDetailsPage() {
       currentJob &&
         !isCancellingJob &&
         !isRestartingJob &&
-        !isDeletingJob
+        !isDeletingJob &&
+        !isDownloadingFailuresCsv
     );
-  }, [currentJob, isCancellingJob, isRestartingJob, isDeletingJob]);
+  }, [currentJob, isCancellingJob, isRestartingJob, isDeletingJob, isDownloadingFailuresCsv]);
 
   const canRestartSavedJob = useMemo(() => {
     return Boolean(
@@ -1017,7 +1021,8 @@ export default function BulkDetailsPage() {
         !isResumingJob &&
         !isCancellingJob &&
         !isRestartingJob &&
-        !isDeletingJob
+        !isDeletingJob &&
+        !isDownloadingFailuresCsv
     );
   }, [
     currentJob,
@@ -1027,6 +1032,7 @@ export default function BulkDetailsPage() {
     isCancellingJob,
     isRestartingJob,
     isDeletingJob,
+    isDownloadingFailuresCsv,
   ]);
 
   const canDeleteSavedJob = useMemo(() => {
@@ -1037,7 +1043,8 @@ export default function BulkDetailsPage() {
         !isResumingJob &&
         !isCancellingJob &&
         !isRestartingJob &&
-        !isDeletingJob
+        !isDeletingJob &&
+        !isDownloadingFailuresCsv
     );
   }, [
     currentJob,
@@ -1047,6 +1054,7 @@ export default function BulkDetailsPage() {
     isCancellingJob,
     isRestartingJob,
     isDeletingJob,
+    isDownloadingFailuresCsv,
   ]);
 
   const prevalidationPercent = useMemo(
@@ -1674,28 +1682,73 @@ export default function BulkDetailsPage() {
     }
   }
 
-  function downloadRecentFailuresCsv() {
-    const rows = Array.isArray(currentJob?.recentFailures)
-      ? currentJob?.recentFailures
-      : [];
+  async function downloadRecentFailuresCsv() {
+    const jobId = safeStr(currentJob?._id);
 
-    if (!rows.length) {
-      alert("Abhi download ke liye recent failures available nahi hain.");
+    if (!jobId) {
+      alert("Download ke liye valid job available nahi hai.");
       return;
     }
 
-    const csv = buildRecentFailuresCsv(rows);
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download =
-      safeStr(currentJob?.downloadFileName || "bulk-product-details-failures") +
-      ".csv";
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    if (!safeNum(currentJob?.failuresCount, 0)) {
+      alert("Abhi download ke liye failed rows available nahi hain.");
+      return;
+    }
+
+    setIsDownloadingFailuresCsv(true);
+    resetMessages();
+
+    try {
+      const res = await fetch(
+        `/api/admin/products/bulk/details/jobs/${encodeURIComponent(
+          jobId
+        )}/failures-csv?scope=failed`,
+        {
+          method: "GET",
+          credentials: "include",
+          cache: "no-store",
+        }
+      );
+
+      if (!res.ok) {
+        const data = await safeReadJson(res);
+        throw new Error(
+          safeStr(data?.error || data?.message || "Failed CSV download failed")
+        );
+      }
+
+      const blob = await res.blob();
+      const headerFileName = getFileNameFromContentDisposition(
+        safeStr(res.headers.get("content-disposition"))
+      );
+
+      const fallbackFileName =
+        safeStr(currentJob?.downloadFileName || "bulk-product-details-failed-products")
+          .replace(/\.csv$/i, "") + ".csv";
+
+      const fileName = headerFileName || fallbackFileName;
+
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+
+      a.href = url;
+      a.download = fileName;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+
+      URL.revokeObjectURL(url);
+
+      setServerMessage(
+        "Failed products CSV download start ho gaya hai. Isme current job ke all failed rows include honge."
+      );
+      setServerMessageType("success");
+    } catch (error: any) {
+      setServerMessage(safeStr(error?.message || "Failed CSV download failed"));
+      setServerMessageType("error");
+    } finally {
+      setIsDownloadingFailuresCsv(false);
+    }
   }
 
   useEffect(() => {
@@ -1719,6 +1772,7 @@ export default function BulkDetailsPage() {
       isResumingJob ||
       isRestartingJob ||
       isDeletingJob ||
+      isDownloadingFailuresCsv ||
       isLoadingSavedJobs ||
       isSavedJobsActionRunning;
 
@@ -1740,6 +1794,7 @@ export default function BulkDetailsPage() {
     isResumingJob,
     isRestartingJob,
     isDeletingJob,
+    isDownloadingFailuresCsv,
     isLoadingSavedJobs,
     isSavedJobsActionRunning,
   ]);
@@ -2447,11 +2502,20 @@ export default function BulkDetailsPage() {
                   <button
                     type="button"
                     onClick={downloadRecentFailuresCsv}
-                    disabled={!recentFailures.length}
+                    disabled={
+                      isDownloadingFailuresCsv ||
+                      !safeNum(currentJob?.failuresCount, 0)
+                    }
                     className="inline-flex items-center gap-2 px-4 py-3 rounded-2xl bg-white hover:bg-gray-50 border border-gray-200 transition font-extrabold disabled:opacity-60"
                   >
-                    <Download size={18} />
-                    Download Failures CSV
+                    {isDownloadingFailuresCsv ? (
+                      <LoaderCircle size={18} className="animate-spin" />
+                    ) : (
+                      <Download size={18} />
+                    )}
+                    {isDownloadingFailuresCsv
+                      ? "Downloading..."
+                      : "Download Failed Products CSV"}
                   </button>
                 </div>
 
