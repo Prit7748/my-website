@@ -16,8 +16,8 @@ function safeStr(value: unknown) {
   return String(value ?? "").trim();
 }
 
-function buildBucketHostname() {
-  const bucket = safeStr(publicBucket);
+function buildBucketHostname(bucketName?: string) {
+  const bucket = safeStr(bucketName || publicBucket);
   if (!bucket) return "";
   return `${bucket}.s3.${awsRegion}.amazonaws.com`;
 }
@@ -36,47 +36,48 @@ function hostFromUrl(input: string) {
 const publicBaseHostname = hostFromUrl(publicBaseUrl);
 const publicBucketHostname = buildBucketHostname();
 
-const remotePatterns: NonNullable<NextConfig["images"]>["remotePatterns"] = [
-  {
-    protocol: "https",
-    hostname: "istudentsportal.com",
-    pathname: "/**",
-  },
-  {
-    protocol: "https",
-    hostname: "www.istudentsportal.com",
-    pathname: "/**",
-  },
-  {
-    protocol: "https",
-    hostname: "res.cloudinary.com",
-    pathname: "/**",
-  },
-];
+const staticAllowedImageHostnames = [
+  "istudentsportal.com",
+  "www.istudentsportal.com",
+  "res.cloudinary.com",
 
-if (publicBaseHostname) {
-  remotePatterns.push({
-    protocol: "https",
-    hostname: publicBaseHostname,
-    pathname: "/**",
-  });
-}
+  // Current live product image bucket
+  "istudentsportal-images.s3.ap-south-1.amazonaws.com",
 
-if (
-  publicBucketHostname &&
-  publicBucketHostname !== publicBaseHostname
-) {
-  remotePatterns.push({
+  publicBaseHostname,
+  publicBucketHostname,
+].filter(Boolean);
+
+const uniqueHostnames = Array.from(new Set(staticAllowedImageHostnames));
+
+const remotePatterns: NonNullable<NextConfig["images"]>["remotePatterns"] =
+  uniqueHostnames.map((hostname) => ({
     protocol: "https",
-    hostname: publicBucketHostname,
+    hostname,
     pathname: "/**",
-  });
-}
+  }));
+
+remotePatterns.push({
+  protocol: "https",
+  hostname: "*.s3.ap-south-1.amazonaws.com",
+  pathname: "/**",
+});
 
 const nextConfig: NextConfig = {
   images: {
-    unoptimized: false,
+    /*
+      IMPORTANT LIVE FIX:
+      Browser console me images /_next/image?... se load ho rahi thi
+      aur Vercel live deployment par 402 Payment Required aa raha tha.
+      Iska matlab Next/Vercel Image Optimization quota/billing block ho raha hai.
+
+      unoptimized: true karne se product images direct S3 URL se load hongi,
+      /_next/image optimizer use nahi hoga, aur 402 issue solve hoga.
+    */
+    unoptimized: true,
+
     formats: ["image/avif", "image/webp"],
+
     dangerouslyAllowSVG: true,
     contentSecurityPolicy: "default-src 'self'; script-src 'none'; sandbox;",
 
