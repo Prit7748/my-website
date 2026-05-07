@@ -13,6 +13,7 @@ import {
 } from "@/lib/thumbUrls";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
 function safeStr(x: any) {
   return String(x ?? "").trim();
@@ -25,7 +26,9 @@ function safeNum(x: any, def = 0) {
 
 function slugFromRequest(req: Request, params?: any) {
   const pSlug = params?.slug;
-  if (typeof pSlug === "string" && pSlug.trim()) return decodeURIComponent(pSlug).trim();
+  if (typeof pSlug === "string" && pSlug.trim()) {
+    return decodeURIComponent(pSlug).trim();
+  }
 
   const url = new URL(req.url);
   const parts = url.pathname.split("/").filter(Boolean);
@@ -45,11 +48,13 @@ function fileNameOf(urlOrPath: string) {
 
 function normalizeImagesToUrls(images: any) {
   const arr = Array.isArray(images) ? images : [];
+
   if (!arr.length) {
     return { urls: [] as string[], thumbUrl: "", quickUrl: "" };
   }
 
   const allStrings = arr.every((x: any) => typeof x === "string");
+
   if (allStrings) {
     const urls = Array.from(
       new Set(
@@ -57,7 +62,9 @@ function normalizeImagesToUrls(images: any) {
           .map((s: string) => safeStr(s))
           .filter(Boolean)
       )
-    ).sort((a, b) => fileNameOf(a).localeCompare(fileNameOf(b), undefined, { numeric: true }));
+    ).sort((a, b) =>
+      fileNameOf(a).localeCompare(fileNameOf(b), undefined, { numeric: true })
+    );
 
     return {
       urls,
@@ -72,7 +79,13 @@ function normalizeImagesToUrls(images: any) {
     .filter(Boolean);
 
   const objects = arr
-    .filter((x: any) => x && typeof x === "object" && typeof x.url === "string" && x.url.trim())
+    .filter(
+      (x: any) =>
+        x &&
+        typeof x === "object" &&
+        typeof x.url === "string" &&
+        x.url.trim()
+    )
     .sort((a: any, b: any) => {
       const ak = safeStr(a.sortKey || a.filename || fileNameOf(a.url)).toLowerCase();
       const bk = safeStr(b.sortKey || b.filename || fileNameOf(b.url)).toLowerCase();
@@ -82,7 +95,7 @@ function normalizeImagesToUrls(images: any) {
     .filter(Boolean);
 
   const urls = Array.from(new Set([...strings, ...objects])).sort((a, b) =>
-    fileNameOf(a).localeCompare(b, undefined, { numeric: true })
+    fileNameOf(a).localeCompare(fileNameOf(b), undefined, { numeric: true })
   );
 
   return {
@@ -90,6 +103,54 @@ function normalizeImagesToUrls(images: any) {
     thumbUrl: urls[0] || "",
     quickUrl: urls[1] || urls[0] || "",
   };
+}
+
+function isGuessPaperProduct(product: any) {
+  const category = safeStr(product?.category).toLowerCase();
+
+  return (
+    category === "guess papers" ||
+    category === "guess paper" ||
+    category.includes("guess")
+  );
+}
+
+function firstCourseCode(product: any) {
+  const courseCodes = Array.isArray(product?.courseCodes) ? product.courseCodes : [];
+  return safeStr(courseCodes[0]);
+}
+
+function buildGuessPaperMasterThumbUrl(product: any) {
+  const params = new URLSearchParams();
+
+  params.set("subjectCode", safeStr(product?.subjectCode));
+  params.set(
+    "subjectTitle",
+    safeStr(
+      product?.subjectTitleEn ||
+        product?.subjectTitleHi ||
+        product?.subjectTitle ||
+        product?.title
+    )
+  );
+  params.set("courseCode", firstCourseCode(product));
+  params.set("session", safeStr(product?.session || "Latest"));
+  params.set("language", safeStr(product?.language));
+  params.set("title", safeStr(product?.title));
+  params.set("category", "Guess Papers");
+  params.set("type", "guess-paper");
+
+  const version = safeStr(product?.updatedAt || product?._id || product?.id);
+  if (version) params.set("v", version);
+
+  /*
+    Temporary safe fallback:
+    Aapke project me already /api/thumb/pyq route present hai.
+    Jab tak separate /api/thumb/guess-paper route nahi banate,
+    Guess Papers ke liye PYQ thumbnail engine ko reuse kiya ja raha hai,
+    taki live site par blank image na aaye.
+  */
+  return `/api/thumb/pyq?${params.toString()}`;
 }
 
 function buildMasterThumbnailFallback(product: any) {
@@ -103,6 +164,10 @@ function buildMasterThumbnailFallback(product: any) {
 
   if (isQuestionPaperProduct(product)) {
     return buildQuestionPaperMasterThumbUrl(product);
+  }
+
+  if (isGuessPaperProduct(product)) {
+    return buildGuessPaperMasterThumbUrl(product);
   }
 
   return "";
@@ -124,8 +189,13 @@ async function getOnDemandSalesEnabled() {
 function resolveAvailability(rawAvailability: string, onDemandSalesEnabled: boolean) {
   const a = normAvail(rawAvailability);
 
-  if (a === "out_of_stock" || a === "outofstock" || a === "out-of-stock") return "want_to_buy";
-  if (a === "want_to_buy" || a === "wanttobuy" || a === "want-to-buy") return "want_to_buy";
+  if (a === "out_of_stock" || a === "outofstock" || a === "out-of-stock") {
+    return "want_to_buy";
+  }
+
+  if (a === "want_to_buy" || a === "wanttobuy" || a === "want-to-buy") {
+    return "want_to_buy";
+  }
 
   if (a === "coming_soon" || a === "comingsoon" || a === "coming-soon") {
     return onDemandSalesEnabled ? "on_demand" : "want_to_buy";
@@ -135,7 +205,9 @@ function resolveAvailability(rawAvailability: string, onDemandSalesEnabled: bool
     return onDemandSalesEnabled ? "on_demand" : "want_to_buy";
   }
 
-  if (a === "available" || a === "in_stock" || a === "instock" || a === "") return "available";
+  if (a === "available" || a === "in_stock" || a === "instock" || a === "") {
+    return "available";
+  }
 
   return "available";
 }
@@ -151,7 +223,15 @@ export async function GET(
     const slug = safeStr(slugFromRequest(req, resolvedParams));
 
     if (!slug) {
-      return NextResponse.json({ error: "Invalid slug" }, { status: 400 });
+      return NextResponse.json(
+        { error: "Invalid slug" },
+        {
+          status: 400,
+          headers: {
+            "Cache-Control": "no-store",
+          },
+        }
+      );
     }
 
     const filter: any = {
@@ -171,6 +251,7 @@ export async function GET(
         category: 1,
 
         subjectCode: 1,
+        subjectTitle: 1,
         subjectTitleHi: 1,
         subjectTitleEn: 1,
         courseCodes: 1,
@@ -205,12 +286,23 @@ export async function GET(
       .lean();
 
     if (!p) {
-      return NextResponse.json({ error: "Not found", slug }, { status: 404 });
+      return NextResponse.json(
+        { error: "Not found", slug },
+        {
+          status: 404,
+          headers: {
+            "Cache-Control": "no-store",
+          },
+        }
+      );
     }
 
     const onDemandSalesEnabled = await getOnDemandSalesEnabled();
     const rawAvailability = safeStr(p.availability || "");
-    const effectiveAvailability = resolveAvailability(rawAvailability, onDemandSalesEnabled);
+    const effectiveAvailability = resolveAvailability(
+      rawAvailability,
+      onDemandSalesEnabled
+    );
 
     const resolvedTiming = await resolveOnDemandTimingForProduct({
       category: p.category,
@@ -220,6 +312,7 @@ export async function GET(
     });
 
     const { urls, thumbUrl, quickUrl } = normalizeImagesToUrls(p.images);
+
     const masterThumbFallback = buildMasterThumbnailFallback({
       _id: p._id ? String(p._id) : "",
       id: p._id ? String(p._id) : "",
@@ -227,9 +320,11 @@ export async function GET(
       title: safeStr(p.title),
       category: safeStr(p.category),
       subjectCode: safeStr(p.subjectCode),
+      subjectTitle: safeStr(p.subjectTitle),
       subjectTitleHi: safeStr(p.subjectTitleHi),
       subjectTitleEn: safeStr(p.subjectTitleEn),
       courseCodes: Array.isArray(p.courseCodes) ? p.courseCodes : [],
+      courseTitles: Array.isArray(p.courseTitles) ? p.courseTitles : [],
       session: safeStr(p.session),
       updatedAt: p.updatedAt || "",
       language: safeStr(p.language),
@@ -238,6 +333,7 @@ export async function GET(
 
     const finalThumb = safeStr(p.thumbnailUrl) || thumbUrl || masterThumbFallback;
     const finalQuick = safeStr(p.quickUrl) || quickUrl || finalThumb;
+    const finalImages = urls.length ? urls : finalThumb ? [finalThumb] : [];
 
     return NextResponse.json(
       {
@@ -249,6 +345,7 @@ export async function GET(
           category: safeStr(p.category),
 
           subjectCode: safeStr(p.subjectCode),
+          subjectTitle: safeStr(p.subjectTitle),
           subjectTitleHi: safeStr(p.subjectTitleHi),
           subjectTitleEn: safeStr(p.subjectTitleEn),
           courseCodes: Array.isArray(p.courseCodes) ? p.courseCodes : [],
@@ -258,7 +355,10 @@ export async function GET(
           language: safeStr(p.language),
 
           price: Number(p.price || 0),
-          oldPrice: p.oldPrice !== undefined && p.oldPrice !== null ? Number(p.oldPrice) : null,
+          oldPrice:
+            p.oldPrice !== undefined && p.oldPrice !== null
+              ? Number(p.oldPrice)
+              : null,
 
           shortDesc: safeStr(p.shortDesc),
           descriptionHtml: safeStr(p.descriptionHtml),
@@ -276,7 +376,10 @@ export async function GET(
           ),
           onDemandNote: safeStr(resolvedTiming?.onDemandNote || p?.onDemandNote),
 
-          rawDeliverWithinMinutes: Math.max(1, safeNum(p?.deliverWithinMinutes, 20)),
+          rawDeliverWithinMinutes: Math.max(
+            1,
+            safeNum(p?.deliverWithinMinutes, 20)
+          ),
           rawOnDemandNote: safeStr(p?.onDemandNote),
 
           onDemandTimingSource: safeStr(resolvedTiming?.source),
@@ -290,7 +393,7 @@ export async function GET(
           pdfUrl: safeStr(p.pdfUrl),
           pdfKey: safeStr(p.pdfKey),
 
-          images: urls,
+          images: finalImages,
           thumbUrl: finalThumb,
           quickUrl: finalQuick,
           thumbnailUrl: finalThumb,
@@ -308,7 +411,10 @@ export async function GET(
     );
   } catch (e: any) {
     return NextResponse.json(
-      { error: "Server error", details: e?.message || "unknown" },
+      {
+        error: "Server error",
+        details: e?.message || "unknown",
+      },
       {
         status: 500,
         headers: {

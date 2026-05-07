@@ -124,7 +124,9 @@ function normalizeImagesToUrls(images: any) {
           .map((s: string) => safeStr(s))
           .filter(Boolean)
       )
-    ).sort((a, b) => fileNameOf(a).localeCompare(fileNameOf(b), undefined, { numeric: true }));
+    ).sort((a, b) =>
+      fileNameOf(a).localeCompare(fileNameOf(b), undefined, { numeric: true })
+    );
 
     const thumbUrl = urls[0] || "";
     const quickUrl = urls[1] || urls[0] || "";
@@ -137,7 +139,13 @@ function normalizeImagesToUrls(images: any) {
     .filter(Boolean);
 
   const objects = arr
-    .filter((x: any) => x && typeof x === "object" && typeof x.url === "string" && x.url.trim())
+    .filter(
+      (x: any) =>
+        x &&
+        typeof x === "object" &&
+        typeof x.url === "string" &&
+        x.url.trim()
+    )
     .sort((a: any, b: any) => {
       const ak = safeStr(a.sortKey || a.filename || fileNameOf(a.url)).toLowerCase();
       const bk = safeStr(b.sortKey || b.filename || fileNameOf(b.url)).toLowerCase();
@@ -154,6 +162,21 @@ function normalizeImagesToUrls(images: any) {
   const quickUrl = urls[1] || urls[0] || "";
 
   return { urls, thumbUrl, quickUrl };
+}
+
+function isRealProductImage(url: string) {
+  const u = safeStr(url).toLowerCase();
+  if (!u) return false;
+
+  if (u.includes("/api/thumb/")) return false;
+  if (u.includes("pyq-master-template")) return false;
+  if (u.includes("/uploads/site-settings/pyq-thumbnail/")) return false;
+
+  return true;
+}
+
+function uniqueRealImages(values: string[]) {
+  return uniqueStrings(values.map((x) => safeStr(x)).filter(isRealProductImage));
 }
 
 /* =========================
@@ -259,7 +282,7 @@ function resolveAvailability(rawAvailability: string, onDemandSalesEnabled: bool
 }
 
 /* =========================
-   PYQ runtime thumbnail helpers
+   Runtime thumbnail helpers
    ========================= */
 
 function isPyqCategory(input: any) {
@@ -276,7 +299,18 @@ function isPyqCategory(input: any) {
   );
 }
 
-function extractSubjectCodeFromPyqProduct(p: any) {
+function isGuessPaperCategory(input: any) {
+  const c = safeStr(input).toLowerCase();
+  return (
+    c === "guess papers" ||
+    c === "guess paper" ||
+    c === "guess-paper" ||
+    c === "guess-papers" ||
+    c.includes("guess")
+  );
+}
+
+function extractSubjectCodeFromProduct(p: any) {
   const direct = safeStr(p?.subjectCode);
   if (direct) return direct;
 
@@ -287,7 +321,7 @@ function extractSubjectCodeFromPyqProduct(p: any) {
   return "";
 }
 
-function extractSubjectTitleFromPyqProduct(p: any) {
+function extractSubjectTitleFromProduct(p: any, fallback: string) {
   const lang = safeStr(p?.language).toLowerCase();
   const hi = safeStr(p?.subjectTitleHi);
   const en = safeStr(p?.subjectTitleEn);
@@ -295,10 +329,10 @@ function extractSubjectTitleFromPyqProduct(p: any) {
   if ((lang === "hindi" || lang.startsWith("hin")) && hi) return hi;
   if ((lang === "english" || lang.startsWith("eng")) && en) return en;
 
-  return hi || en || "";
+  return hi || en || safeStr(p?.title) || fallback;
 }
 
-function extractCourseTextFromPyqProduct(p: any) {
+function extractCourseTextFromProduct(p: any) {
   const list = Array.isArray(p?.courseCodes)
     ? p.courseCodes.map((x: any) => safeStr(x)).filter(Boolean)
     : [];
@@ -307,7 +341,7 @@ function extractCourseTextFromPyqProduct(p: any) {
   return "";
 }
 
-function extractMediumFromPyqProduct(p: any) {
+function extractMediumFromProduct(p: any) {
   return safeStr(p?.language) || "English";
 }
 
@@ -338,13 +372,14 @@ async function getPyqTemplateVersionToken() {
 
 function buildPyqRuntimeThumbUrl(p: any, templateVersionToken: string) {
   const session = safeStr(p?.session) || "June, 2025";
-  const code = extractSubjectCodeFromPyqProduct(p) || "IGNOU";
-  const title = extractSubjectTitleFromPyqProduct(p) || "Solved Previous Year Paper";
-  const course = extractCourseTextFromPyqProduct(p) || "IGNOU";
-  const medium = extractMediumFromPyqProduct(p) || "English";
+  const code = extractSubjectCodeFromProduct(p) || "IGNOU";
+  const title = extractSubjectTitleFromProduct(p, "Solved Previous Year Paper");
+  const course = extractCourseTextFromProduct(p) || "IGNOU";
+  const medium = extractMediumFromProduct(p) || "English";
 
   const v = [
     templateVersionToken,
+    "pyq-runtime",
     safeStr(p?._id),
     safeStr(p?.slug),
     safeStr(p?.updatedAt),
@@ -370,15 +405,46 @@ function buildPyqRuntimeThumbUrl(p: any, templateVersionToken: string) {
   return `/api/thumb/pyq?${qs.toString()}`;
 }
 
-function isRealProductImage(url: string) {
-  const u = safeStr(url).toLowerCase();
-  if (!u) return false;
+function buildGuessPaperRuntimeThumbUrl(p: any, templateVersionToken: string) {
+  const session = safeStr(p?.session) || "Latest";
+  const code = extractSubjectCodeFromProduct(p) || "IGNOU";
+  const title = extractSubjectTitleFromProduct(p, "Guess Paper");
+  const course = extractCourseTextFromProduct(p) || "IGNOU";
+  const medium = extractMediumFromProduct(p) || "English";
 
-  if (u.includes("/api/thumb/")) return false;
-  if (u.includes("pyq-master-template")) return false;
-  if (u.includes("/uploads/site-settings/pyq-thumbnail/")) return false;
+  const v = [
+    "guess-paper-runtime-v1",
+    templateVersionToken,
+    safeStr(p?._id),
+    safeStr(p?.slug),
+    safeStr(p?.updatedAt),
+    safeStr(p?.category),
+    code,
+    title,
+    course,
+    session,
+    medium,
+  ]
+    .filter(Boolean)
+    .join("|");
 
-  return true;
+  /*
+    Temporary safe fallback:
+    Project me already /api/thumb/pyq route available hai.
+    Guess Papers ke liye isi runtime thumbnail route ko reuse kiya gaya hai,
+    taki live listing/card/quick-view par blank image na aaye.
+  */
+  const qs = new URLSearchParams({
+    session,
+    code,
+    title,
+    course,
+    medium,
+    type: "guess-paper",
+    v,
+  });
+
+  return `/api/thumb/pyq?${qs.toString()}`;
 }
 
 /* =========================
@@ -660,19 +726,33 @@ export async function GET(req: Request) {
     const effectiveAvailability = resolveAvailability(rawAvailability, onDemandSalesEnabled);
 
     const isPyq = isPyqCategory(p.category);
+    const isGuessPaper = isGuessPaperCategory(p.category);
 
     let finalImages = urls;
     let finalThumb = safeStr(p.thumbnailUrl) || thumbUrl;
-    let finalQuick = safeStr(p.quickUrl) || quickUrl;
+    let finalQuick = safeStr(p.quickUrl) || quickUrl || finalThumb;
 
-    if (isPyq) {
-      const realImages = urls.filter((u) => isRealProductImage(u));
-      const runtimeThumb = buildPyqRuntimeThumbUrl(p, pyqTemplateVersionToken);
+    if (isPyq || isGuessPaper) {
+      const runtimeThumb = isPyq
+        ? buildPyqRuntimeThumbUrl(p, pyqTemplateVersionToken)
+        : buildGuessPaperRuntimeThumbUrl(p, pyqTemplateVersionToken);
+
+      const realImages = uniqueRealImages([
+        ...urls,
+        safeStr(p.thumbnailUrl),
+        safeStr(p.quickUrl),
+      ]);
 
       if (realImages.length > 0) {
         finalImages = realImages;
-        finalThumb = realImages[0] || runtimeThumb;
-        finalQuick = realImages[1] || realImages[0] || runtimeThumb;
+
+        finalThumb = isRealProductImage(safeStr(p.thumbnailUrl))
+          ? safeStr(p.thumbnailUrl)
+          : realImages[0] || runtimeThumb;
+
+        finalQuick = isRealProductImage(safeStr(p.quickUrl))
+          ? safeStr(p.quickUrl)
+          : realImages[1] || realImages[0] || runtimeThumb;
       } else {
         finalImages = [runtimeThumb];
         finalThumb = runtimeThumb;
