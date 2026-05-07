@@ -48,12 +48,9 @@ type FileLike = {
   arrayBuffer: () => Promise<ArrayBuffer>;
 };
 
-type PdfParseFn = (
-  buffer: Buffer,
-  options?: Record<string, unknown>
-) => Promise<Record<string, any>>;
+type PdfPageCountFn = (buffer: Buffer) => Promise<number>;
 
-let cachedPdfParseFn: PdfParseFn | null = null;
+let cachedPdfPageCountFn: PdfPageCountFn | null = null;
 
 function safeStr(x: any) {
   return String(x ?? "").trim();
@@ -118,64 +115,84 @@ async function withTimeout<T>(
   }
 }
 
-function getPdfParseFn(): PdfParseFn {
-  if (cachedPdfParseFn) return cachedPdfParseFn;
+function normalizeDetectedPageCount(value: any) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 0;
+  return Math.max(0, Math.trunc(n));
+}
 
-  let firstError: any = null;
-  let secondError: any = null;
-
-  try {
-    // Important:
-    // pdf-parse ke main entry "pdf-parse" ko Next.js dev/server bundle me use karne par
-    // kai projects me test PDF/debug path issue aa jata hai.
-    // Isliye direct library file use kar rahe hain.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const pdfParseModule = require("pdf-parse/lib/pdf-parse.js");
-    const fn = pdfParseModule?.default || pdfParseModule;
-
-    if (typeof fn === "function") {
-      cachedPdfParseFn = fn as PdfParseFn;
-      return cachedPdfParseFn;
-    }
-
-    firstError = new Error("pdf-parse/lib/pdf-parse.js did not export a function");
-  } catch (error) {
-    firstError = error;
-  }
+async function getPdfPageCountFn(): Promise<PdfPageCountFn> {
+  if (cachedPdfPageCountFn) return cachedPdfPageCountFn;
 
   try {
-    // Fallback only. Normal flow me upar wala direct lib import hi use hoga.
-    const req = eval("require") as NodeRequire;
-    const pdfParseModule = req("pdf-parse");
-    const fn = pdfParseModule?.default || pdfParseModule;
+    /*
+      IMPORTANT FIX:
+      Purana code `require("pdf-parse/lib/pdf-parse.js")` use kar raha tha.
+      Ye internal package path Vercel/Next build me resolve nahi ho raha tha.
+      pdf-parse v2+ ka supported API `PDFParse` class ke through hai.
+    */
+    const pdfParseModule: any = await import("pdf-parse");
 
-    if (typeof fn === "function") {
-      cachedPdfParseFn = fn as PdfParseFn;
-      return cachedPdfParseFn;
+    if (typeof pdfParseModule?.PDFParse === "function") {
+      cachedPdfPageCountFn = async (buffer: Buffer) => {
+        let parser: any = null;
+
+        try {
+          parser = new pdfParseModule.PDFParse({
+            data: buffer,
+          });
+
+          const info = await parser.getInfo({
+            parsePageInfo: false,
+          });
+
+          const pages = normalizeDetectedPageCount(
+            info?.total || info?.numpages || info?.numPages || info?.pages
+          );
+
+          return pages;
+        } finally {
+          if (parser && typeof parser.destroy === "function") {
+            await parser.destroy().catch(() => undefined);
+          }
+        }
+      };
+
+      return cachedPdfPageCountFn;
     }
 
-    secondError = new Error("pdf-parse did not export a function");
-  } catch (error) {
-    secondError = error;
-  }
+    /*
+      Legacy fallback:
+      Agar kisi environment me pdf-parse old function export kare,
+      to usko bhi support kar lenge.
+    */
+    const legacyFn = pdfParseModule?.default || pdfParseModule;
 
-  throw new Error(
-    `PDF parser load failed: ${truncateReason(
-      secondError?.message || firstError?.message || secondError || firstError
-    )}`
-  );
+    if (typeof legacyFn === "function") {
+      cachedPdfPageCountFn = async (buffer: Buffer) => {
+        const data = await legacyFn(buffer);
+
+        return normalizeDetectedPageCount(
+          data?.numpages || data?.numPages || data?.pages || data?.total
+        );
+      };
+
+      return cachedPdfPageCountFn;
+    }
+
+    throw new Error("pdf-parse did not export PDFParse class or legacy parser function");
+  } catch (error: any) {
+    throw new Error(
+      `PDF parser load failed: ${truncateReason(
+        error?.message || "pdf-parse could not be loaded"
+      )}`
+    );
+  }
 }
 
 async function detectPdfPagesFromBuffer(pdfBuffer: Buffer) {
-  const pdfParse = getPdfParseFn();
-  const data = await pdfParse(pdfBuffer);
-
-  const pages = Math.max(
-    0,
-    Math.trunc(Number(data?.numpages || data?.numPages || data?.pages || 0))
-  );
-
-  return pages;
+  const getPageCount = await getPdfPageCountFn();
+  return await getPageCount(pdfBuffer);
 }
 
 async function detectPdfPagesFromBufferSafely(pdfBuffer: Buffer) {
