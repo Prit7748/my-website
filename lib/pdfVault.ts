@@ -394,40 +394,442 @@ export async function getPdfBufferFromS3(s3Key: string) {
   return streamToBuffer(out?.Body);
 }
 
-export async function getPdfPageCountFromBuffer(pdfBuffer: Buffer) {
-  try {
-    try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const pdfParse = require("pdf-parse");
-      const data = await pdfParse(pdfBuffer);
-      const pages = Number(data?.numpages || 0);
+function getPositiveInteger(input: any) {
+  const n = Number(input);
+  if (!Number.isFinite(n)) return 0;
+  const safe = Math.trunc(n);
+  if (safe <= 0) return 0;
+  if (safe > 100000) return 0;
+  return safe;
+}
 
-      if (Number.isFinite(pages) && pages > 0) {
-        return pages;
+function extractPageCountFromAny(input: any) {
+  const directKeys = [
+    "numpages",
+    "numPages",
+    "pages",
+    "pageCount",
+    "page_count",
+    "total",
+    "length",
+  ];
+
+  const direct = getPositiveInteger(input);
+  if (direct > 0) return direct;
+
+  if (!input || typeof input !== "object") return 0;
+
+  for (const key of directKeys) {
+    const n = getPositiveInteger(input?.[key]);
+    if (n > 0) return n;
+  }
+
+  const nestedCandidates = [
+    input?.info,
+    input?.metadata,
+    input?.meta,
+    input?.documentInfo,
+    input?.pdfInfo,
+  ];
+
+  for (const item of nestedCandidates) {
+    if (!item || typeof item !== "object") continue;
+
+    for (const key of directKeys) {
+      const n = getPositiveInteger(item?.[key]);
+      if (n > 0) return n;
+    }
+  }
+
+  return 0;
+}
+
+function installPdfNodePolyfills() {
+  const g = globalThis as any;
+
+  if (!g.DOMMatrix) {
+    class SimpleDOMMatrix {
+      a: number;
+      b: number;
+      c: number;
+      d: number;
+      e: number;
+      f: number;
+      is2D: boolean;
+      isIdentity: boolean;
+
+      constructor(init?: any) {
+        this.a = 1;
+        this.b = 0;
+        this.c = 0;
+        this.d = 1;
+        this.e = 0;
+        this.f = 0;
+        this.is2D = true;
+        this.isIdentity = true;
+
+        if (Array.isArray(init) || ArrayBuffer.isView(init)) {
+          const arr = Array.from(init as any).map((x) => Number(x));
+          if (arr.length >= 6) {
+            this.a = Number(arr[0] || 1);
+            this.b = Number(arr[1] || 0);
+            this.c = Number(arr[2] || 0);
+            this.d = Number(arr[3] || 1);
+            this.e = Number(arr[4] || 0);
+            this.f = Number(arr[5] || 0);
+          }
+        }
       }
-    } catch (err) {
-      console.error("pdf-parse primary detection failed:", err);
+
+      multiply() {
+        return new SimpleDOMMatrix([this.a, this.b, this.c, this.d, this.e, this.f]);
+      }
+
+      multiplySelf() {
+        return this;
+      }
+
+      preMultiplySelf() {
+        return this;
+      }
+
+      translate(tx = 0, ty = 0) {
+        const m = new SimpleDOMMatrix([this.a, this.b, this.c, this.d, this.e, this.f]);
+        m.e += Number(tx || 0);
+        m.f += Number(ty || 0);
+        return m;
+      }
+
+      translateSelf(tx = 0, ty = 0) {
+        this.e += Number(tx || 0);
+        this.f += Number(ty || 0);
+        return this;
+      }
+
+      scale(scaleX = 1, scaleY = scaleX) {
+        const m = new SimpleDOMMatrix([this.a, this.b, this.c, this.d, this.e, this.f]);
+        m.a *= Number(scaleX || 1);
+        m.d *= Number(scaleY || scaleX || 1);
+        return m;
+      }
+
+      scaleSelf(scaleX = 1, scaleY = scaleX) {
+        this.a *= Number(scaleX || 1);
+        this.d *= Number(scaleY || scaleX || 1);
+        return this;
+      }
+
+      rotate() {
+        return new SimpleDOMMatrix([this.a, this.b, this.c, this.d, this.e, this.f]);
+      }
+
+      rotateSelf() {
+        return this;
+      }
+
+      inverse() {
+        return new SimpleDOMMatrix([this.a, this.b, this.c, this.d, this.e, this.f]);
+      }
+
+      invertSelf() {
+        return this;
+      }
+
+      transformPoint(point: any) {
+        const x = Number(point?.x || 0);
+        const y = Number(point?.y || 0);
+
+        return {
+          x: this.a * x + this.c * y + this.e,
+          y: this.b * x + this.d * y + this.f,
+          z: Number(point?.z || 0),
+          w: Number(point?.w || 1),
+        };
+      }
+
+      toFloat32Array() {
+        return new Float32Array([this.a, this.b, this.c, this.d, this.e, this.f]);
+      }
+
+      toFloat64Array() {
+        return new Float64Array([this.a, this.b, this.c, this.d, this.e, this.f]);
+      }
     }
 
-    const raw = pdfBuffer.toString("latin1");
+    g.DOMMatrix = SimpleDOMMatrix;
+    g.WebKitCSSMatrix = SimpleDOMMatrix;
+  }
 
-    const countMatches = [...raw.matchAll(/\/Count\s+(\d+)/g)];
-    const countValues = countMatches
-      .map((m) => Number(m[1] || 0))
-      .filter((n) => Number.isFinite(n) && n > 0);
+  if (!g.DOMPoint) {
+    g.DOMPoint = class SimpleDOMPoint {
+      x: number;
+      y: number;
+      z: number;
+      w: number;
 
-    const maxCount = countValues.length ? Math.max(...countValues) : 0;
+      constructor(x = 0, y = 0, z = 0, w = 1) {
+        this.x = Number(x || 0);
+        this.y = Number(y || 0);
+        this.z = Number(z || 0);
+        this.w = Number(w || 1);
+      }
 
-    const pageTypeMatches = raw.match(/\/Type\s*\/Page\b/g) || [];
-    const pageTypeCount = pageTypeMatches.length;
+      matrixTransform(matrix: any) {
+        if (matrix && typeof matrix.transformPoint === "function") {
+          return matrix.transformPoint(this);
+        }
+        return this;
+      }
+    };
+  }
 
-    const detected = Math.max(maxCount, pageTypeCount, 0);
+  if (!g.ImageData) {
+    g.ImageData = class SimpleImageData {
+      data: Uint8ClampedArray;
+      width: number;
+      height: number;
 
-    return detected > 0 ? detected : 0;
-  } catch (err) {
-    console.error("PDF page count failed completely:", err);
+      constructor(dataOrWidth: any, width?: number, height?: number) {
+        if (typeof dataOrWidth === "number") {
+          this.width = Number(dataOrWidth || 0);
+          this.height = Number(width || 0);
+          this.data = new Uint8ClampedArray(this.width * this.height * 4);
+        } else {
+          this.data = dataOrWidth || new Uint8ClampedArray(0);
+          this.width = Number(width || 0);
+          this.height = Number(height || 0);
+        }
+      }
+    };
+  }
+
+  if (!g.Path2D) {
+    g.Path2D = class SimplePath2D {
+      constructor() {}
+      addPath() {}
+      closePath() {}
+      moveTo() {}
+      lineTo() {}
+      bezierCurveTo() {}
+      quadraticCurveTo() {}
+      rect() {}
+      roundRect() {}
+      arc() {}
+      arcTo() {}
+      ellipse() {}
+    };
+  }
+}
+
+async function getPdfPageCountUsingPdfParse(pdfBuffer: Buffer) {
+  installPdfNodePolyfills();
+
+  let mod: any = null;
+  let lastError: any = null;
+
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const req = eval("require") as NodeRequire;
+    mod = req("pdf-parse");
+  } catch (error) {
+    lastError = error;
+
+    try {
+      const dynamicImport = new Function(
+        "specifier",
+        "return import(specifier)"
+      ) as (specifier: string) => Promise<any>;
+      mod = await dynamicImport("pdf-parse");
+    } catch (importError) {
+      lastError = importError;
+    }
+  }
+
+  if (!mod) {
+    throw lastError || new Error("pdf-parse module could not be loaded");
+  }
+
+  const possibleFn =
+    typeof mod === "function"
+      ? mod
+      : typeof mod?.default === "function" && !mod?.PDFParse
+      ? mod.default
+      : null;
+
+  if (possibleFn) {
+    try {
+      const data = await possibleFn(pdfBuffer);
+      const pages = extractPageCountFromAny(data);
+      if (pages > 0) return pages;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+
+  const PDFParse = mod?.PDFParse || mod?.default?.PDFParse;
+
+  if (typeof PDFParse === "function") {
+    let parser: any = null;
+
+    try {
+      parser = new PDFParse({
+        data: new Uint8Array(pdfBuffer),
+      });
+
+      if (typeof parser.getInfo === "function") {
+        const info = await parser.getInfo();
+        const pages = extractPageCountFromAny(info);
+        if (pages > 0) return pages;
+      }
+
+      if (typeof parser.getText === "function") {
+        const textResult = await parser.getText();
+        const pages = extractPageCountFromAny(textResult);
+        if (pages > 0) return pages;
+      }
+    } catch (error) {
+      lastError = error;
+    } finally {
+      if (parser && typeof parser.destroy === "function") {
+        try {
+          await parser.destroy();
+        } catch {
+          // ignore cleanup issue
+        }
+      }
+    }
+  }
+
+  throw lastError || new Error("pdf-parse did not return page count");
+}
+
+async function getPdfPageCountUsingPdfJs(pdfBuffer: Buffer) {
+  installPdfNodePolyfills();
+
+  let pdfjs: any = null;
+  let lastError: any = null;
+
+  try {
+    const dynamicImport = new Function(
+      "specifier",
+      "return import(specifier)"
+    ) as (specifier: string) => Promise<any>;
+
+    try {
+      pdfjs = await dynamicImport("pdfjs-dist/legacy/build/pdf.mjs");
+    } catch (error) {
+      lastError = error;
+      pdfjs = await dynamicImport("pdfjs-dist/build/pdf.mjs");
+    }
+  } catch (error) {
+    lastError = error;
+  }
+
+  if (!pdfjs || typeof pdfjs.getDocument !== "function") {
+    throw lastError || new Error("pdfjs-dist could not be loaded");
+  }
+
+  let loadingTask: any = null;
+  let pdfDoc: any = null;
+
+  try {
+    if (pdfjs.GlobalWorkerOptions) {
+      pdfjs.GlobalWorkerOptions.workerSrc = "";
+    }
+
+    loadingTask = pdfjs.getDocument({
+      data: new Uint8Array(pdfBuffer),
+      disableWorker: true,
+      disableFontFace: true,
+      isEvalSupported: false,
+      useSystemFonts: false,
+      stopAtErrors: false,
+    });
+
+    pdfDoc = await loadingTask.promise;
+
+    const pages = getPositiveInteger(pdfDoc?.numPages);
+    if (pages > 0) return pages;
+
+    throw new Error("pdfjs-dist returned empty page count");
+  } finally {
+    if (pdfDoc && typeof pdfDoc.destroy === "function") {
+      try {
+        await pdfDoc.destroy();
+      } catch {
+        // ignore cleanup issue
+      }
+    } else if (loadingTask && typeof loadingTask.destroy === "function") {
+      try {
+        await loadingTask.destroy();
+      } catch {
+        // ignore cleanup issue
+      }
+    }
+  }
+}
+
+function getPdfPageCountUsingRawScan(pdfBuffer: Buffer) {
+  const raw = pdfBuffer.toString("latin1");
+
+  const countMatches = [...raw.matchAll(/\/Count\s+(\d{1,7})(?!\d)/g)];
+  const countValues = countMatches
+    .map((m) => getPositiveInteger(m[1]))
+    .filter((n) => n > 0);
+
+  const maxCount = countValues.length ? Math.max(...countValues) : 0;
+
+  const pageTypeMatches =
+    raw.match(/\/Type\s*\/Page(?![A-Za-z])/g) ||
+    raw.match(/\/Type\/Page(?![A-Za-z])/g) ||
+    [];
+
+  const pageTypeCount = pageTypeMatches.length;
+
+  const kidsMatches = [...raw.matchAll(/\/Kids\s*\[([\s\S]{0,20000}?)\]/g)];
+  const kidsCounts = kidsMatches
+    .map((m) => {
+      const block = safeStr(m[1]);
+      const refs = block.match(/\d+\s+\d+\s+R/g) || [];
+      return refs.length;
+    })
+    .filter((n) => n > 0);
+
+  const maxKidsCount = kidsCounts.length ? Math.max(...kidsCounts) : 0;
+
+  return Math.max(maxCount, pageTypeCount, maxKidsCount, 0);
+}
+
+export async function getPdfPageCountFromBuffer(pdfBuffer: Buffer) {
+  if (!Buffer.isBuffer(pdfBuffer) || pdfBuffer.length <= 0) {
     return 0;
   }
+
+  const errors: string[] = [];
+
+  try {
+    const pages = await getPdfPageCountUsingPdfParse(pdfBuffer);
+    if (pages > 0) return pages;
+  } catch (error: any) {
+    errors.push(`pdf-parse: ${safeStr(error?.message || error)}`);
+  }
+
+  try {
+    const pages = await getPdfPageCountUsingPdfJs(pdfBuffer);
+    if (pages > 0) return pages;
+  } catch (error: any) {
+    errors.push(`pdfjs: ${safeStr(error?.message || error)}`);
+  }
+
+  try {
+    const pages = getPdfPageCountUsingRawScan(pdfBuffer);
+    if (pages > 0) return pages;
+  } catch (error: any) {
+    errors.push(`raw-scan: ${safeStr(error?.message || error)}`);
+  }
+
+  console.error("PDF page count detection failed:", errors.join(" | "));
+  return 0;
 }
 
 export async function detectPdfPagesFromS3Key(s3Key: string) {

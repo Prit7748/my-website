@@ -9,7 +9,6 @@ import {
   uploadPdfBufferToS3,
   findProductByExactSku,
   normalizeSkuLike,
-  detectPdfPagesFromS3Key,
 } from "@/lib/pdfVault";
 import {
   getDerivedAvailabilitySnapshotBySku,
@@ -27,7 +26,10 @@ const BUCKET_PRIVATE = process.env.AWS_S3_BUCKET_PRIVATE || "";
 
 const MAX_FILE_SIZE_BYTES = 20 * 1024 * 1024; // 20MB
 const UPLOAD_TIMEOUT_MS = 120000;
-const PAGE_DETECT_TIMEOUT_MS = 120000;
+
+// Page detection ko upload blocker nahi banaya gaya hai.
+// Agar page detection fail bhi hota hai, PDF upload successful rahegi.
+const PAGE_DETECT_TIMEOUT_MS = 15000;
 
 const s3 = new S3Client({
   region: REGION,
@@ -46,6 +48,13 @@ type FileLike = {
   arrayBuffer: () => Promise<ArrayBuffer>;
 };
 
+type PdfParseFn = (
+  buffer: Buffer,
+  options?: Record<string, unknown>
+) => Promise<Record<string, any>>;
+
+let cachedPdfParseFn: PdfParseFn | null = null;
+
 function safeStr(x: any) {
   return String(x ?? "").trim();
 }
@@ -53,6 +62,12 @@ function safeStr(x: any) {
 function safeNum(x: any, def = 0) {
   const n = Number(x);
   return Number.isFinite(n) ? n : def;
+}
+
+function truncateReason(input: any, max = 300) {
+  const text = safeStr(input);
+  if (!text) return "";
+  return text.length > max ? `${text.slice(0, max)}...` : text;
 }
 
 function cleanBaseFileName(name: string) {
@@ -88,7 +103,7 @@ async function withTimeout<T>(
   ms: number,
   label: string
 ): Promise<T> {
-  let timeoutId: NodeJS.Timeout | null = null;
+  let timeoutId: ReturnType<typeof setTimeout> | null = null;
 
   const timeoutPromise = new Promise<never>((_, reject) => {
     timeoutId = setTimeout(() => {
@@ -100,6 +115,86 @@ async function withTimeout<T>(
     return await Promise.race([promise, timeoutPromise]);
   } finally {
     if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
+function getPdfParseFn(): PdfParseFn {
+  if (cachedPdfParseFn) return cachedPdfParseFn;
+
+  let firstError: any = null;
+  let secondError: any = null;
+
+  try {
+    // Important:
+    // pdf-parse ke main entry "pdf-parse" ko Next.js dev/server bundle me use karne par
+    // kai projects me test PDF/debug path issue aa jata hai.
+    // Isliye direct library file use kar rahe hain.
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const pdfParseModule = require("pdf-parse/lib/pdf-parse.js");
+    const fn = pdfParseModule?.default || pdfParseModule;
+
+    if (typeof fn === "function") {
+      cachedPdfParseFn = fn as PdfParseFn;
+      return cachedPdfParseFn;
+    }
+
+    firstError = new Error("pdf-parse/lib/pdf-parse.js did not export a function");
+  } catch (error) {
+    firstError = error;
+  }
+
+  try {
+    // Fallback only. Normal flow me upar wala direct lib import hi use hoga.
+    const req = eval("require") as NodeRequire;
+    const pdfParseModule = req("pdf-parse");
+    const fn = pdfParseModule?.default || pdfParseModule;
+
+    if (typeof fn === "function") {
+      cachedPdfParseFn = fn as PdfParseFn;
+      return cachedPdfParseFn;
+    }
+
+    secondError = new Error("pdf-parse did not export a function");
+  } catch (error) {
+    secondError = error;
+  }
+
+  throw new Error(
+    `PDF parser load failed: ${truncateReason(
+      secondError?.message || firstError?.message || secondError || firstError
+    )}`
+  );
+}
+
+async function detectPdfPagesFromBuffer(pdfBuffer: Buffer) {
+  const pdfParse = getPdfParseFn();
+  const data = await pdfParse(pdfBuffer);
+
+  const pages = Math.max(
+    0,
+    Math.trunc(Number(data?.numpages || data?.numPages || data?.pages || 0))
+  );
+
+  return pages;
+}
+
+async function detectPdfPagesFromBufferSafely(pdfBuffer: Buffer) {
+  try {
+    const pages = await withTimeout(
+      detectPdfPagesFromBuffer(pdfBuffer),
+      PAGE_DETECT_TIMEOUT_MS,
+      "PDF page detection"
+    );
+
+    return {
+      pageCount: Math.max(0, Math.trunc(Number(pages || 0))),
+      warning: "",
+    };
+  } catch (error: any) {
+    return {
+      pageCount: 0,
+      warning: truncateReason(error?.message || "PDF page count could not be detected"),
+    };
   }
 }
 
@@ -159,22 +254,6 @@ async function findActiveOfficialPaperBySku(skuNormalized: string) {
 
 function sha256OfBuffer(buf: Buffer) {
   return crypto.createHash("sha256").update(buf).digest("hex");
-}
-
-async function detectUploadedPdfPageCountOrThrow(s3Key: string) {
-  const detected = await withTimeout(
-    detectPdfPagesFromS3Key(safeStr(s3Key)),
-    PAGE_DETECT_TIMEOUT_MS,
-    "PDF page detection"
-  );
-
-  const pageCount = Math.max(0, Math.trunc(Number(detected || 0)));
-
-  if (pageCount <= 0) {
-    throw new Error("PDF page count could not be detected");
-  }
-
-  return pageCount;
 }
 
 async function processSinglePdf(args: {
@@ -275,26 +354,32 @@ async function processSinglePdf(args: {
     };
   }
 
-  const uploaded = await withTimeout(
-    uploadPdfBufferToS3({
-      folderPath: "official-papers",
-      originalName,
-      bytes: pdfBuffer,
-      mimeType: "application/pdf",
-    }),
-    UPLOAD_TIMEOUT_MS,
-    "S3 upload"
-  );
+  const pageDetectResult = await detectPdfPagesFromBufferSafely(pdfBuffer);
+  const pageCount = Number(pageDetectResult.pageCount || 0);
+  const pageWarning = safeStr(pageDetectResult.warning);
 
-  const newS3Key = safeStr((uploaded as any)?.key);
-  const newS3Bucket = safeStr((uploaded as any)?.bucket);
-
-  if (!newS3Key) {
-    throw new Error("S3 upload completed but file key was empty");
-  }
+  let newS3Key = "";
+  let newS3Bucket = "";
 
   try {
-    const pageCount = await detectUploadedPdfPageCountOrThrow(newS3Key);
+    const uploaded = await withTimeout(
+      uploadPdfBufferToS3({
+        folderPath: "official-papers",
+        originalName,
+        bytes: pdfBuffer,
+        mimeType: "application/pdf",
+      }),
+      UPLOAD_TIMEOUT_MS,
+      "S3 upload"
+    );
+
+    newS3Key = safeStr((uploaded as any)?.key);
+    newS3Bucket = safeStr((uploaded as any)?.bucket);
+
+    if (!newS3Key) {
+      throw new Error("S3 upload completed but file key was empty");
+    }
+
     const matchedProduct: any = await findProductByExactSku(skuNormalized);
     const now = new Date();
     const userId = getUserId(args.user);
@@ -325,6 +410,7 @@ async function processSinglePdf(args: {
       existingLive.uploadedAt = now;
       existingLive.uploadedBy = userId;
       existingLive.updatedBy = userId;
+      existingLive.updatedAt = now;
       existingLive.deletedAt = null;
 
       await existingLive.save();
@@ -333,7 +419,7 @@ async function processSinglePdf(args: {
         try {
           await deleteS3ObjectIfExists(oldKey);
         } catch {
-          // ignore old file cleanup failure
+          // old S3 cleanup failure should not fail the upload
         }
       }
 
@@ -344,7 +430,9 @@ async function processSinglePdf(args: {
         fileName,
         skuNormalized,
         fileId: String(existingLive._id),
-        reason: "",
+        reason: pageWarning
+          ? `Uploaded successfully, but page count not detected: ${pageWarning}`
+          : "",
       };
     }
 
@@ -372,6 +460,7 @@ async function processSinglePdf(args: {
       uploadedAt: now,
       uploadedBy: userId,
       updatedBy: userId,
+      updatedAt: now,
       deletedAt: null,
     });
 
@@ -382,14 +471,19 @@ async function processSinglePdf(args: {
       fileName,
       skuNormalized,
       fileId: String(created._id),
-      reason: "",
+      reason: pageWarning
+        ? `Uploaded successfully, but page count not detected: ${pageWarning}`
+        : "",
     };
   } catch (error) {
-    try {
-      await deleteS3ObjectIfExists(newS3Key);
-    } catch {
-      // ignore cleanup failure
+    if (newS3Key) {
+      try {
+        await deleteS3ObjectIfExists(newS3Key);
+      } catch {
+        // cleanup failure ignored
+      }
     }
+
     throw error;
   }
 }
@@ -430,6 +524,7 @@ export async function POST(req: Request) {
     for (const entry of rawEntries) {
       if (!entry || seen.has(entry)) continue;
       seen.add(entry);
+
       if (isFileLike(entry)) {
         files.push(entry);
       }
@@ -475,10 +570,11 @@ export async function POST(req: Request) {
         else failedFiles += 1;
       } catch (error: any) {
         failedFiles += 1;
+
         results.push({
           fileName: cleanBaseFileName(file.name),
           status: "failed",
-          reason: safeStr(error?.message || "Upload failed"),
+          reason: truncateReason(error?.message || "Upload failed"),
         });
       }
     }
@@ -497,7 +593,7 @@ export async function POST(req: Request) {
           skippedFiles,
           failedFiles,
           conflictMode,
-          mode: "direct_final_upload",
+          mode: "direct_final_upload_page_detection_non_blocking",
         },
         results,
       },
@@ -507,7 +603,7 @@ export async function POST(req: Request) {
     return NextResponse.json(
       {
         ok: false,
-        error: safeStr(error?.message || "Failed to upload PDFs"),
+        error: truncateReason(error?.message || "Failed to upload PDFs"),
       },
       { status: 500 }
     );

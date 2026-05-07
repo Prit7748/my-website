@@ -57,6 +57,7 @@ type OfficialPaperItem = {
 
 type FileListResponse = {
   ok?: boolean;
+  error?: string;
   files?: OfficialPaperItem[];
   total?: number;
   page?: number;
@@ -102,10 +103,15 @@ type DirectUploadResponse = {
   results?: DirectUploadSingleResult[];
 };
 
+type AllPagesSyncMode = "zero" | "all";
+
 const DIRECT_UPLOAD_CONCURRENCY = 4;
 const DIRECT_UPLOAD_MAX_RETRIES = 3;
 const DIRECT_UPLOAD_TIMEOUT_MS = 120000;
 const RETRY_BASE_DELAY_MS = 1200;
+
+const ALL_PAGES_SYNC_CONCURRENCY = 3;
+const ALL_PAGES_SYNC_PAGE_SIZE = 200;
 
 const CATEGORY_OPTIONS = [
   "",
@@ -132,13 +138,6 @@ function formatDate(input?: string | null) {
   if (!input) return "-";
   const d = new Date(input);
   if (Number.isNaN(d.getTime())) return "-";
-  return d.toLocaleString("en-IN");
-}
-
-function formatDateTime(input?: string | null) {
-  if (!input) return "—";
-  const d = new Date(input);
-  if (Number.isNaN(d.getTime())) return "—";
   return d.toLocaleString("en-IN");
 }
 
@@ -205,6 +204,17 @@ export default function OfficialPapersPage() {
   const [uploadSessionTotal, setUploadSessionTotal] = useState(0);
   const [uploadSessionDone, setUploadSessionDone] = useState(0);
 
+  const [isSyncChoiceOpen, setIsSyncChoiceOpen] = useState(false);
+  const [isSyncingAllPages, setIsSyncingAllPages] = useState(false);
+  const [allPagesSyncMode, setAllPagesSyncMode] = useState<AllPagesSyncMode | "">("");
+  const [allPagesSyncStage, setAllPagesSyncStage] = useState("");
+  const [allPagesSyncScanned, setAllPagesSyncScanned] = useState(0);
+  const [allPagesSyncTotal, setAllPagesSyncTotal] = useState(0);
+  const [allPagesSyncDone, setAllPagesSyncDone] = useState(0);
+  const [allPagesSyncSuccess, setAllPagesSyncSuccess] = useState(0);
+  const [allPagesSyncFailed, setAllPagesSyncFailed] = useState(0);
+  const [allPagesSyncCurrentFile, setAllPagesSyncCurrentFile] = useState("");
+
   const [actionLoadingId, setActionLoadingId] = useState("");
 
   const longTaskActiveRef = useRef(false);
@@ -219,6 +229,11 @@ export default function OfficialPapersPage() {
     return Math.min(100, Math.round((uploadSessionDone / uploadSessionTotal) * 100));
   }, [uploadSessionDone, uploadSessionTotal]);
 
+  const allPagesSyncProgressPercent = useMemo(() => {
+    if (!allPagesSyncTotal) return 0;
+    return Math.min(100, Math.round((allPagesSyncDone / allPagesSyncTotal) * 100));
+  }, [allPagesSyncDone, allPagesSyncTotal]);
+
   function resetMessages() {
     setServerMessage("");
     setServerMessageType("info");
@@ -228,6 +243,17 @@ export default function OfficialPapersPage() {
     setUploadSessionActive(false);
     setUploadSessionTotal(0);
     setUploadSessionDone(0);
+  }
+
+  function resetAllPagesSyncProgress() {
+    setAllPagesSyncMode("");
+    setAllPagesSyncStage("");
+    setAllPagesSyncScanned(0);
+    setAllPagesSyncTotal(0);
+    setAllPagesSyncDone(0);
+    setAllPagesSyncSuccess(0);
+    setAllPagesSyncFailed(0);
+    setAllPagesSyncCurrentFile("");
   }
 
   function resetSelectedFiles() {
@@ -407,6 +433,11 @@ export default function OfficialPapersPage() {
       return;
     }
 
+    if (isSyncingAllPages) {
+      alert("Pages sync process chal raha hai. Complete hone ke baad upload start karo.");
+      return;
+    }
+
     const usableFiles = normalizeSelectedPdfFiles(selectedPdfFiles);
     if (!usableFiles.length) {
       alert("Valid PDF files nahi mili.");
@@ -430,9 +461,7 @@ export default function OfficialPapersPage() {
         const currentIndex = nextIndex;
         nextIndex += 1;
 
-        if (currentIndex >= usableFiles.length) {
-          return;
-        }
+        if (currentIndex >= usableFiles.length) return;
 
         const file = usableFiles[currentIndex];
 
@@ -465,9 +494,7 @@ export default function OfficialPapersPage() {
       const doneFiles = uploadedFiles + replacedFiles;
 
       if (doneFiles > 0 && failedFiles === 0 && skippedFiles === 0) {
-        setServerMessage(
-          `${doneFiles} PDFs successfully upload ho gayi.`
-        );
+        setServerMessage(`${doneFiles} PDFs successfully upload ho gayi.`);
         setServerMessageType("success");
       } else if (doneFiles > 0) {
         setServerMessage(
@@ -484,11 +511,189 @@ export default function OfficialPapersPage() {
       await refreshAll();
       resetSelectedFiles();
     } catch (error: any) {
-      const errMsg = safeText(error?.message || "Upload failed");
-      setServerMessage(errMsg);
+      setServerMessage(safeText(error?.message || "Upload failed"));
       setServerMessageType("error");
     } finally {
       setIsUploading(false);
+    }
+  }
+
+  async function fetchOfficialPapersForPageSync(mode: AllPagesSyncMode) {
+    const allRows: OfficialPaperItem[] = [];
+    let currentPage = 1;
+    let totalPages = 1;
+
+    while (currentPage <= totalPages) {
+      setAllPagesSyncStage(`Files list scan ho rahi hai: page ${currentPage}/${totalPages}`);
+
+      const qs = new URLSearchParams();
+      qs.set("page", String(currentPage));
+      qs.set("pageSize", String(ALL_PAGES_SYNC_PAGE_SIZE));
+      qs.set("sortBy", mode === "zero" ? "pageCount" : "uploadedAt");
+      qs.set("sortDir", mode === "zero" ? "asc" : "desc");
+
+      const res = await fetch(`/api/admin/official-papers/files?${qs.toString()}`, {
+        credentials: "include",
+        cache: "no-store",
+      });
+
+      const data = (await safeReadJson(res)) as FileListResponse;
+
+      if (!res.ok || !data?.ok) {
+        throw new Error(data?.error || "Failed to load files for page sync");
+      }
+
+      const rows = Array.isArray(data?.files) ? data.files : [];
+      setAllPagesSyncScanned((prev) => prev + rows.length);
+
+      for (const row of rows) {
+        if (!row?._id) continue;
+
+        if (mode === "zero") {
+          const pageCount = Number(row.pageCount || 0);
+          if (pageCount <= 0) {
+            allRows.push(row);
+          }
+        } else {
+          allRows.push(row);
+        }
+      }
+
+      totalPages = Math.max(1, Number(data?.totalPages || 1));
+      currentPage += 1;
+    }
+
+    const uniqueMap = new Map<string, OfficialPaperItem>();
+    for (const row of allRows) {
+      if (row?._id && !uniqueMap.has(row._id)) {
+        uniqueMap.set(row._id, row);
+      }
+    }
+
+    return Array.from(uniqueMap.values());
+  }
+
+  async function syncSingleOfficialPaperPageCount(file: OfficialPaperItem) {
+    const res = await fetch("/api/admin/official-papers/files", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      credentials: "include",
+      body: JSON.stringify({ action: "syncpages", fileId: file._id }),
+    });
+
+    const data = await safeReadJson(res);
+
+    if (!res.ok || !(data as any)?.ok) {
+      throw new Error((data as any)?.error || "Sync pages failed");
+    }
+
+    return data;
+  }
+
+  async function startSyncPages(mode: AllPagesSyncMode) {
+    if (isUploading) {
+      alert("Upload process chal raha hai. Complete hone ke baad page sync karo.");
+      return;
+    }
+
+    if (isSyncingAllPages) return;
+
+    setIsSyncChoiceOpen(false);
+    resetMessages();
+    resetAllPagesSyncProgress();
+
+    setIsSyncingAllPages(true);
+    setAllPagesSyncMode(mode);
+    setAllPagesSyncStage("Preparing...");
+    setServerMessage(
+      mode === "zero"
+        ? "0 page count wali files scan ho rahi hain..."
+        : "Sabhi official paper files scan ho rahi hain..."
+    );
+    setServerMessageType("info");
+
+    try {
+      const targetFiles = await fetchOfficialPapersForPageSync(mode);
+
+      if (!targetFiles.length) {
+        setServerMessage(
+          mode === "zero"
+            ? "0 page count wali koi official paper file nahi mili. Sync ki zarurat nahi hai."
+            : "Sync ke liye koi live official paper file nahi mili."
+        );
+        setServerMessageType("info");
+        setAllPagesSyncStage("No files found");
+        return;
+      }
+
+      setAllPagesSyncTotal(targetFiles.length);
+      setAllPagesSyncDone(0);
+      setAllPagesSyncSuccess(0);
+      setAllPagesSyncFailed(0);
+      setAllPagesSyncStage("Page count sync running...");
+
+      let nextIndex = 0;
+      let processedCount = 0;
+      let successCount = 0;
+      let failedCount = 0;
+
+      async function worker() {
+        while (true) {
+          const currentIndex = nextIndex;
+          nextIndex += 1;
+
+          if (currentIndex >= targetFiles.length) return;
+
+          const file = targetFiles[currentIndex];
+          setAllPagesSyncCurrentFile(
+            `${currentIndex + 1}/${targetFiles.length} - ${
+              file.fileName || file.skuNormalized || "Processing..."
+            }`
+          );
+
+          try {
+            await syncSingleOfficialPaperPageCount(file);
+            successCount += 1;
+            setAllPagesSyncSuccess(successCount);
+          } catch {
+            failedCount += 1;
+            setAllPagesSyncFailed(failedCount);
+          } finally {
+            processedCount += 1;
+            setAllPagesSyncDone(processedCount);
+          }
+        }
+      }
+
+      const workerCount = Math.min(ALL_PAGES_SYNC_CONCURRENCY, targetFiles.length);
+      await Promise.all(Array.from({ length: workerCount }, () => worker()));
+
+      setAllPagesSyncStage("Completed");
+
+      if (failedCount > 0) {
+        setServerMessage(
+          `Page sync complete. Mode: ${
+            mode === "zero" ? "Only 0 page count" : "All files"
+          }. Total ${targetFiles.length}, Success ${successCount}, Failed ${failedCount}.`
+        );
+        setServerMessageType("info");
+      } else {
+        setServerMessage(
+          `Page sync successfully complete. Mode: ${
+            mode === "zero" ? "Only 0 page count" : "All files"
+          }. Total ${targetFiles.length} files synced.`
+        );
+        setServerMessageType("success");
+      }
+
+      await refreshAll();
+    } catch (error: any) {
+      setAllPagesSyncStage("Failed");
+      setServerMessage(safeText(error?.message || "Page sync failed"));
+      setServerMessageType("error");
+    } finally {
+      setIsSyncingAllPages(false);
+      setAllPagesSyncCurrentFile("");
     }
   }
 
@@ -666,16 +871,18 @@ export default function OfficialPapersPage() {
   }
 
   useEffect(() => {
-    if (isUploading && !longTaskActiveRef.current) {
+    const anyLongTaskRunning = isUploading || isSyncingAllPages;
+
+    if (anyLongTaskRunning && !longTaskActiveRef.current) {
       notifyLongTaskStart();
       longTaskActiveRef.current = true;
     }
 
-    if (!isUploading && longTaskActiveRef.current) {
+    if (!anyLongTaskRunning && longTaskActiveRef.current) {
       notifyLongTaskEnd();
       longTaskActiveRef.current = false;
     }
-  }, [isUploading]);
+  }, [isUploading, isSyncingAllPages]);
 
   useEffect(() => {
     return () => {
@@ -714,6 +921,80 @@ export default function OfficialPapersPage() {
 
   return (
     <main className="min-h-screen bg-[#F8FAFC] text-slate-900">
+      {isSyncChoiceOpen ? (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 px-4">
+          <div className="w-full max-w-xl rounded-3xl bg-white border border-slate-200 shadow-2xl p-5">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="inline-flex items-center gap-2 rounded-full bg-indigo-50 border border-indigo-200 px-3 py-1 text-xs font-extrabold text-indigo-800">
+                  <RefreshCcw size={14} />
+                  Page Count Sync
+                </div>
+                <h2 className="mt-3 text-xl font-extrabold text-slate-900">
+                  Kaunsi files sync karni hain?
+                </h2>
+                <p className="mt-1 text-sm text-slate-600 leading-6">
+                  90% cases me sirf 0 page count wali files sync karni hoti hain. Isliye pehla
+                  option recommended hai.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setIsSyncChoiceOpen(false)}
+                className="rounded-xl border border-slate-200 bg-white p-2 hover:bg-slate-50"
+              >
+                <X size={18} />
+              </button>
+            </div>
+
+            <div className="mt-5 grid grid-cols-1 gap-3">
+              <button
+                type="button"
+                onClick={() => void startSyncPages("zero")}
+                className="text-left rounded-2xl border border-emerald-200 bg-emerald-50 p-4 hover:bg-emerald-100 transition"
+              >
+                <div className="flex items-start gap-3">
+                  <div className="h-10 w-10 rounded-2xl bg-emerald-600 text-white flex items-center justify-center shrink-0">
+                    <BadgeCheck size={18} />
+                  </div>
+                  <div>
+                    <div className="text-sm font-extrabold text-emerald-900">
+                      Sync Only 0 Page Count Files
+                    </div>
+                    <div className="mt-1 text-xs leading-5 text-emerald-800">
+                      Recommended. Sirf un official paper PDFs ka page count sync hoga jinka
+                      current page count 0 hai.
+                    </div>
+                  </div>
+                </div>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => void startSyncPages("all")}
+                className="text-left rounded-2xl border border-indigo-200 bg-indigo-50 p-4 hover:bg-indigo-100 transition"
+              >
+                <div className="flex items-start gap-3">
+                  <div className="h-10 w-10 rounded-2xl bg-indigo-600 text-white flex items-center justify-center shrink-0">
+                    <RefreshCcw size={18} />
+                  </div>
+                  <div>
+                    <div className="text-sm font-extrabold text-indigo-900">
+                      Sync All Official Paper Files
+                    </div>
+                    <div className="mt-1 text-xs leading-5 text-indigo-800">
+                      Sabhi live official paper PDFs ka page count dobara sync hoga. Large data me
+                      ye option zyada time le sakta hai.
+                    </div>
+                  </div>
+                </div>
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <div className="max-w-7xl mx-auto px-4 py-8">
         <div className="rounded-3xl bg-white border border-gray-200 p-6 shadow-sm">
           <div className="flex items-start justify-between gap-4 flex-wrap">
@@ -725,12 +1006,26 @@ export default function OfficialPapersPage() {
 
               <h1 className="text-2xl font-extrabold mt-3">IGNOU Official Papers</h1>
               <p className="text-sm text-slate-600 mt-1">
-                Ye page unsolved question papers ke liye hai. Ab upload flow direct aur simple
-                rakha gaya hai: har PDF final upload hoti hai, bina block, batch aur job system ke.
+                Ye page unsolved question papers ke liye hai. Upload ke baad page count sync ke liye
+                recommended option: 0 page count files only.
               </p>
             </div>
 
             <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={() => setIsSyncChoiceOpen(true)}
+                disabled={isUploading || isSyncingAllPages}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-indigo-600 hover:bg-indigo-700 text-white transition font-semibold shadow-sm disabled:opacity-60"
+              >
+                {isSyncingAllPages ? (
+                  <LoaderCircle size={18} className="animate-spin" />
+                ) : (
+                  <RefreshCcw size={18} />
+                )}
+                {isSyncingAllPages ? "Syncing Pages..." : "Sync Pages"}
+              </button>
+
               <button
                 type="button"
                 onClick={() => {
@@ -750,7 +1045,8 @@ export default function OfficialPapersPage() {
               <button
                 type="button"
                 onClick={refreshAll}
-                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-semibold shadow-sm"
+                disabled={isSyncingAllPages}
+                className="inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 transition font-semibold shadow-sm disabled:opacity-60"
               >
                 <RefreshCcw size={18} />
                 Refresh
@@ -854,6 +1150,90 @@ export default function OfficialPapersPage() {
             </div>
           ) : null}
 
+          {(isSyncingAllPages || allPagesSyncTotal > 0 || allPagesSyncScanned > 0) ? (
+            <div className="mt-4 rounded-2xl border border-indigo-200 bg-indigo-50 p-4">
+              <div className="flex items-center justify-between gap-3 flex-wrap">
+                <div>
+                  <div className="text-sm font-extrabold text-indigo-900">
+                    Page Count Sync Progress
+                  </div>
+                  <div className="mt-1 text-xs text-indigo-800">
+                    Mode:{" "}
+                    <b>
+                      {allPagesSyncMode === "zero"
+                        ? "Only 0 page count files"
+                        : allPagesSyncMode === "all"
+                        ? "All official paper files"
+                        : "-"}
+                    </b>
+                  </div>
+                </div>
+
+                {isSyncingAllPages ? (
+                  <div className="inline-flex items-center gap-2 rounded-full bg-white border border-indigo-200 px-3 py-2 text-xs font-extrabold text-indigo-800">
+                    <LoaderCircle size={14} className="animate-spin" />
+                    Running
+                  </div>
+                ) : (
+                  <div className="inline-flex items-center gap-2 rounded-full bg-white border border-indigo-200 px-3 py-2 text-xs font-extrabold text-indigo-800">
+                    <CheckCircle2 size={14} />
+                    Ready
+                  </div>
+                )}
+              </div>
+
+              <div className="mt-3 h-4 w-full overflow-hidden rounded-full bg-indigo-100">
+                <div
+                  className="h-full rounded-full bg-indigo-700 transition-all"
+                  style={{ width: `${allPagesSyncProgressPercent}%` }}
+                />
+              </div>
+
+              <div className="mt-3 grid grid-cols-2 md:grid-cols-5 gap-3 text-xs">
+                <div className="rounded-xl bg-white border border-indigo-100 p-3">
+                  <div className="text-indigo-700 font-bold">Scanned</div>
+                  <div className="mt-1 text-slate-900 font-extrabold">
+                    {allPagesSyncScanned}
+                  </div>
+                </div>
+
+                <div className="rounded-xl bg-white border border-indigo-100 p-3">
+                  <div className="text-indigo-700 font-bold">Target</div>
+                  <div className="mt-1 text-slate-900 font-extrabold">
+                    {allPagesSyncTotal}
+                  </div>
+                </div>
+
+                <div className="rounded-xl bg-white border border-indigo-100 p-3">
+                  <div className="text-indigo-700 font-bold">Processed</div>
+                  <div className="mt-1 text-slate-900 font-extrabold">
+                    {allPagesSyncDone}
+                  </div>
+                </div>
+
+                <div className="rounded-xl bg-white border border-emerald-100 p-3">
+                  <div className="text-emerald-700 font-bold">Success</div>
+                  <div className="mt-1 text-slate-900 font-extrabold">
+                    {allPagesSyncSuccess}
+                  </div>
+                </div>
+
+                <div className="rounded-xl bg-white border border-rose-100 p-3">
+                  <div className="text-rose-700 font-bold">Failed</div>
+                  <div className="mt-1 text-slate-900 font-extrabold">
+                    {allPagesSyncFailed}
+                  </div>
+                </div>
+              </div>
+
+              <div className="mt-3 text-xs text-indigo-900 leading-6">
+                Stage: <b>{allPagesSyncStage || "-"}</b>
+                <br />
+                Current file: <b className="break-all">{allPagesSyncCurrentFile || "-"}</b>
+              </div>
+            </div>
+          ) : null}
+
           <div className="mt-6 grid grid-cols-1 lg:grid-cols-[380px_minmax(0,1fr)] gap-6 items-start">
             <div className="space-y-4">
               <div className="rounded-2xl border border-gray-200 bg-white p-4">
@@ -865,7 +1245,9 @@ export default function OfficialPapersPage() {
                 <label
                   htmlFor="official-paper-direct-input"
                   className={`mt-3 flex min-h-[140px] w-full cursor-pointer items-center justify-center rounded-2xl border-2 border-dashed border-sky-300 bg-sky-50 px-4 py-6 text-center transition ${
-                    showTrash || isUploading ? "pointer-events-none opacity-60" : "hover:bg-sky-100"
+                    showTrash || isUploading || isSyncingAllPages
+                      ? "pointer-events-none opacity-60"
+                      : "hover:bg-sky-100"
                   }`}
                 >
                   <div>
@@ -893,14 +1275,14 @@ export default function OfficialPapersPage() {
                     resetMessages();
                   }}
                   className="hidden"
-                  disabled={showTrash || isUploading}
+                  disabled={showTrash || isUploading || isSyncingAllPages}
                 />
 
                 <select
                   value={conflictMode}
                   onChange={(e) => setConflictMode(e.target.value as "ignore" | "replace")}
                   className="w-full mt-3 px-4 py-3 rounded-xl border border-gray-200 bg-white outline-none"
-                  disabled={showTrash || isUploading}
+                  disabled={showTrash || isUploading || isSyncingAllPages}
                 >
                   <option value="ignore">Duplicate mode: Ignore new</option>
                   <option value="replace">Duplicate mode: Replace old</option>
@@ -922,7 +1304,12 @@ export default function OfficialPapersPage() {
                   <button
                     type="button"
                     onClick={startDirectUpload}
-                    disabled={showTrash || isUploading || !selectedPdfFiles.length}
+                    disabled={
+                      showTrash ||
+                      isUploading ||
+                      isSyncingAllPages ||
+                      !selectedPdfFiles.length
+                    }
                     className="flex-1 inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-slate-900 hover:bg-slate-950 text-white transition font-extrabold disabled:opacity-60 shadow-sm"
                   >
                     <Upload size={18} />
@@ -936,7 +1323,7 @@ export default function OfficialPapersPage() {
                       resetUploadProgress();
                       resetMessages();
                     }}
-                    disabled={isUploading}
+                    disabled={isUploading || isSyncingAllPages}
                     className="inline-flex items-center justify-center gap-2 px-4 py-3 rounded-2xl bg-white hover:bg-gray-50 border border-gray-200 transition font-extrabold disabled:opacity-60 shadow-sm"
                   >
                     <X size={18} />
@@ -975,9 +1362,9 @@ export default function OfficialPapersPage() {
               ) : null}
 
               <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900 leading-6">
-                <b>Simple direct flow:</b> PDFs select karo → har PDF direct final upload hogi →
-                jo upload ho gayi woh turant done count me aa jayegi → koi block, batch, staged,
-                job system use nahi ho raha.
+                <b>Best workflow:</b> PDFs upload karo → upload complete hone do → upar
+                <b> Sync Pages</b> button click karo → pehle <b>Sync Only 0 Page Count Files</b>
+                option use karo.
               </div>
 
               <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4 text-xs text-emerald-900 leading-6">
@@ -1232,7 +1619,13 @@ export default function OfficialPapersPage() {
                                       {formatBytes(Number(file.sizeBytes || 0))}
                                     </span>
 
-                                    <span className="inline-flex items-center gap-1 rounded-full px-2 py-1 border border-slate-200 bg-slate-50">
+                                    <span
+                                      className={`inline-flex items-center gap-1 rounded-full px-2 py-1 border ${
+                                        Number(file.pageCount || 0) <= 0
+                                          ? "border-rose-200 bg-rose-50 text-rose-700"
+                                          : "border-slate-200 bg-slate-50"
+                                      }`}
+                                    >
                                       <BadgeCheck size={12} />
                                       {Number(file.pageCount || 0)} pages
                                     </span>
@@ -1244,7 +1637,7 @@ export default function OfficialPapersPage() {
                                         <button
                                           type="button"
                                           onClick={() => openPdf(file)}
-                                          disabled={isBusy}
+                                          disabled={isBusy || isSyncingAllPages}
                                           className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 text-sm font-bold shadow-sm disabled:opacity-60"
                                         >
                                           <ExternalLink size={15} />
@@ -1254,7 +1647,7 @@ export default function OfficialPapersPage() {
                                         <button
                                           type="button"
                                           onClick={() => downloadPdf(file)}
-                                          disabled={isBusy}
+                                          disabled={isBusy || isSyncingAllPages}
                                           className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-white hover:bg-gray-50 border border-gray-200 text-sm font-bold shadow-sm disabled:opacity-60"
                                         >
                                           <Download size={15} />
@@ -1264,7 +1657,7 @@ export default function OfficialPapersPage() {
                                         <button
                                           type="button"
                                           onClick={() => syncPages(file)}
-                                          disabled={isBusy}
+                                          disabled={isBusy || isSyncingAllPages}
                                           className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-sky-50 hover:bg-sky-100 border border-sky-200 text-sky-700 text-sm font-bold shadow-sm disabled:opacity-60"
                                         >
                                           <RefreshCcw size={15} />
@@ -1274,7 +1667,7 @@ export default function OfficialPapersPage() {
                                         <button
                                           type="button"
                                           onClick={() => editSkuMeta(file)}
-                                          disabled={isBusy}
+                                          disabled={isBusy || isSyncingAllPages}
                                           className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-700 text-sm font-bold shadow-sm disabled:opacity-60"
                                         >
                                           <Pencil size={15} />
@@ -1284,7 +1677,7 @@ export default function OfficialPapersPage() {
                                         <button
                                           type="button"
                                           onClick={() => moveToTrash(file)}
-                                          disabled={isBusy}
+                                          disabled={isBusy || isSyncingAllPages}
                                           className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 text-sm font-bold shadow-sm disabled:opacity-60"
                                         >
                                           <Trash2 size={15} />
@@ -1296,7 +1689,7 @@ export default function OfficialPapersPage() {
                                         <button
                                           type="button"
                                           onClick={() => restoreFile(file)}
-                                          disabled={isBusy}
+                                          disabled={isBusy || isSyncingAllPages}
                                           className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 text-emerald-700 text-sm font-bold shadow-sm disabled:opacity-60"
                                         >
                                           <RotateCcw size={15} />
@@ -1306,7 +1699,7 @@ export default function OfficialPapersPage() {
                                         <button
                                           type="button"
                                           onClick={() => purgeFile(file)}
-                                          disabled={isBusy}
+                                          disabled={isBusy || isSyncingAllPages}
                                           className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-rose-50 hover:bg-rose-100 border border-rose-200 text-rose-700 text-sm font-bold shadow-sm disabled:opacity-60"
                                         >
                                           <XCircle size={15} />
@@ -1383,8 +1776,8 @@ export default function OfficialPapersPage() {
               </div>
 
               <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-xs text-amber-900 leading-6">
-                <b>Current status:</b> Official papers upload flow ab simple direct queue mode me hai.
-                Jo PDF upload ho jaati hai woh turant final done mani jaati hai.
+                <b>Current status:</b> Upload complete hone ke baad <b>Sync Pages</b> button se
+                pehle <b>Only 0 Page Count Files</b> sync karo. Ye fast aur safe rahega.
               </div>
             </div>
           </div>
