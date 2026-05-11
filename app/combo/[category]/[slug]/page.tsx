@@ -1,7 +1,10 @@
 // app/combo/[category]/[slug]/page.tsx
 import type { Metadata } from "next";
-import { notFound } from "next/navigation";
+import { notFound, permanentRedirect } from "next/navigation";
 import ComboDetailsClient from "./ComboDetailsClient";
+
+import dbConnect from "@/lib/db";
+import Combo from "@/models/Combo";
 
 const BASE_URL = "https://istudentsportal.com";
 
@@ -37,8 +40,39 @@ type PageProps = {
   searchParams?: Promise<SearchParams> | SearchParams;
 };
 
+type ComboSeoDoc = {
+  _id?: unknown;
+  title?: string;
+  shortTitle?: string;
+  slug?: string;
+  categorySlug?: string;
+  categoryLabel?: string;
+  description?: string;
+  shortDescription?: string;
+  metaTitle?: string;
+  metaDescription?: string;
+  badge?: string;
+  thumbUrl?: string;
+  itemsSnapshot?: Array<{
+    title?: string;
+    thumbUrl?: string;
+  }>;
+};
+
+export const dynamic = "force-dynamic";
+
 function safeText(value: unknown) {
   return String(value ?? "").trim();
+}
+
+function normalizeSlug(value: unknown) {
+  return safeText(value)
+    .toLowerCase()
+    .replace(/&/g, " and ")
+    .replace(/[^a-z0-9\s-]/g, "")
+    .replace(/\s+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
 }
 
 function titleCaseFromSlug(slug: string) {
@@ -80,8 +114,63 @@ function hasUsefulSearchParams(searchParams?: SearchParams | null) {
   });
 }
 
+function absoluteUrl(pathOrUrl?: string) {
+  const value = safeText(pathOrUrl);
+  if (!value) return "";
+  if (/^https?:\/\//i.test(value)) return value;
+  return `${BASE_URL}${value.startsWith("/") ? value : `/${value}`}`;
+}
+
+function comboImage(combo: ComboSeoDoc | null) {
+  if (!combo) return "";
+
+  const direct = safeText(combo.thumbUrl);
+  if (direct) return absoluteUrl(direct);
+
+  const firstItemThumb = Array.isArray(combo.itemsSnapshot)
+    ? safeText(combo.itemsSnapshot.find((item) => safeText(item?.thumbUrl))?.thumbUrl)
+    : "";
+
+  return firstItemThumb ? absoluteUrl(firstItemThumb) : "";
+}
+
 function isAllowedCategory(category: string) {
   return ALLOWED_CATEGORY_SLUGS.has(category);
+}
+
+async function fetchCombo(category: string, slug: string): Promise<ComboSeoDoc | null> {
+  if (!category || !slug || !isAllowedCategory(category)) return null;
+
+  await dbConnect();
+
+  const doc = await Combo.findOne({
+    categorySlug: category,
+    slug,
+    isActive: true,
+    status: "active",
+    $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
+  })
+    .select(
+      [
+        "title",
+        "shortTitle",
+        "slug",
+        "categorySlug",
+        "categoryLabel",
+        "description",
+        "shortDescription",
+        "metaTitle",
+        "metaDescription",
+        "badge",
+        "thumbUrl",
+        "itemsSnapshot.title",
+        "itemsSnapshot.thumbUrl",
+        "updatedAt",
+      ].join(" ")
+    )
+    .lean();
+
+  return doc as ComboSeoDoc | null;
 }
 
 export async function generateMetadata({
@@ -91,8 +180,8 @@ export async function generateMetadata({
   const p = await resolveParams(params);
   const sp = await resolveSearchParams(searchParams);
 
-  const category = safeText(p?.category);
-  const slug = safeText(p?.slug);
+  const category = normalizeSlug(p?.category);
+  const slug = normalizeSlug(p?.slug);
 
   if (!category || !slug || !isAllowedCategory(category)) {
     return {
@@ -104,27 +193,49 @@ export async function generateMetadata({
     };
   }
 
-  const categoryLabel = CATEGORY_LABELS[category] || titleCaseFromSlug(category);
-  const readableTitle = titleCaseFromSlug(slug);
-  const canonicalPath = `/combo/${category}/${slug}`;
+  const combo = await fetchCombo(category, slug);
+
+  if (!combo) {
+    return {
+      title: "Combo Not Found",
+      robots: {
+        index: false,
+        follow: false,
+      },
+    };
+  }
+
+  const finalCategory = normalizeSlug(combo.categorySlug) || category;
+  const finalSlug = normalizeSlug(combo.slug) || slug;
+  const categoryLabel =
+    safeText(combo.categoryLabel) ||
+    CATEGORY_LABELS[finalCategory] ||
+    titleCaseFromSlug(finalCategory);
+
+  const canonicalPath = `/combo/${finalCategory}/${finalSlug}`;
   const canonicalUrl = `${BASE_URL}${canonicalPath}`;
   const hasFilters = hasUsefulSearchParams(sp);
 
-  const title = `${readableTitle} | IGNOU ${categoryLabel} Combo`;
-  const description = `View IGNOU ${categoryLabel} combo details, included items, pricing, medium, session and bundle information on IGNOU Students Portal.`;
+  const fallbackTitle = `${titleCaseFromSlug(finalSlug)} | IGNOU ${categoryLabel} Combo`;
+  const title = safeText(combo.metaTitle) || safeText(combo.title) || fallbackTitle;
+
+  const description =
+    safeText(combo.metaDescription) ||
+    safeText(combo.shortDescription) ||
+    safeText(combo.description) ||
+    `View IGNOU ${categoryLabel} combo details, included items, pricing, medium, session and bundle information on IGNOU Students Portal.`;
+
+  const image = comboImage(combo);
 
   return {
     metadataBase: new URL(BASE_URL),
     title: `${title} | IGNOU Students Portal`,
-    description,
+    description: description.slice(0, 180),
 
-    // ✅ Clean combo detail URL is canonical.
     alternates: {
       canonical: canonicalPath,
     },
 
-    // ✅ Detail page is indexable.
-    // ✅ Detail page query versions are noindex + follow.
     robots: hasFilters
       ? {
           index: false,
@@ -154,22 +265,29 @@ export async function generateMetadata({
       url: canonicalUrl,
       siteName: "IGNOU Students Portal",
       title,
-      description,
-      images: [
-        {
-          url: "/og.jpg",
-          width: 1200,
-          height: 630,
-          alt: title,
-        },
-      ],
+      description: description.slice(0, 180),
+      images: image
+        ? [
+            {
+              url: image,
+              alt: title,
+            },
+          ]
+        : [
+            {
+              url: "/og.jpg",
+              width: 1200,
+              height: 630,
+              alt: title,
+            },
+          ],
     },
 
     twitter: {
       card: "summary_large_image",
       title,
-      description,
-      images: ["/og.jpg"],
+      description: description.slice(0, 180),
+      images: image ? [image] : ["/og.jpg"],
     },
   };
 }
@@ -177,11 +295,28 @@ export async function generateMetadata({
 export default async function Page({ params }: PageProps) {
   const p = await resolveParams(params);
 
-  const category = safeText(p?.category);
-  const slug = safeText(p?.slug);
+  const rawCategory = safeText(p?.category);
+  const rawSlug = safeText(p?.slug);
+
+  const category = normalizeSlug(rawCategory);
+  const slug = normalizeSlug(rawSlug);
 
   if (!category || !slug || !isAllowedCategory(category)) {
     notFound();
+  }
+
+  const combo = await fetchCombo(category, slug);
+
+  if (!combo) {
+    notFound();
+  }
+
+  const finalCategory = normalizeSlug(combo.categorySlug) || category;
+  const finalSlug = normalizeSlug(combo.slug) || slug;
+  const canonicalPath = `/combo/${finalCategory}/${finalSlug}`;
+
+  if (rawCategory !== finalCategory || rawSlug !== finalSlug) {
+    permanentRedirect(canonicalPath);
   }
 
   return <ComboDetailsClient />;
