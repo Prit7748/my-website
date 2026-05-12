@@ -6,6 +6,7 @@ import Session from "@/models/Session";
 import BulkUploadJob from "@/models/BulkUploadJob";
 import ProductPricingRule from "@/models/ProductPricingRule";
 import { syncProductAvailabilityBySku } from "@/lib/productAvailability";
+import { revalidateBulkProductCache } from "@/lib/productRevalidation";
 import {
   CATEGORY_CONFIG,
   normalizeProductCategory,
@@ -2233,6 +2234,9 @@ export async function processBulkDetailsJobBatch(args: {
   let failedRows = 0;
   let skippedRows = 0;
 
+  const changedProductsForCache: Array<{ slug?: string; category?: string }> = [];
+  const previousProductsForCache: Array<{ slug?: string; category?: string }> = [];
+
   const availabilitySync = getAvailabilitySyncSummary(summary);
   if (!availabilitySync.startedAt) {
     availabilitySync.startedAt = new Date().toISOString();
@@ -2357,6 +2361,16 @@ export async function processBulkDetailsJobBatch(args: {
           }
         );
 
+        previousProductsForCache.push({
+          slug: safeStr(existing?.slug),
+          category: safeStr(existing?.category),
+        });
+
+        changedProductsForCache.push({
+          slug: finalSlug,
+          category: safeStr(payload?.category || config.category),
+        });
+
         updatedRows++;
       } else {
         const finalSlug = await ensureSlugAvailable(generated.slugBase);
@@ -2373,6 +2387,11 @@ export async function processBulkDetailsJobBatch(args: {
           deliverWithinMinutes: 20,
           onDemandNote: "",
           autoMakeAvailableOnUpload: true,
+        });
+
+        changedProductsForCache.push({
+          slug: finalSlug,
+          category: safeStr(payload?.category || config.category),
         });
 
         createdRows++;
@@ -2414,6 +2433,31 @@ export async function processBulkDetailsJobBatch(args: {
       });
     }
   }
+
+  const isFinalExecutionBatch = endIndex >= executionInputRows.length - 1;
+
+  const cacheRevalidation =
+    !config.dryRun &&
+    (changedProductsForCache.length > 0 || previousProductsForCache.length > 0)
+      ? revalidateBulkProductCache({
+          products: changedProductsForCache,
+          previousProducts: previousProductsForCache,
+          includeGlobalPages: isFinalExecutionBatch,
+          maxProductPaths: 500,
+        })
+      : {
+          ok: true,
+          skipped: true,
+          reason: config.dryRun
+            ? "Dry run mode - cache revalidation skipped"
+            : "No created/updated products in this batch",
+          revalidatedPaths: [],
+          revalidatedCount: 0,
+          productDetailPathCount: 0,
+          categoryPathCount: 0,
+          globalPathCount: 0,
+          cappedProductPaths: false,
+        };
 
   const execution = {
     ...(summary?.execution && typeof summary.execution === "object"
@@ -2478,6 +2522,7 @@ export async function processBulkDetailsJobBatch(args: {
       mode: "deferred",
     },
     postUploadSyncDeferred: true,
+    cacheRevalidation,
   };
 
   return {

@@ -1,3 +1,4 @@
+import { cache } from "react";
 import type { Metadata } from "next";
 import { notFound, permanentRedirect } from "next/navigation";
 import Script from "next/script";
@@ -14,6 +15,14 @@ import {
   isQuestionPaperProduct,
   isSolvedAssignmentProduct,
 } from "@/lib/thumbUrls";
+
+export const runtime = "nodejs";
+export const revalidate = 86400;
+export const dynamicParams = true;
+
+export async function generateStaticParams() {
+  return [];
+}
 
 type ApiProduct = {
   _id: string;
@@ -117,8 +126,6 @@ async function resolveParams<T extends Record<string, any>>(params: any): Promis
   return params as T;
 }
 
-export const dynamic = "force-dynamic";
-
 function categoryLabelFromSlug(categorySlug: string) {
   const map: Record<string, string> = {
     "solved-assignments": "Solved Assignments",
@@ -179,7 +186,7 @@ function buildMasterThumbnailFallback(product: ApiProduct) {
   return "";
 }
 
-async function fetchProduct(slug: string) {
+const fetchProduct = cache(async (slug: string) => {
   await dbConnect();
 
   const doc: any = await Product.findOne({
@@ -236,7 +243,7 @@ async function fetchProduct(slug: string) {
   };
 
   return { product, status: 200 };
-}
+});
 
 export async function generateMetadata({ params }: { params: any }): Promise<Metadata> {
   const p = await resolveParams<{ category: string; slug: string }>(params);

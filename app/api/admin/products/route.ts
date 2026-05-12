@@ -12,6 +12,7 @@ import { findVaultPdfBySku, safeStr as safeVaultStr } from "@/lib/pdfVault";
 import { syncGeneratedCombosForProductChange } from "@/lib/comboAutoSync";
 import { syncGeneratedHardcopyForProductChange } from "@/lib/hardcopyAutoSync";
 import { resolveRequiredProductPricing } from "@/lib/productPricing";
+import { revalidateProductCache } from "@/lib/productRevalidation";
 import {
   syncProductAvailabilityByProductId,
   syncProductAvailabilityBySku,
@@ -924,6 +925,7 @@ export async function POST(req: Request) {
     const freshDoc: any = await Product.findById(doc._id);
 
     const finalDoc = freshDoc || doc;
+    const finalDocObject = finalDoc.toObject ? finalDoc.toObject() : finalDoc;
 
     const resolveResult = await autoResolveWantToBuyForProduct({
       productId: finalDoc._id,
@@ -935,7 +937,7 @@ export async function POST(req: Request) {
     let comboSync: any = { ok: true, skipped: true };
     try {
       comboSync = await syncGeneratedCombosForProductChange({
-        after: finalDoc.toObject ? finalDoc.toObject() : finalDoc,
+        after: finalDocObject,
       });
     } catch (syncErr: any) {
       comboSync = {
@@ -947,7 +949,7 @@ export async function POST(req: Request) {
     let hardcopySync: any = { ok: true, skipped: true };
     try {
       hardcopySync = await syncGeneratedHardcopyForProductChange({
-        after: finalDoc.toObject ? finalDoc.toObject() : finalDoc,
+        after: finalDocObject,
       });
     } catch (syncErr: any) {
       hardcopySync = {
@@ -955,6 +957,11 @@ export async function POST(req: Request) {
         error: safeStr(syncErr?.message || "Hardcopy sync failed"),
       };
     }
+
+    revalidateProductCache({
+      product: finalDocObject,
+      includeGlobalPages: true,
+    });
 
     return NextResponse.json(
       {
@@ -965,6 +972,7 @@ export async function POST(req: Request) {
         autoResolvedWantToBuy: resolveResult,
         comboSync,
         hardcopySync,
+        cacheRevalidated: true,
         vaultAutofill: {
           pdfLinked: Boolean(pdfKey),
           pagesFilled: Number(finalDoc.pages || 0),

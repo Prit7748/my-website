@@ -17,23 +17,24 @@ function absUrl(path: string) {
   return `${BASE_URL}${clean.startsWith("/") ? clean : `/${clean}`}`;
 }
 
-function toDate(value: unknown, fallback = new Date()) {
+function toDate(value: unknown) {
   const date = value ? new Date(String(value)) : null;
-  return date && !Number.isNaN(date.getTime()) ? date : fallback;
+  return date && !Number.isNaN(date.getTime()) ? date : undefined;
 }
 
-function latestDate(values: unknown[], fallback = new Date()) {
-  let best: Date | null = null;
+function latestDate(values: unknown[]) {
+  let best: Date | undefined;
 
   for (const value of values) {
-    const date = value ? new Date(String(value)) : null;
-    if (!date || Number.isNaN(date.getTime())) continue;
+    const date = toDate(value);
+    if (!date) continue;
+
     if (!best || date.getTime() > best.getTime()) {
       best = date;
     }
   }
 
-  return best || fallback;
+  return best;
 }
 
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
@@ -56,7 +57,7 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
       slug: { $exists: true, $ne: "" },
       $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
     })
-      .select("slug category updatedAt")
+      .select("slug category updatedAt createdAt")
       .sort({ updatedAt: -1, _id: -1 })
       .lean(),
   ]);
@@ -66,19 +67,20 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
       blog?.updatedAt,
       blog?.publishedAt,
       blog?.createdAt,
-    ]),
-    now
+    ])
   );
 
   const latestProductDate = latestDate(
-    (products || []).map((product: any) => product?.updatedAt),
-    now
+    (products || []).flatMap((product: any) => [
+      product?.updatedAt,
+      product?.createdAt,
+    ])
   );
 
   const staticUrls: MetadataRoute.Sitemap = [
     {
       url: absUrl("/"),
-      lastModified: now,
+      lastModified: latestDate([latestProductDate, latestBlogDate]),
       changeFrequency: "daily",
       priority: 1,
     },
@@ -126,7 +128,7 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     },
     {
       url: absUrl("/projects"),
-      lastModified: now,
+      lastModified: latestProductDate,
       changeFrequency: "weekly",
       priority: 0.85,
     },
@@ -138,7 +140,6 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     },
     {
       url: absUrl("/courses"),
-      lastModified: now,
       changeFrequency: "weekly",
       priority: 0.8,
     },
@@ -150,37 +151,31 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
     },
     {
       url: absUrl("/about"),
-      lastModified: now,
       changeFrequency: "monthly",
       priority: 0.5,
     },
     {
       url: absUrl("/contact"),
-      lastModified: now,
       changeFrequency: "monthly",
       priority: 0.5,
     },
     {
       url: absUrl("/faq"),
-      lastModified: now,
       changeFrequency: "monthly",
       priority: 0.5,
     },
     {
       url: absUrl("/privacy"),
-      lastModified: now,
       changeFrequency: "monthly",
       priority: 0.3,
     },
     {
       url: absUrl("/terms"),
-      lastModified: now,
       changeFrequency: "monthly",
       priority: 0.3,
     },
     {
       url: absUrl("/refund-policy"),
-      lastModified: now,
       changeFrequency: "monthly",
       priority: 0.3,
     },
@@ -197,7 +192,7 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
 
       return {
         url: absUrl(href),
-        lastModified: toDate(product?.updatedAt, now),
+        lastModified: toDate(product?.updatedAt || product?.createdAt),
         changeFrequency: "weekly" as const,
         priority: 0.8,
       };
@@ -211,7 +206,9 @@ export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
 
       return {
         url: absUrl(`/blog/${slug}`),
-        lastModified: toDate(blog?.updatedAt || blog?.publishedAt || blog?.createdAt, now),
+        lastModified: toDate(
+          blog?.updatedAt || blog?.publishedAt || blog?.createdAt
+        ),
         changeFrequency: "weekly" as const,
         priority: 0.7,
       };

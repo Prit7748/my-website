@@ -7,6 +7,7 @@ import { findVaultPdfBySku, safeStr as safeVaultStr } from "@/lib/pdfVault";
 import { syncGeneratedCombosForProductChange } from "@/lib/comboAutoSync";
 import { syncGeneratedHardcopyForProductChange } from "@/lib/hardcopyAutoSync";
 import { resolveRequiredProductPricing } from "@/lib/productPricing";
+import { revalidateProductCache } from "@/lib/productRevalidation";
 import {
   syncProductAvailabilityByProductId,
   syncProductAvailabilityBySku,
@@ -354,6 +355,13 @@ export async function GET(req: NextRequest, ctx: { params: Promise<{ id: string 
   const availabilitySync = await syncCurrentProductStrong(product);
   product = await Product.findById(id);
 
+  if (touched || availabilitySync?.ok) {
+    revalidateProductCache({
+      product: product?.toObject ? product.toObject() : product,
+      includeGlobalPages: true,
+    });
+  }
+
   const editorProduct = {
     ...product.toObject(),
     availability: normalizeAvailability(product?.availability) || "want_to_buy",
@@ -647,6 +655,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
     const availabilitySync = await syncCurrentProductStrong(product);
     const freshProduct: any = await Product.findById(product._id);
     const finalProduct = freshProduct || product;
+    const finalProductObject = finalProduct.toObject ? finalProduct.toObject() : finalProduct;
 
     const resolveResult = await autoResolveWantToBuyForProduct({
       productId: finalProduct._id,
@@ -657,12 +666,18 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
 
     const comboSync = await runComboSync({
       before: beforeProduct,
-      after: finalProduct.toObject ? finalProduct.toObject() : finalProduct,
+      after: finalProductObject,
     });
 
     const hardcopySync = await runHardcopySync({
       before: beforeProduct,
-      after: finalProduct.toObject ? finalProduct.toObject() : finalProduct,
+      after: finalProductObject,
+    });
+
+    revalidateProductCache({
+      product: finalProductObject,
+      previousProduct: beforeProduct,
+      includeGlobalPages: true,
     });
 
     return NextResponse.json(
@@ -675,6 +690,7 @@ export async function PATCH(req: NextRequest, ctx: { params: Promise<{ id: strin
         comboSync,
         hardcopySync,
         oldSkuSync: oldSku && oldSku !== safeStr(product.sku) ? oldSkuSync : null,
+        cacheRevalidated: true,
         vaultAutofill: {
           pdfLinked: Boolean(finalProduct.pdfKey),
           pagesFilled: Number(finalProduct.pages || 0),
@@ -744,6 +760,12 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: stri
   const comboSync = await runComboSync({ before: beforeProduct, after: afterProduct });
   const hardcopySync = await runHardcopySync({ before: beforeProduct, after: afterProduct });
 
+  revalidateProductCache({
+    product: afterProduct,
+    previousProduct: beforeProduct,
+    includeGlobalPages: true,
+  });
+
   return NextResponse.json(
     {
       ok: true,
@@ -751,6 +773,7 @@ export async function DELETE(req: NextRequest, ctx: { params: Promise<{ id: stri
       productId: product._id,
       comboSync,
       hardcopySync,
+      cacheRevalidated: true,
     },
     { status: 200 }
   );
@@ -776,6 +799,8 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
       return NextResponse.json({ error: AUTO_HARDCOPY_EDIT_BLOCK_MESSAGE }, { status: 400 });
     }
 
+    const beforeProduct = product.toObject();
+
     product.deletedAt = null;
     product.deletedBy = "";
     product.lastModifiedAt = new Date();
@@ -789,6 +814,12 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     const comboSync = await runComboSync({ after: restored });
     const hardcopySync = await runHardcopySync({ after: restored });
 
+    revalidateProductCache({
+      product: restored,
+      previousProduct: beforeProduct,
+      includeGlobalPages: true,
+    });
+
     return NextResponse.json(
       {
         ok: true,
@@ -796,6 +827,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
         productId: product._id,
         comboSync,
         hardcopySync,
+        cacheRevalidated: true,
         availabilityAutomation: {
           mode: "derived-and-synced-on-restore",
           syncOk: Boolean(availabilitySync?.ok),
@@ -827,6 +859,11 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     const comboSync = await runComboSync({ before: beforeProduct });
     const hardcopySync = await runHardcopySync({ before: beforeProduct });
 
+    revalidateProductCache({
+      previousProduct: beforeProduct,
+      includeGlobalPages: true,
+    });
+
     return NextResponse.json(
       {
         ok: true,
@@ -834,6 +871,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
         productId: id,
         comboSync,
         hardcopySync,
+        cacheRevalidated: true,
       },
       { status: 200 }
     );
@@ -941,9 +979,15 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
     const availabilitySync = await syncCurrentProductStrong(created);
     const freshCreated: any = await Product.findById(created._id);
     const finalCreated = freshCreated || created;
+    const finalCreatedObject = finalCreated.toObject ? finalCreated.toObject() : finalCreated;
 
-    const comboSync = await runComboSync({ after: finalCreated.toObject ? finalCreated.toObject() : finalCreated });
-    const hardcopySync = await runHardcopySync({ after: finalCreated.toObject ? finalCreated.toObject() : finalCreated });
+    const comboSync = await runComboSync({ after: finalCreatedObject });
+    const hardcopySync = await runHardcopySync({ after: finalCreatedObject });
+
+    revalidateProductCache({
+      product: finalCreatedObject,
+      includeGlobalPages: true,
+    });
 
     return NextResponse.json(
       {
@@ -953,6 +997,7 @@ export async function POST(req: NextRequest, ctx: { params: Promise<{ id: string
         pricingResolution,
         comboSync,
         hardcopySync,
+        cacheRevalidated: true,
         availabilityAutomation: {
           mode: "derived-and-synced-on-duplicate",
           syncOk: Boolean(availabilitySync?.ok),
