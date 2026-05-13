@@ -1334,9 +1334,9 @@ export default function OfficialPapersPage() {
                 <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs leading-5 text-emerald-800">
                   Recommended filename pattern:
                   <br />
-                  <b>BHIC131ENG202526.pdf</b>
+                  <b>BHIC131ENG202526A.pdf</b>
                   <br />
-                  <b>BEGC101ENG202526.pdf</b>
+                  <b>BEGC101ENG202526Q.pdf</b>
                 </div>
               </div>
 

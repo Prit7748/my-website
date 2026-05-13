@@ -1966,9 +1966,9 @@ export default function HiddenPdfVaultPage() {
                 <div className="mt-3 rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-xs leading-5 text-emerald-800">
                   Recommended filename format:
                   <br />
-                  <b>BHIC131ENG202526.pdf</b>
+                  <b>BHIC131ENG202526A.pdf</b>
                   <br />
-                  <b>BEGC101HIN202526.pdf</b>
+                  <b>BEGC101HIN202526Q.pdf</b>
                   <br />
                   Filename se SKU parse hoga, isliye final PDF name product SKU-based hi rakho.
                 </div>
