@@ -116,6 +116,53 @@ type ApiProductCard = {
 
 type ApiProductsResponse = { products: ApiProductCard[] };
 
+type ProductReviewItem = {
+  _id: string;
+  rating: number;
+  review: string;
+  userName: string;
+  verifiedPurchase: boolean;
+  createdAt?: string | null;
+  updatedAt?: string | null;
+};
+
+type ProductReviewSummary = {
+  totalReviews: number;
+  averageRating: number;
+  breakdown?: Record<string, number>;
+};
+
+type ProductReviewViewer = {
+  loggedIn: boolean;
+  verifiedBuyer: boolean;
+  canReview: boolean;
+  hasReview: boolean;
+  myReview?: {
+    _id: string;
+    rating: number;
+    review: string;
+    status: "pending" | "approved" | "rejected" | string;
+    verifiedPurchase: boolean;
+    createdAt?: string | null;
+    updatedAt?: string | null;
+  } | null;
+};
+
+type ProductReviewsResponse = {
+  ok?: boolean;
+  error?: string;
+  message?: string;
+  summary?: ProductReviewSummary;
+  reviews?: ProductReviewItem[];
+  viewer?: ProductReviewViewer;
+  pagination?: {
+    page: number;
+    limit: number;
+    total: number;
+    totalPages: number;
+  };
+};
+
 function safeArr(x: any): string[] {
   return Array.isArray(x) ? x.filter(Boolean) : [];
 }
@@ -135,6 +182,26 @@ function money(n: number) {
   } catch {
     return String(n);
   }
+}
+
+function formatReviewDate(input?: string | null) {
+  if (!input) return "";
+  const d = new Date(input);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "numeric",
+  });
+}
+
+function ratingLabel(rating: number) {
+  const r = Math.max(1, Math.min(5, Math.trunc(Number(rating || 0))));
+  if (r === 5) return "Excellent";
+  if (r === 4) return "Very Good";
+  if (r === 3) return "Good";
+  if (r === 2) return "Average";
+  return "Needs Improvement";
 }
 function isHindiLike(lang: string) {
   const s = safeStr(lang).toLowerCase();
@@ -286,6 +353,32 @@ export default function ProductDetailsClient({
     phone: "",
     message: "",
   });
+
+
+  const [reviewsLoading, setReviewsLoading] = useState(false);
+  const [reviewSubmitting, setReviewSubmitting] = useState(false);
+  const [reviewFormOpen, setReviewFormOpen] = useState(false);
+  const [reviews, setReviews] = useState<ProductReviewItem[]>([]);
+  const [reviewSummary, setReviewSummary] = useState<ProductReviewSummary>({
+    totalReviews: 0,
+    averageRating: 0,
+    breakdown: {},
+  });
+  const [reviewViewer, setReviewViewer] = useState<ProductReviewViewer>({
+    loggedIn: false,
+    verifiedBuyer: false,
+    canReview: false,
+    hasReview: false,
+    myReview: null,
+  });
+  const [reviewForm, setReviewForm] = useState({
+    rating: 5,
+    review: "",
+  });
+  const [reviewNotice, setReviewNotice] = useState<{
+    type: "success" | "error" | "info";
+    text: string;
+  }>({ type: "info", text: "" });
 
   const [ctaToast, setCtaToast] = useState<{ show: boolean; text: string }>({
     show: false,
@@ -466,15 +559,8 @@ export default function ProductDetailsClient({
       product.language
     )}\n\nLink: ${pageUrl || pathname}`
   );
-  const waReviewMsg = encodeURIComponent(
-    `Hi! I purchased this product and want to share my review:\n\n${computedTitle}\n${
-      pageUrl || pathname
-    }\n\nRating: ⭐⭐⭐⭐⭐\nReview: `
-  );
-
   const waBuyLink = `https://wa.me/91${waNumber}?text=${waBuyMsg}`;
   const waSamplesLink = `https://wa.me/91${waNumber}?text=${waSamplesMsg}`;
-  const waReviewLink = `https://wa.me/91${waNumber}?text=${waReviewMsg}`;
 
   const handleAddToCart = () => {
     if (isOutOfStock(product)) {
@@ -556,6 +642,485 @@ export default function ProductDetailsClient({
     } finally {
       setWtbLoading(false);
     }
+  }
+
+
+  async function loadProductReviews() {
+    const productId = safeStr(product?._id);
+    const slug = safeStr(product?.slug);
+
+    if (!productId && !slug) return;
+
+    setReviewsLoading(true);
+    try {
+      const qs = new URLSearchParams();
+      if (productId) qs.set("productId", productId);
+      if (slug) qs.set("slug", slug);
+      qs.set("page", "1");
+      qs.set("limit", "10");
+
+      const res = await fetch(`/api/products/reviews?${qs.toString()}`, {
+        credentials: "include",
+        cache: "no-store",
+      });
+
+      const data: ProductReviewsResponse = await res.json().catch(() => ({}));
+
+      if (!res.ok || !data?.ok) {
+        setReviews([]);
+        setReviewSummary({ totalReviews: 0, averageRating: 0, breakdown: {} });
+        setReviewViewer({
+          loggedIn: false,
+          verifiedBuyer: false,
+          canReview: false,
+          hasReview: false,
+          myReview: null,
+        });
+        setReviewNotice({
+          type: "error",
+          text: safeStr(data?.error || "Reviews load nahi ho paaye."),
+        });
+        return;
+      }
+
+      const nextViewer = data.viewer || {
+        loggedIn: false,
+        verifiedBuyer: false,
+        canReview: false,
+        hasReview: false,
+        myReview: null,
+      };
+
+      setReviews(Array.isArray(data.reviews) ? data.reviews : []);
+      setReviewSummary(
+        data.summary || { totalReviews: 0, averageRating: 0, breakdown: {} }
+      );
+      setReviewViewer(nextViewer);
+
+      if (nextViewer.myReview) {
+        setReviewForm({
+          rating: Math.max(1, Math.min(5, Number(nextViewer.myReview.rating || 5))),
+          review: safeStr(nextViewer.myReview.review),
+        });
+      }
+    } catch {
+      setReviewNotice({
+        type: "error",
+        text: "Reviews load karte waqt server error aaya.",
+      });
+    } finally {
+      setReviewsLoading(false);
+    }
+  }
+
+  async function submitProductReview() {
+    const productId = safeStr(product?._id);
+    const reviewText = safeStr(reviewForm.review);
+    const rating = Math.max(1, Math.min(5, Number(reviewForm.rating || 5)));
+
+    if (!reviewViewer.loggedIn) {
+      setReviewNotice({
+        type: "error",
+        text: "Review submit karne ke liye pehle login kijiye.",
+      });
+      return;
+    }
+
+    if (!reviewViewer.verifiedBuyer) {
+      setReviewNotice({
+        type: "error",
+        text: "Review sirf wahi registered student de sakta hai jisne ye product purchase kiya ho.",
+      });
+      return;
+    }
+
+    if (reviewText.length < 10) {
+      setReviewNotice({
+        type: "error",
+        text: "Review kam se kam 10 characters ka hona chahiye.",
+      });
+      return;
+    }
+
+    setReviewSubmitting(true);
+    setReviewNotice({ type: "info", text: "" });
+
+    try {
+      const res = await fetch("/api/products/reviews", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          productId,
+          slug: safeStr(product?.slug),
+          rating,
+          review: reviewText,
+        }),
+      });
+
+      const data: ProductReviewsResponse = await res.json().catch(() => ({}));
+
+      if (!res.ok || !data?.ok) {
+        setReviewNotice({
+          type: "error",
+          text: safeStr(data?.error || "Review submit failed."),
+        });
+        return;
+      }
+
+      setReviewNotice({
+        type: "success",
+        text:
+          safeStr(data?.message) ||
+          "Review saved successfully.",
+      });
+      setReviewFormOpen(false);
+      await loadProductReviews();
+    } catch {
+      setReviewNotice({
+        type: "error",
+        text: "Review submit karte waqt server error aaya.",
+      });
+    } finally {
+      setReviewSubmitting(false);
+    }
+  }
+
+  useEffect(() => {
+    void loadProductReviews();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [product?._id, product?.slug]);
+
+  const RatingStars = ({
+    value,
+    interactive = false,
+    size = 16,
+  }: {
+    value: number;
+    interactive?: boolean;
+    size?: number;
+  }) => {
+    const rating = Math.max(0, Math.min(5, Number(value || 0)));
+
+    return (
+      <div className="inline-flex items-center gap-1">
+        {[1, 2, 3, 4, 5].map((n) => {
+          const active = n <= rating;
+          if (!interactive) {
+            return (
+              <Star
+                key={n}
+                size={size}
+                className={active ? "text-yellow-500" : "text-slate-300"}
+                fill={active ? "currentColor" : "none"}
+              />
+            );
+          }
+
+          return (
+            <button
+              key={n}
+              type="button"
+              onClick={() => setReviewForm((p) => ({ ...p, rating: n }))}
+              className="rounded-lg p-1 text-yellow-500 hover:bg-yellow-50 transition"
+              aria-label={`Rate ${n} star${n === 1 ? "" : "s"}`}
+              title={`${n} star${n === 1 ? "" : "s"}`}
+            >
+              <Star
+                size={size + 4}
+                fill={active ? "currentColor" : "none"}
+                className={active ? "text-yellow-500" : "text-slate-300"}
+              />
+            </button>
+          );
+        })}
+      </div>
+    );
+  };
+
+  function renderStudentsReviewsSection() {
+    const totalReviews = Number(reviewSummary.totalReviews || 0);
+    const averageRating = Number(reviewSummary.averageRating || 0);
+    const myReview = reviewViewer.myReview || null;
+    const visibleReviews = myReview
+      ? reviews.filter((review) => safeStr(review._id) !== safeStr(myReview._id))
+      : reviews;
+    const hasReviews = visibleReviews.length > 0;
+
+    return (
+      <div className="mt-8 bg-white rounded-2xl shadow-sm border border-gray-200 p-5 md:p-6 transition hover:shadow-md">
+        <div className="flex items-center justify-between gap-3 flex-wrap">
+          <div>
+            <h2 className="text-lg md:text-xl font-extrabold text-slate-900 flex items-center gap-2">
+              <Star className="text-yellow-500" size={18} /> Students Reviews
+            </h2>
+            <div className="mt-1 text-xs text-slate-600 font-semibold">
+              Only verified buyers can submit rating & review for this product.
+            </div>
+          </div>
+
+          {reviewsLoading ? (
+            <button
+              type="button"
+              disabled
+              className="inline-flex items-center gap-2 rounded-xl bg-slate-100 text-slate-500 px-4 py-2 text-xs font-extrabold"
+            >
+              <Loader2 size={14} className="animate-spin" /> Loading...
+            </button>
+          ) : !reviewViewer.loggedIn ? (
+            <Link
+              href={`/login?redirect=${encodeURIComponent(pathname || "/")}`}
+              className="inline-flex items-center gap-2 rounded-xl bg-slate-900 text-white px-4 py-2 text-xs font-extrabold hover:bg-slate-800 transition"
+            >
+              <ShieldCheck size={14} /> Login to Review
+            </Link>
+          ) : !reviewViewer.verifiedBuyer ? (
+            <button
+              type="button"
+              disabled
+              className="inline-flex items-center gap-2 rounded-xl bg-slate-100 text-slate-500 px-4 py-2 text-xs font-extrabold cursor-not-allowed"
+              title="Only students who purchased this product can submit a review."
+            >
+              <ShieldCheck size={14} /> Verified Buyers Only
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => {
+                setReviewFormOpen((p) => !p);
+                setReviewNotice({ type: "info", text: "" });
+              }}
+              className="inline-flex items-center gap-2 rounded-xl bg-slate-900 text-white px-4 py-2 text-xs font-extrabold hover:bg-slate-800 transition"
+            >
+              <PenTool size={14} />
+              {reviewViewer.hasReview ? "Edit Your Review" : "Add Rating & Review"}
+            </button>
+          )}
+        </div>
+
+        <div className="mt-4 grid grid-cols-1 lg:grid-cols-[260px_minmax(0,1fr)] gap-4">
+          <div className="rounded-2xl border border-yellow-100 bg-yellow-50 p-4">
+            <div className="text-xs font-extrabold text-yellow-800 uppercase tracking-wide">
+              Overall Rating
+            </div>
+            <div className="mt-2 flex items-end gap-2">
+              <div className="text-4xl font-extrabold text-slate-900">
+                {totalReviews ? averageRating.toFixed(1) : "0.0"}
+              </div>
+              <div className="pb-1 text-sm font-bold text-slate-600">/ 5</div>
+            </div>
+            <div className="mt-2">
+              <RatingStars value={Math.round(averageRating)} size={16} />
+            </div>
+            <div className="mt-2 text-xs text-slate-700 font-semibold">
+              {totalReviews
+                ? `${totalReviews} public review${totalReviews === 1 ? "" : "s"}`
+                : "No public reviews yet"}
+            </div>
+          </div>
+
+          <div className="rounded-2xl border border-slate-100 bg-slate-50 p-4">
+            <div className="text-sm font-extrabold text-slate-900">
+              Your feedback helps other students
+            </div>
+            <div className="mt-1 text-xs text-slate-700 font-semibold leading-relaxed">
+              Reviews are accepted only from registered students who purchased this exact product. Your review helps other students make a better decision.
+            </div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <span className="inline-flex items-center gap-2 rounded-xl bg-white border border-emerald-100 px-3 py-2 text-[11px] font-extrabold text-emerald-800">
+                <BadgeCheck size={14} /> Verified Purchase
+              </span>
+              <span className="inline-flex items-center gap-2 rounded-xl bg-white border border-blue-100 px-3 py-2 text-[11px] font-extrabold text-blue-800">
+                <ShieldCheck size={14} /> Spam Protected
+              </span>
+              <span className="inline-flex items-center gap-2 rounded-xl bg-white border border-slate-200 px-3 py-2 text-[11px] font-extrabold text-slate-800">
+                <Star size={14} className="text-yellow-500" fill="currentColor" /> Helpful for Students
+              </span>
+            </div>
+          </div>
+        </div>
+
+        {myReview ? (
+          <div className="mt-4 rounded-2xl border border-blue-100 bg-blue-50 p-4">
+            <div className="flex items-start justify-between gap-3 flex-wrap">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <div className="text-sm font-extrabold text-slate-900">
+                    Your Review
+                  </div>
+                  {myReview.verifiedPurchase ? (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-100 px-2 py-1 text-[10px] font-extrabold text-emerald-800">
+                      <BadgeCheck size={12} /> Verified Purchase
+                    </span>
+                  ) : null}
+                </div>
+                <div className="mt-1 flex items-center gap-2 flex-wrap">
+                  <RatingStars value={myReview.rating} size={14} />
+                  <span className="text-xs font-bold text-slate-500">
+                    {ratingLabel(myReview.rating)}
+                  </span>
+                </div>
+              </div>
+              {myReview.updatedAt || myReview.createdAt ? (
+                <div className="text-[11px] font-bold text-slate-500">
+                  {formatReviewDate(myReview.updatedAt || myReview.createdAt)}
+                </div>
+              ) : null}
+            </div>
+            <div className="mt-3 text-sm text-slate-700 font-semibold leading-relaxed whitespace-pre-line">
+              {myReview.review}
+            </div>
+          </div>
+        ) : null}
+
+        {reviewNotice.text ? (
+          <div
+            className={`mt-4 rounded-2xl border p-4 text-sm font-semibold ${
+              reviewNotice.type === "success"
+                ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                : reviewNotice.type === "error"
+                ? "border-rose-200 bg-rose-50 text-rose-800"
+                : "border-blue-200 bg-blue-50 text-blue-800"
+            }`}
+          >
+            {reviewNotice.text}
+          </div>
+        ) : null}
+
+        {reviewFormOpen && reviewViewer.canReview ? (
+          <div className="mt-4 rounded-2xl border border-blue-100 bg-blue-50 p-4">
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div>
+                <div className="text-sm font-extrabold text-slate-900">
+                  {reviewViewer.hasReview ? "Update Your Review" : "Write a Review"}
+                </div>
+                <div className="mt-1 text-xs text-slate-700 font-semibold">
+                  Apna genuine experience, product quality aur usefulness likhiye.
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={() => setReviewFormOpen(false)}
+                disabled={reviewSubmitting}
+                className="h-9 w-9 rounded-xl bg-white border border-blue-100 flex items-center justify-center text-slate-600 hover:text-slate-900"
+                aria-label="Close review form"
+              >
+                <X size={16} />
+              </button>
+            </div>
+
+            <div className="mt-4 space-y-4">
+              <div>
+                <label className="text-xs font-extrabold text-slate-600 uppercase tracking-wide">
+                  Your Rating
+                </label>
+                <div className="mt-2 flex items-center gap-3 flex-wrap">
+                  <RatingStars value={reviewForm.rating} interactive size={20} />
+                  <span className="text-sm font-extrabold text-slate-900">
+                    {ratingLabel(reviewForm.rating)}
+                  </span>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-xs font-extrabold text-slate-600 uppercase tracking-wide">
+                  Your Review
+                </label>
+                <textarea
+                  value={reviewForm.review}
+                  onChange={(e) =>
+                    setReviewForm((p) => ({ ...p, review: e.target.value }))
+                  }
+                  className="mt-2 w-full min-h-[120px] rounded-2xl border border-blue-100 bg-white px-4 py-3 outline-none focus:border-blue-500 transition text-sm font-semibold text-slate-800"
+                  placeholder="Product quality, usefulness, delivery/download experience, and what helped you most..."
+                  maxLength={2000}
+                />
+                <div className="mt-1 text-[11px] text-slate-500 font-semibold text-right">
+                  {reviewForm.review.length}/2000
+                </div>
+              </div>
+
+              <div className="flex items-center justify-end gap-3 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => setReviewFormOpen(false)}
+                  disabled={reviewSubmitting}
+                  className="px-5 py-2.5 rounded-xl bg-white border border-slate-200 text-slate-900 font-extrabold hover:bg-slate-50 transition disabled:opacity-60"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void submitProductReview()}
+                  disabled={reviewSubmitting}
+                  className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-blue-700 text-white font-extrabold hover:bg-blue-800 transition disabled:opacity-60"
+                >
+                  {reviewSubmitting ? (
+                    <Loader2 className="animate-spin" size={18} />
+                  ) : (
+                    <Star size={18} />
+                  )}
+                  {reviewSubmitting ? "Submitting..." : "Submit Review"}
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        <div className="mt-5 space-y-3">
+          {reviewsLoading ? (
+            <div className="rounded-2xl border border-slate-100 bg-slate-50 p-5 text-sm font-bold text-slate-600 flex items-center gap-2">
+              <Loader2 size={18} className="animate-spin" /> Loading reviews...
+            </div>
+          ) : !hasReviews ? (
+            <div className="rounded-2xl border border-slate-100 bg-slate-50 p-5">
+              <div className="text-sm font-extrabold text-slate-900">
+                No public reviews yet
+              </div>
+              <div className="mt-1 text-xs text-slate-700 font-semibold leading-relaxed">
+                Agar aapne ye product purchase kiya hai, to apna verified review submit kar sakte hain.
+              </div>
+            </div>
+          ) : (
+            visibleReviews.map((review) => (
+              <div
+                key={review._id}
+                className="rounded-2xl border border-slate-100 bg-slate-50 p-4"
+              >
+                <div className="flex items-start justify-between gap-3 flex-wrap">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <div className="text-sm font-extrabold text-slate-900">
+                        {safeStr(review.userName) || "Verified Student"}
+                      </div>
+                      {review.verifiedPurchase ? (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-50 border border-emerald-100 px-2 py-1 text-[10px] font-extrabold text-emerald-800">
+                          <BadgeCheck size={12} /> Verified Purchase
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="mt-1 flex items-center gap-2 flex-wrap">
+                      <RatingStars value={review.rating} size={14} />
+                      <span className="text-xs font-bold text-slate-500">
+                        {ratingLabel(review.rating)}
+                      </span>
+                    </div>
+                  </div>
+                  {review.createdAt ? (
+                    <div className="text-[11px] font-bold text-slate-500">
+                      {formatReviewDate(review.createdAt)}
+                    </div>
+                  ) : null}
+                </div>
+                <div className="mt-3 text-sm text-slate-700 font-semibold leading-relaxed whitespace-pre-line">
+                  {review.review}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+      </div>
+    );
   }
 
   const BuySection = ({ isMobile = false }: { isMobile?: boolean }) => {
@@ -1468,30 +2033,7 @@ export default function ProductDetailsClient({
           />
         </div>
 
-        <div className="mt-8 bg-white rounded-2xl shadow-sm border border-gray-200 p-5 md:p-6 transition hover:shadow-md">
-          <div className="flex items-center justify-between gap-3 flex-wrap">
-            <h2 className="text-lg md:text-xl font-extrabold text-slate-900 flex items-center gap-2">
-              <Star className="text-yellow-500" size={18} /> Students Reviews
-            </h2>
-            <a
-              href={pageUrl ? waReviewLink : `https://wa.me/91${waNumber}`}
-              target="_blank"
-              rel="noreferrer"
-              className="inline-flex items-center gap-2 rounded-xl bg-slate-900 text-white px-4 py-2 text-xs font-extrabold hover:bg-slate-800 transition"
-            >
-              <MessageCircle size={14} /> Add Rating & Review
-            </a>
-          </div>
-
-          <div className="mt-4 rounded-2xl border border-slate-100 bg-slate-50 p-4">
-            <div className="text-sm font-extrabold text-slate-900">
-              Your feedback helps other students
-            </div>
-            <div className="mt-1 text-xs text-slate-700 font-semibold leading-relaxed">
-              Students who purchased this product can submit rating & review.
-            </div>
-          </div>
-        </div>
+        {renderStudentsReviewsSection()}
 
         <div className="mt-8">
           <div className="flex items-center justify-between gap-3 mb-4">

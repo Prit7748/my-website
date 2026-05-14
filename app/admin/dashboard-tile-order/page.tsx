@@ -12,6 +12,7 @@ import {
   EyeOff,
   Package,
   ClipboardList,
+  Star,
   FileText,
   Settings,
   BookOpen,
@@ -148,6 +149,7 @@ const DEFAULT_TILE_TONES: Record<AdminDashboardTileKey, NonDefaultTone> = {
   "want-to-buy": "blue",
   "on-demand-orders": "amber",
   orders: "gray",
+  "product-reviews": "amber",
   "order-reports": "emerald",
   analytics: "fuchsia",
   youtube: "red",
@@ -717,6 +719,20 @@ export default function DashboardTileOrderPage() {
           <div>
             <div className={`font-extrabold ${tone.title}`}>{getDisplayTitle(row)}</div>
             <div className="text-xs text-slate-600 mt-1">View payments & delivery</div>
+          </div>
+        </div>
+      );
+    }
+
+    if (row.key === "product-reviews") {
+      return (
+        <div className="flex items-center gap-3">
+          <Star className={tone.icon} />
+          <div>
+            <div className={`font-extrabold ${tone.title}`}>{getDisplayTitle(row)}</div>
+            <div className="text-xs text-slate-600 mt-1">
+              Approve verified student ratings & reviews
+            </div>
           </div>
         </div>
       );

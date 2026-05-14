@@ -629,6 +629,7 @@ function SearchBox({
   size = "large",
 }: SearchBoxProps) {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const router = useRouter();
   const isLarge = size === "large";
 
   useEffect(() => {
@@ -710,11 +711,22 @@ function SearchBox({
                 });
 
                 return (
-                  <Link
+                  <button
                     key={`${p.slug}-${p.category || "product"}`}
-                    href={href}
-                    onClick={() => setShowSuggest(false)}
-                    className="block border-b border-slate-100 px-4 py-3 transition last:border-b-0 hover:bg-slate-50"
+                    type="button"
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setShowSuggest(false);
+                      router.push(href);
+                    }}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setShowSuggest(false);
+                      router.push(href);
+                    }}
+                    className="block w-full border-b border-slate-100 px-4 py-3 text-left transition last:border-b-0 hover:bg-slate-50"
                   >
                     <div className="text-sm font-extrabold text-slate-900">
                       {safeStr(p.title) || "Untitled Product"}
@@ -724,7 +736,7 @@ function SearchBox({
                         .filter(Boolean)
                         .join(" • ")}
                     </div>
-                  </Link>
+                  </button>
                 );
               })
             ) : value.trim() ? (

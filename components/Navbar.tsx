@@ -17,10 +17,12 @@ import {
   LayoutDashboard,
   Wallet,
   BadgePercent,
+  Loader2,
 } from "lucide-react";
 
 import { useCart } from "../context/CartContext";
 import { getResellerPlanTheme } from "@/lib/reseller";
+import { productHref } from "@/lib/productHref";
 
 type NestedLink = { name: string; href: string };
 type SubLink = { name: string; href?: string; nestedLinks?: NestedLink[] };
@@ -39,6 +41,23 @@ type MeUser = {
     planName?: string;
     walletBalance?: number;
   };
+};
+
+type ProductSuggestion = {
+  _id?: string;
+  title?: string;
+  slug?: string;
+  category?: string;
+  session?: string;
+  language?: string;
+  price?: number;
+  oldPrice?: number | null;
+  subjectCode?: string;
+  courseCodes?: string[];
+};
+
+type ProductsSuggestionResponse = {
+  products?: ProductSuggestion[];
 };
 
 const NAV_START_EVENT = "isp:navigation-start";
@@ -63,6 +82,49 @@ function dispatchNavigationStart(href?: string) {
   );
 }
 
+function money(input: any) {
+  try {
+    return new Intl.NumberFormat("en-IN").format(Number(input || 0));
+  } catch {
+    return String(input || 0);
+  }
+}
+
+function normalizeQuery(raw: string) {
+  const s = safeStr(raw).toUpperCase();
+  const cleaned = s.replace(/[^A-Z0-9 ]+/g, " ").replace(/\s+/g, " ").trim();
+  const compact = cleaned.replace(/\s+/g, "");
+  return { cleaned, compact };
+}
+
+function extractSubjectCodeVariants(raw: string) {
+  const { compact } = normalizeQuery(raw);
+  const m1 = compact.match(/([A-Z]{2,6})(\d{2,4})/);
+
+  if (!m1) return { variants: [] as string[] };
+
+  const letters = m1[1];
+  const digits = m1[2];
+  const digitsNoLeading = String(Number(digits));
+  const pad3 = digitsNoLeading.padStart(3, "0");
+
+  const variants = Array.from(
+    new Set([
+      `${letters}${digits}`,
+      `${letters}${digitsNoLeading}`,
+      `${letters}-${digits}`,
+      `${letters}-${digitsNoLeading}`,
+      `${letters} ${digits}`,
+      `${letters} ${digitsNoLeading}`,
+      `${letters}${pad3}`,
+      `${letters}-${pad3}`,
+      `${letters} ${pad3}`,
+    ])
+  );
+
+  return { variants };
+}
+
 export default function Navbar() {
   const { cartCount } = useCart();
   const router = useRouter();
@@ -74,6 +136,8 @@ export default function Navbar() {
 
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [searchValue, setSearchValue] = useState("");
+  const [suggestions, setSuggestions] = useState<ProductSuggestion[]>([]);
+  const [suggestionsLoading, setSuggestionsLoading] = useState(false);
 
   const [authLoading, setAuthLoading] = useState(true);
   const [currentUser, setCurrentUser] = useState<MeUser | null>(null);
@@ -180,6 +244,60 @@ export default function Navbar() {
     };
   }, []);
 
+  useEffect(() => {
+    if (!isSearchOpen) {
+      setSuggestions([]);
+      setSuggestionsLoading(false);
+      return;
+    }
+
+    const q = searchValue.trim();
+
+    if (!q) {
+      setSuggestions([]);
+      setSuggestionsLoading(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    const timer = window.setTimeout(async () => {
+      setSuggestionsLoading(true);
+
+      try {
+        const { cleaned } = normalizeQuery(q);
+        const { variants } = extractSubjectCodeVariants(q);
+        const extra = variants.slice(0, 6).join(" ");
+
+        const params = new URLSearchParams();
+        params.set("page", "1");
+        params.set("limit", "8");
+        params.set("sort", "latest");
+        params.set("includeFacets", "0");
+        params.set("search", extra ? `${cleaned} ${extra}` : cleaned);
+
+        const res = await fetch(`/api/products?${params.toString()}`, {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+
+        const data: ProductsSuggestionResponse = await res.json().catch(() => ({}));
+        const list = Array.isArray(data?.products) ? data.products : [];
+
+        setSuggestions(list);
+      } catch (error: any) {
+        if (error?.name === "AbortError") return;
+        setSuggestions([]);
+      } finally {
+        setSuggestionsLoading(false);
+      }
+    }, 220);
+
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [isSearchOpen, searchValue]);
+
   const markPressed = (href: string) => {
     const normalized = normalizeHref(href);
     setPressedHref(normalized);
@@ -223,13 +341,34 @@ export default function Navbar() {
     setMobileNestedMenu((prev) => (prev === name ? null : name));
   };
 
+  const closeSearchModal = () => {
+    setIsSearchOpen(false);
+    setSuggestions([]);
+    setSuggestionsLoading(false);
+  };
+
   const runSearch = (qRaw?: string) => {
     const q = (qRaw ?? searchValue).trim();
     if (!q) return;
 
     const href = `/products?search=${encodeURIComponent(q)}`;
-    setIsSearchOpen(false);
+    closeSearchModal();
     markPressed("/products");
+    dispatchNavigationStart(href);
+    router.push(href);
+  };
+
+  const openSuggestionProduct = (product: ProductSuggestion) => {
+    const href = productHref({
+      slug: safeStr(product.slug),
+      category: safeStr(product.category),
+    });
+
+    if (!href || href === "/products") return;
+
+    closeSearchModal();
+    setSearchValue("");
+    markPressed(href);
     dispatchNavigationStart(href);
     router.push(href);
   };
@@ -391,6 +530,7 @@ export default function Navbar() {
               <button
                 onClick={() => {
                   setSearchValue("");
+                  setSuggestions([]);
                   setIsSearchOpen(true);
                 }}
                 className="ring-attn inline-flex h-11 w-11 items-center justify-center rounded-full border border-gray-200 bg-white text-slate-700 shadow-sm transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 active:scale-95"
@@ -566,6 +706,7 @@ export default function Navbar() {
               <button
                 onClick={() => {
                   setSearchValue("");
+                  setSuggestions([]);
                   setIsSearchOpen(true);
                 }}
                 className="inline-flex h-10 w-10 items-center justify-center rounded-full border border-gray-200 bg-white text-slate-700 shadow-sm transition hover:border-blue-200 hover:bg-blue-50 hover:text-blue-700 active:scale-95"
@@ -917,12 +1058,97 @@ export default function Navbar() {
             </div>
 
             <div className="bg-gray-50 p-5">
+              {searchValue.trim() ? (
+                <div className="mb-5 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+                  <div className="flex items-center justify-between gap-3 border-b border-slate-100 bg-white px-4 py-3">
+                    <h3 className="text-xs font-extrabold uppercase tracking-wider text-gray-400">
+                      Product Suggestions
+                    </h3>
+
+                    {suggestionsLoading ? (
+                      <span className="inline-flex items-center gap-2 text-[11px] font-bold text-slate-500">
+                        <Loader2 size={13} className="animate-spin" />
+                        Searching...
+                      </span>
+                    ) : null}
+                  </div>
+
+                  <div className="max-h-[330px] overflow-y-auto">
+                    {suggestionsLoading && suggestions.length === 0 ? (
+                      <div className="p-4 text-sm font-semibold text-slate-600">
+                        Loading suggestions...
+                      </div>
+                    ) : suggestions.length ? (
+                      suggestions.map((p) => {
+                        const href = productHref({
+                          slug: safeStr(p.slug),
+                          category: safeStr(p.category),
+                        });
+
+                        return (
+                          <button
+                            key={`${safeStr(p.slug)}-${safeStr(p.category)}-${safeStr(p._id)}`}
+                            type="button"
+                            onMouseDown={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              openSuggestionProduct(p);
+                            }}
+                            onTouchStart={(e) => {
+                              e.stopPropagation();
+                            }}
+                            onClick={(e) => {
+                              e.preventDefault();
+                              e.stopPropagation();
+                              openSuggestionProduct(p);
+                            }}
+                            className="block w-full border-b border-slate-100 px-4 py-3 text-left transition last:border-b-0 hover:bg-blue-50"
+                          >
+                            <div className="text-sm font-extrabold text-slate-900 line-clamp-2">
+                              {safeStr(p.title) || "Untitled Product"}
+                            </div>
+
+                            <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[11px] font-semibold text-slate-500">
+                              {[safeStr(p.category), safeStr(p.session), safeStr(p.language)]
+                                .filter(Boolean)
+                                .map((x) => (
+                                  <span key={x}>{x}</span>
+                                ))}
+                            </div>
+
+                            <div className="mt-2 flex items-center justify-between gap-3">
+                              <span className="text-[11px] font-bold text-blue-700">
+                                Open product
+                              </span>
+                              {Number(p.price || 0) > 0 ? (
+                                <span className="text-xs font-extrabold text-emerald-700">
+                                  ₹{money(p.price)}
+                                </span>
+                              ) : null}
+                            </div>
+
+                            <span className="sr-only">{href}</span>
+                          </button>
+                        );
+                      })
+                    ) : (
+                      <div className="p-4 text-sm font-semibold text-slate-600">
+                        No matching product found. Press Search to view all results.
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : null}
+
               <div className="mb-3 flex items-center justify-between">
                 <h3 className="text-xs font-extrabold uppercase tracking-wider text-gray-400">
                   Popular Searches
                 </h3>
                 <button
-                  onClick={() => setSearchValue("")}
+                  onClick={() => {
+                    setSearchValue("");
+                    setSuggestions([]);
+                  }}
                   className="text-xs font-bold text-blue-700 hover:underline"
                   type="button"
                 >

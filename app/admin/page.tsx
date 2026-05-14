@@ -9,6 +9,7 @@ import {
   Package,
   ClipboardList,
   ArrowRight,
+  Star,
   FileText,
   Settings,
   BookOpen,
@@ -56,6 +57,17 @@ type OnDemandStatsResponse = {
   stats?: {
     totalUsers?: number;
     totalOnDemandProducts?: number;
+  };
+};
+
+type ProductReviewStatsResponse = {
+  ok?: boolean;
+  stats?: {
+    pending?: number;
+    approved?: number;
+    rejected?: number;
+    deleted?: number;
+    totalLive?: number;
   };
 };
 
@@ -133,6 +145,7 @@ const DEFAULT_TILE_TONES: Record<AdminDashboardTileKey, NonDefaultTone> = {
   "want-to-buy": "blue",
   "on-demand-orders": "amber",
   orders: "gray",
+  "product-reviews": "amber",
   "order-reports": "emerald",
   analytics: "fuchsia",
   youtube: "red",
@@ -189,6 +202,9 @@ export default function AdminPage() {
   const [odLoading, setOdLoading] = useState(true);
   const [onDemandUsers, setOnDemandUsers] = useState(0);
   const [onDemandProducts, setOnDemandProducts] = useState(0);
+
+  const [reviewStatsLoading, setReviewStatsLoading] = useState(true);
+  const [pendingProductReviews, setPendingProductReviews] = useState(0);
 
   const [tileSettings, setTileSettings] = useState<AdminDashboardTileSettings>(
     getDefaultAdminDashboardTileSettings()
@@ -296,6 +312,36 @@ export default function AdminPage() {
   }, []);
 
   useEffect(() => {
+    (async () => {
+      try {
+        const qs = new URLSearchParams();
+        qs.set("status", "pending");
+        qs.set("page", "1");
+        qs.set("limit", "1");
+
+        const res = await fetch(`/api/admin/product-reviews?${qs.toString()}`, {
+          credentials: "include",
+          cache: "no-store",
+        });
+
+        const data: ProductReviewStatsResponse = await res.json().catch(
+          () => ({} as any)
+        );
+
+        if (res.ok && data?.ok) {
+          setPendingProductReviews(Number(data?.stats?.pending || 0));
+        } else {
+          setPendingProductReviews(0);
+        }
+      } catch {
+        setPendingProductReviews(0);
+      } finally {
+        setReviewStatsLoading(false);
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
     if (!csMsg) return;
     const t = setTimeout(() => setCsMsg(""), 1800);
     return () => clearTimeout(t);
@@ -337,6 +383,7 @@ export default function AdminPage() {
   const isMaster = role === "master_admin";
 
   const hasOnDemandEmergency = onDemandProducts > 0;
+  const hasPendingProductReviews = pendingProductReviews > 0;
 
   const onDemandTileTone = useMemo(() => {
     if (onDemandProducts <= 0) {
@@ -384,6 +431,14 @@ export default function AdminPage() {
     if (onDemandProducts === 2) return "isp-alert-mid";
     return "isp-alert-high";
   }, [onDemandProducts]);
+
+
+  const productReviewEmergencyClass = useMemo(() => {
+    if (pendingProductReviews <= 0) return "";
+    if (pendingProductReviews === 1) return "isp-alert-low";
+    if (pendingProductReviews === 2) return "isp-alert-mid";
+    return "isp-alert-high";
+  }, [pendingProductReviews]);
 
   const orderedTiles = useMemo(() => {
     return getAdminDashboardTilesInOrder(tileSettings);
@@ -564,6 +619,95 @@ export default function AdminPage() {
 
     if (tile.key === "orders") {
       return renderBasicTile(tile, "/admin/orders", ClipboardList, "View payments & delivery");
+    }
+
+    if (tile.key === "product-reviews") {
+      const customTone = tileSettings.colorOverrides?.[tile.key];
+      const customActive = Boolean(customTone && customTone !== "default");
+      const tone = customActive
+        ? TONE_CLASSES[customTone as NonDefaultTone]
+        : getToneClasses(tile.key);
+
+      return (
+        <Link
+          key={tile.key}
+          href="/admin/product-reviews"
+          className={`rounded-2xl transition p-5 shadow-sm relative overflow-hidden ${
+            hasPendingProductReviews
+              ? `border-red-500 bg-red-100 hover:bg-red-100 ${productReviewEmergencyClass}`
+              : `${tone.wrap} hover:bg-white`
+          }`}
+          title={
+            hasPendingProductReviews
+              ? `${pendingProductReviews} product review approval pending`
+              : "Product Reviews"
+          }
+        >
+          {hasPendingProductReviews ? (
+            <div className="absolute top-2 right-2">
+              <div className="inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[10px] font-extrabold bg-white/90 text-red-700 border border-red-200 shadow-sm">
+                <Siren size={12} className="isp-siren" />
+                REVIEW PENDING
+              </div>
+            </div>
+          ) : null}
+
+          <div className="flex items-center gap-3">
+            <div
+              className={`h-12 w-12 rounded-2xl flex items-center justify-center shadow-sm ${
+                hasPendingProductReviews ? "bg-red-700 text-white" : "bg-white/80"
+              }`}
+            >
+              <Star
+                className={
+                  hasPendingProductReviews
+                    ? "isp-siren"
+                    : customActive
+                    ? tone.icon
+                    : getToneClasses(tile.key).icon
+                }
+              />
+            </div>
+
+            <div className="min-w-0 flex-1">
+              <div
+                className={`font-extrabold ${
+                  hasPendingProductReviews ? "text-red-950" : tone.title
+                }`}
+              >
+                {getTitle(tile.key)}
+              </div>
+              <div
+                className={`text-xs mt-1 ${
+                  hasPendingProductReviews ? "text-red-900" : "text-slate-600"
+                }`}
+              >
+                {reviewStatsLoading
+                  ? "Checking pending reviews..."
+                  : hasPendingProductReviews
+                  ? "Action needed: approve student reviews"
+                  : "Approve verified student ratings & reviews"}
+              </div>
+
+              <div className="mt-3 flex items-center gap-2 flex-wrap">
+                <span
+                  className={`inline-flex items-center rounded-full px-2.5 py-1 text-[11px] font-extrabold ${
+                    hasPendingProductReviews
+                      ? "bg-red-700 text-white border border-red-700"
+                      : "bg-white text-slate-700 border border-gray-200"
+                  }`}
+                >
+                  {reviewStatsLoading ? "..." : `${pendingProductReviews} pending`}
+                </span>
+              </div>
+            </div>
+          </div>
+
+          {hasPendingProductReviews ? (
+            <div className="absolute inset-x-0 bottom-0 h-1 bg-gradient-to-r from-red-500 via-red-800 to-red-500" />
+          ) : null}
+        </Link>
+      );
     }
 
     if (tile.key === "order-reports") {

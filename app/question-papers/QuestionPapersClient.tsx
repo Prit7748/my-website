@@ -5,12 +5,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
+  BadgeCheck,
   Check,
   ChevronDown,
   ChevronRight,
   Filter,
   Search,
+  ShieldCheck,
   SlidersHorizontal,
+  Sparkles,
   X,
 } from "lucide-react";
 
@@ -96,7 +99,7 @@ type ApiSessionsResponse = {
   meta?: { total?: number };
 };
 
-type QuestionPapersClientProps = {
+type ProjectsClientProps = {
   initialSearchParam?: string;
   initialCourseParam?: string;
   initialSessionParam?: string;
@@ -113,9 +116,10 @@ type DropdownItem = {
   searchText?: string;
 };
 
-const CATEGORY_LABEL = "Question Papers (PYQ)";
-const PAGE_PATH = "/question-papers";
-const PAGE_URL = "https://istudentsportal.com/question-papers";
+const CATEGORY_VALUE = "projects";
+const CATEGORY_LABEL = "Projects";
+const PAGE_PATH = "/projects";
+const PAGE_URL = "https://istudentsportal.com/projects";
 
 function safeStr(x: unknown) {
   return String(x ?? "").trim();
@@ -187,7 +191,7 @@ function extractSubjectCodeVariants(raw: string) {
   return { code: `${letters}${pad3}`, variants };
 }
 
-function buildQuestionPapersQueryKey(input: {
+function buildProjectsQueryKey(input: {
   selectedCourse: string[];
   selectedSession: string[];
   selectedLang: string[];
@@ -200,7 +204,7 @@ function buildQuestionPapersQueryKey(input: {
   params.set("limit", "12");
   params.set("includeFacets", "0");
   params.set("sort", "latest");
-  params.set("category", CATEGORY_LABEL);
+  params.set("category", CATEGORY_VALUE);
 
   if (input.selectedCourse.length) params.set("course", input.selectedCourse.join(","));
   if (input.selectedSession.length) params.set("session", input.selectedSession.join(","));
@@ -621,6 +625,7 @@ function SearchBox({
   size = "large",
 }: SearchBoxProps) {
   const wrapperRef = useRef<HTMLDivElement | null>(null);
+  const router = useRouter();
   const isLarge = size === "large";
 
   useEffect(() => {
@@ -642,7 +647,10 @@ function SearchBox({
           isLarge ? "px-4 py-4 md:px-5 md:py-5" : "px-3 py-3"
         }`}
       >
-        <Search size={isLarge ? 22 : 18} className="flex-shrink-0 text-slate-400" />
+        <Search
+          size={isLarge ? 22 : 18}
+          className="flex-shrink-0 text-slate-400"
+        />
 
         <input
           value={value}
@@ -659,7 +667,7 @@ function SearchBox({
             onChange(e.target.value);
             setShowSuggest(true);
           }}
-          placeholder="Search by subject code, title, or course code"
+          placeholder="Search by project code, title, or course code"
           className={`w-full bg-transparent font-semibold text-slate-900 outline-none placeholder:text-slate-400 ${
             isLarge ? "text-base md:text-lg" : "text-sm"
           }`}
@@ -693,7 +701,9 @@ function SearchBox({
 
           <div className="max-h-[340px] overflow-auto">
             {suggestLoading ? (
-              <div className="p-4 text-sm font-semibold text-slate-600">Loading suggestions…</div>
+              <div className="p-4 text-sm font-semibold text-slate-600">
+                Loading suggestions…
+              </div>
             ) : suggestions.length ? (
               suggestions.map((p) => {
                 const href = productHref({
@@ -702,11 +712,22 @@ function SearchBox({
                 });
 
                 return (
-                  <Link
+                  <button
                     key={`${p.slug}-${p.category || "product"}`}
-                    href={href}
-                    onClick={() => setShowSuggest(false)}
-                    className="block border-b border-slate-100 px-4 py-3 transition last:border-b-0 hover:bg-slate-50"
+                    type="button"
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setShowSuggest(false);
+                      router.push(href);
+                    }}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      setShowSuggest(false);
+                      router.push(href);
+                    }}
+                    className="block w-full border-b border-slate-100 px-4 py-3 text-left transition last:border-b-0 hover:bg-slate-50"
                   >
                     <div className="text-sm font-extrabold text-slate-900">
                       {safeStr(p.title) || "Untitled Product"}
@@ -716,7 +737,7 @@ function SearchBox({
                         .filter(Boolean)
                         .join(" • ")}
                     </div>
-                  </Link>
+                  </button>
                 );
               })
             ) : value.trim() ? (
@@ -824,7 +845,9 @@ function ActiveChips({
         ))}
 
         {!hasAny ? (
-          <div className="text-[11px] font-semibold text-slate-600">No filters selected yet.</div>
+          <div className="text-[11px] font-semibold text-slate-600">
+            No filters selected yet.
+          </div>
         ) : null}
       </div>
     </div>
@@ -912,7 +935,7 @@ function FiltersPanel({
               </div>
 
               <div className="mt-1 text-[12px] font-semibold text-slate-600 md:text-[13px]">
-                Find the right IGNOU previous year question paper using subject code, course,
+                Find the right IGNOU project report or synopsis material using title or code, course,
                 session, and medium.
               </div>
             </div>
@@ -1024,7 +1047,7 @@ function FiltersPanel({
   );
 }
 
-export default function QuestionPapersClient({
+export default function ProjectsClient({
   initialSearchParam = "",
   initialCourseParam = "",
   initialSessionParam = "",
@@ -1033,7 +1056,7 @@ export default function QuestionPapersClient({
   initialProducts = [],
   initialMeta = null,
   initialQueryKey = "",
-}: QuestionPapersClientProps) {
+}: ProjectsClientProps) {
   const router = useRouter();
   const sp = useSearchParams();
   const spKey = sp.toString();
@@ -1117,7 +1140,9 @@ export default function QuestionPapersClient({
     const params = new URLSearchParams(spKey);
 
     const nextSearch =
-      partial.search !== undefined ? partial.search : safeStr(params.get("search"));
+      partial.search !== undefined
+        ? partial.search
+        : safeStr(params.get("search"));
 
     const nextCourse =
       partial.course !== undefined
@@ -1169,6 +1194,16 @@ export default function QuestionPapersClient({
   useEffect(() => {
     const urlParams = new URLSearchParams(spKey);
 
+    const categoryValues = parseCsvParam(safeStr(urlParams.get("category")));
+    const hasOtherCategory =
+      categoryValues.length > 0 &&
+      (categoryValues.length > 1 || categoryValues.some((x) => x !== CATEGORY_VALUE));
+
+    if (hasOtherCategory) {
+      router.replace(`/products?${urlParams.toString()}`);
+      return;
+    }
+
     const urlSearch = safeStr(urlParams.get("search"));
     const urlCourse = parseCsvParam(safeStr(urlParams.get("course"))).map(toUpper);
     const urlSession = parseCsvParam(safeStr(urlParams.get("session")));
@@ -1190,7 +1225,8 @@ export default function QuestionPapersClient({
     }
 
     const isOwnSearchSync =
-      pendingUrlSearchRef.current !== null && urlSearch === pendingUrlSearchRef.current;
+      pendingUrlSearchRef.current !== null &&
+      urlSearch === pendingUrlSearchRef.current;
 
     if (isOwnSearchSync) {
       pendingUrlSearchRef.current = null;
@@ -1208,6 +1244,7 @@ export default function QuestionPapersClient({
     setMeta((prev) => (prev.page === urlPage ? prev : { ...prev, page: urlPage }));
   }, [
     spKey,
+    router,
     initialUrlSearch,
     initialUrlCourse,
     initialUrlSession,
@@ -1223,18 +1260,18 @@ export default function QuestionPapersClient({
 
       try {
         const productsParams = new URLSearchParams();
-        productsParams.set("category", CATEGORY_LABEL);
+        productsParams.set("category", CATEGORY_VALUE);
         productsParams.set("includeFacets", "1");
         productsParams.set("page", "1");
         productsParams.set("limit", "1");
         productsParams.set("sort", "latest");
 
         const coursesParams = new URLSearchParams();
-        coursesParams.set("category", CATEGORY_LABEL);
+        coursesParams.set("category", CATEGORY_VALUE);
         coursesParams.set("limit", "1000");
 
         const sessionsParams = new URLSearchParams();
-        sessionsParams.set("category", CATEGORY_LABEL);
+        sessionsParams.set("category", CATEGORY_VALUE);
         sessionsParams.set("limit", "1000");
 
         const [productsRes, coursesRes, sessionsRes] = await Promise.allSettled([
@@ -1346,7 +1383,7 @@ export default function QuestionPapersClient({
   }, []);
 
   const queryKey = useMemo(() => {
-    return buildQuestionPapersQueryKey({
+    return buildProjectsQueryKey({
       selectedCourse: selectedCourse.map(toUpper),
       selectedSession,
       selectedLang,
@@ -1429,7 +1466,7 @@ export default function QuestionPapersClient({
         params.set("limit", "8");
         params.set("sort", "latest");
         params.set("includeFacets", "0");
-        params.set("category", CATEGORY_LABEL);
+        params.set("category", CATEGORY_VALUE);
 
         if (selectedCourse.length) params.set("course", selectedCourse.map(toUpper).join(","));
         if (selectedSession.length) params.set("session", selectedSession.join(","));
@@ -1565,13 +1602,13 @@ export default function QuestionPapersClient({
   const resultSummary = useMemo(() => {
     const parts: string[] = [];
 
-    if (appliedSearch) parts.push(`subject or keyword “${appliedSearch}”`);
+    if (appliedSearch) parts.push(`project title or keyword “${appliedSearch}”`);
     if (selectedCourse.length) parts.push(`course ${humanJoin(selectedCourse.slice(0, 3))}`);
     if (selectedSession.length) parts.push(`session ${humanJoin(selectedSession.slice(0, 2))}`);
     if (selectedLang.length) parts.push(`medium ${humanJoin(selectedLang.slice(0, 2))}`);
 
     if (!parts.length) {
-      return "Browse IGNOU previous year question papers across available courses, sessions, and mediums.";
+      return "Browse IGNOU project reports and synopsis materials across available courses, sessions, and mediums.";
     }
 
     return `Showing results for ${parts.join(", ")}.`;
@@ -1579,10 +1616,10 @@ export default function QuestionPapersClient({
 
   const dynamicGuidanceParagraph = useMemo(() => {
     if (appliedSearch || selectedCourse.length || selectedSession.length || selectedLang.length) {
-      return `Start with the subject code whenever possible, then confirm the course, exam session, and medium. This helps you reach the most relevant IGNOU previous year question paper without opening multiple similar results.`;
+      return `Start with the exact project title, code, or subject code whenever possible, then confirm the course, session, and medium. This reduces mismatch risk and helps you reach the most relevant IGNOU project material without opening multiple similar products.`;
     }
 
-    return `Students usually search previous year question papers in a practical order: subject code first, then course, then session, then medium. This page follows that same pattern so browsing stays fast and result selection stays more accurate.`;
+    return `Students usually search project-related material in a practical order: title or code first, then course, then session, then medium. This page follows that same selection flow so browsing stays faster and decision-making stays clearer.`;
   }, [appliedSearch, selectedCourse.length, selectedSession.length, selectedLang.length]);
 
   const faqJsonLd = useMemo(() => {
@@ -1592,18 +1629,10 @@ export default function QuestionPapersClient({
       mainEntity: [
         {
           "@type": "Question",
-          name: "How do I find the correct IGNOU question paper on this page?",
+          name: "How do I find the correct IGNOU project report on this page?",
           acceptedAnswer: {
             "@type": "Answer",
-            text: "Search the subject code first, then narrow the result using course, session, and medium filters. That is usually the fastest and safest method.",
-          },
-        },
-        {
-          "@type": "Question",
-          name: "Should I search by subject code or course code first?",
-          acceptedAnswer: {
-            "@type": "Answer",
-            text: "Subject code is usually the most precise starting point. Course filters are useful when you want to browse all related question papers within one programme.",
+            text: "Search the project title or code first, then narrow the results using course, session, and medium filters. That is usually the fastest and safest method.",
           },
         },
         {
@@ -1611,7 +1640,15 @@ export default function QuestionPapersClient({
           name: "Why is session matching important?",
           acceptedAnswer: {
             "@type": "Answer",
-            text: "Previous year question papers are exam-session based. Matching the correct session helps students open the most relevant paper set for preparation.",
+            text: "Project-related materials are often used within a specific academic cycle, so session matching helps students choose more relevant material.",
+          },
+        },
+        {
+          "@type": "Question",
+          name: "Is synopsis-based work important in IGNOU projects?",
+          acceptedAnswer: {
+            "@type": "Answer",
+            text: "In many programme workflows, students prepare the final project report based on an approved synopsis or proposal wherever applicable, so it is always best to follow the programme-specific IGNOU guidelines.",
           },
         },
         {
@@ -1619,7 +1656,7 @@ export default function QuestionPapersClient({
           name: "What should I verify before opening any product?",
           acceptedAnswer: {
             "@type": "Answer",
-            text: "Verify the subject code, course, session, medium, and title. These details help you avoid opening the wrong question paper.",
+            text: "Verify the project title, code, course, session, and medium. These details help avoid opening the wrong project product.",
           },
         },
       ],
@@ -1632,10 +1669,10 @@ export default function QuestionPapersClient({
     const schema = {
       "@context": "https://schema.org",
       "@type": "CollectionPage",
-      name: "IGNOU Question Papers (PYQ)",
+      name: "IGNOU Projects",
       url: PAGE_URL,
       description:
-        "Browse IGNOU previous year question papers by subject code, course, session, and medium.",
+        "Browse IGNOU project reports and synopsis materials by title or code, course, session, and medium.",
       isPartOf: {
         "@type": "WebSite",
         name: "iStudentsPortal",
@@ -1653,7 +1690,7 @@ export default function QuestionPapersClient({
           {
             "@type": "ListItem",
             position: 2,
-            name: "Question Papers (PYQ)",
+            name: "Projects",
             item: PAGE_URL,
           },
         ],
@@ -1689,27 +1726,28 @@ export default function QuestionPapersClient({
             <div className="grid gap-6 px-5 py-6 md:px-7 md:py-7 lg:grid-cols-[minmax(0,1.3fr)_minmax(320px,0.7fr)] lg:items-start">
               <div className="max-w-4xl">
                 <div className="inline-flex items-center rounded-full border border-white/15 bg-white/10 px-3 py-1 text-[11px] font-extrabold uppercase tracking-[0.2em] text-blue-100">
-                  PYQ search • exam prep ready
+                  Project reports • synopsis support
                 </div>
 
                 <h1 className="mt-4 text-[28px] font-extrabold leading-tight text-white md:text-5xl">
-                  IGNOU Previous Year Question Papers for All Courses
+                  IGNOU Project Reports and Synopsis Materials by Course
                 </h1>
 
                 <p className="mt-3 max-w-3xl text-sm font-medium leading-6 text-blue-50/90 md:text-base">
-                  Search question papers using subject code, course, session, and medium. The top
-                  section stays clean and student-friendly so you can reach the right paper faster.
+                  Quickly find the right IGNOU project report or synopsis material using title or
+                  code, course, session, and medium. The top section stays clean and student-focused
+                  so selection feels faster and clearer.
                 </p>
 
                 <div className="mt-5 flex flex-wrap gap-2">
                   <span className="rounded-full border border-white/10 bg-white/10 px-3 py-1.5 text-[11px] font-extrabold text-white/95">
-                    Subject code search
+                    Project code or title search
                   </span>
                   <span className="rounded-full border border-white/10 bg-white/10 px-3 py-1.5 text-[11px] font-extrabold text-white/95">
-                    Session-based filtering
+                    Course-first discovery
                   </span>
                   <span className="rounded-full border border-white/10 bg-white/10 px-3 py-1.5 text-[11px] font-extrabold text-white/95">
-                    Medium-aware results
+                    Session and medium match
                   </span>
                 </div>
 
@@ -1781,8 +1819,8 @@ export default function QuestionPapersClient({
                     Search like students actually search
                   </div>
                   <p className="mt-2 text-sm leading-6 text-blue-50/85">
-                    Use codes like BEGC 101, BPSC 134, or your course code to jump to the most
-                    relevant previous year question paper faster.
+                    Use project code, subject code, title, or course code to reach the most
+                    relevant IGNOU project material faster.
                   </p>
                 </div>
 
@@ -1804,11 +1842,37 @@ export default function QuestionPapersClient({
                   </div>
                 </div>
 
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div className="rounded-[24px] border border-white/10 bg-white/10 p-4 backdrop-blur-sm">
+                    <div className="flex items-start gap-2">
+                      <BadgeCheck className="mt-0.5 text-emerald-300" size={18} />
+                      <div>
+                        <div className="text-sm font-extrabold text-white">Structured</div>
+                        <div className="mt-1 text-[12px] font-semibold leading-5 text-blue-50/80">
+                          Project-style discovery with a cleaner selection flow.
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="rounded-[24px] border border-white/10 bg-white/10 p-4 backdrop-blur-sm">
+                    <div className="flex items-start gap-2">
+                      <Sparkles className="mt-0.5 text-cyan-300" size={18} />
+                      <div>
+                        <div className="text-sm font-extrabold text-white">Fast access</div>
+                        <div className="mt-1 text-[12px] font-semibold leading-5 text-blue-50/80">
+                          Search first, filter next, then open the exact product.
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
                 <div className="rounded-[24px] border border-emerald-300/25 bg-emerald-400/10 p-4 text-sm font-semibold leading-6 text-emerald-50">
-                  Match the correct <span className="font-extrabold text-white">subject code</span>,{" "}
+                  Match the correct <span className="font-extrabold text-white">course</span>,{" "}
                   <span className="font-extrabold text-white">session</span>, and{" "}
                   <span className="font-extrabold text-white">medium</span> before opening a
-                  question paper product page.
+                  project product page.
                 </div>
               </div>
             </div>
@@ -1869,7 +1933,7 @@ export default function QuestionPapersClient({
               {activeFiltersCount ? ` (${activeFiltersCount})` : ""}
             </button>
 
-            {appliedSearch || activeFiltersCount ? (
+            {(appliedSearch || activeFiltersCount) ? (
               <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50/70 px-4 py-3">
                 <ActiveChips
                   appliedSearch={appliedSearch}
@@ -1968,7 +2032,7 @@ export default function QuestionPapersClient({
                   {CATEGORY_LABEL}
                 </div>
                 <h2 className="mt-1 text-xl font-extrabold text-slate-900 md:text-2xl">
-                  Find the right IGNOU PYQ faster
+                  Find the right IGNOU project faster
                 </h2>
                 <div className="mt-1 text-sm font-semibold text-slate-600">{resultSummary}</div>
               </div>
@@ -1981,7 +2045,8 @@ export default function QuestionPapersClient({
                   {loading || filtersLoading ? "Loading…" : countText}
                 </div>
                 <div className="mt-1 text-[12px] font-semibold leading-5 text-slate-600">
-                  Check subject code, session, and medium before moving to the product detail page.
+                  Check the project title or code, course, session, and medium before moving to
+                  product details.
                 </div>
               </div>
             </div>
@@ -1995,8 +2060,8 @@ export default function QuestionPapersClient({
                 <div className="max-w-2xl">
                   <div className="text-lg font-extrabold text-slate-900">No products found</div>
                   <div className="mt-2 text-sm font-semibold leading-6 text-slate-600">
-                    Try a different subject code, remove a filter, or switch the session or medium
-                    to broaden the results.
+                    Try a different code or keyword, remove one filter, or switch the session or
+                    medium to broaden the results.
                   </div>
                 </div>
 
@@ -2006,11 +2071,10 @@ export default function QuestionPapersClient({
                       Search tip
                     </div>
                     <div className="mt-2 text-sm font-bold text-slate-900">
-                      Try the exact subject code first
+                      Try the exact project or subject code first
                     </div>
                     <p className="mt-2 text-[13px] font-medium leading-6 text-slate-600">
-                      Codes like BEGC 101, MTE 01, or BPSC 134 usually return the most accurate
-                      previous year question paper result.
+                      Exact codes usually give cleaner project results than broad keywords.
                     </p>
                   </div>
 
@@ -2022,7 +2086,8 @@ export default function QuestionPapersClient({
                       Remove one filter at a time
                     </div>
                     <p className="mt-2 text-[13px] font-medium leading-6 text-slate-600">
-                      Sometimes the wrong session or medium filter blocks otherwise valid matches.
+                      Sometimes the wrong session or medium filter blocks otherwise relevant project
+                      matches.
                     </p>
                   </div>
 
@@ -2066,7 +2131,10 @@ export default function QuestionPapersClient({
             ) : (
               <div className="products-results-grid grid grid-cols-2 gap-4 md:grid-cols-4 lg:grid-cols-6">
                 {items.map((p) => (
-                  <div key={`${p.slug}-${p.category || "product"}`} data-product-category={safeStr(p.category)}>
+                  <div
+                    key={`${p.slug}-${p.category || "product"}`}
+                    data-product-category={safeStr(p.category)}
+                  >
                     <ProductCard product={p as any} />
                   </div>
                 ))}
@@ -2125,8 +2193,7 @@ export default function QuestionPapersClient({
                   </div>
 
                   <h2 className="mt-4 text-2xl font-extrabold leading-tight text-slate-900 md:text-3xl">
-                    How to find the correct IGNOU previous year question paper without opening the
-                    wrong result
+                    How to find the correct IGNOU project material without opening the wrong product
                   </h2>
 
                   <p className="mt-3 text-sm font-medium leading-7 text-slate-700 md:text-[15px]">
@@ -2134,55 +2201,70 @@ export default function QuestionPapersClient({
                   </p>
 
                   <p className="mt-3 text-sm font-medium leading-7 text-slate-700 md:text-[15px]">
-                    The safest checking pattern is simple: search the subject code first, then
-                    confirm the course or programme, then match the exam session, and finally check
-                    the medium. This works well on large IGNOU paper catalogues where many titles
-                    can look similar at first glance.
+                    The safest checking pattern is simple: search the project title or code first,
+                    then confirm the course or programme, then match the session, and finally check
+                    the medium. This works well on large project catalogues where many titles can
+                    look similar at first glance.
                   </p>
 
                   <p className="mt-3 text-sm font-medium leading-7 text-slate-700 md:text-[15px]">
-                    A strong category page should help students prepare better, not just scroll
-                    more. That is why the top stays clean for quick discovery, while the lower
-                    section explains the practical checks that matter before opening any product
-                    detail page.
+                    A strong category page should help students select more confidently, not just
+                    scroll more. That is why the top stays clean for quick discovery, while the
+                    lower section explains the practical checks that matter before opening any
+                    project detail page.
                   </p>
                 </div>
 
                 <div className="grid gap-3">
                   <div className="rounded-[24px] border border-slate-200 bg-white p-4 shadow-sm">
-                    <div className="text-[11px] font-extrabold uppercase tracking-wide text-slate-500">
-                      Best first step
+                    <div className="flex items-start gap-2">
+                      <ShieldCheck className="mt-0.5 text-indigo-600" size={18} />
+                      <div>
+                        <div className="text-[11px] font-extrabold uppercase tracking-wide text-slate-500">
+                          Best first step
+                        </div>
+                        <div className="mt-2 text-base font-extrabold text-slate-900">
+                          Search the title or code first
+                        </div>
+                        <p className="mt-2 text-[13px] font-medium leading-6 text-slate-600">
+                          Exact project titles and codes usually narrow the list faster than broad
+                          browsing.
+                        </p>
+                      </div>
                     </div>
-                    <div className="mt-2 text-base font-extrabold text-slate-900">
-                      Search the subject code first
-                    </div>
-                    <p className="mt-2 text-[13px] font-medium leading-6 text-slate-600">
-                      Codes like BEGC 101, BPSC 134, or MTE 01 usually narrow the list faster than
-                      browsing by title alone.
-                    </p>
                   </div>
 
                   <div className="rounded-[24px] border border-slate-200 bg-white p-4 shadow-sm">
-                    <div className="text-[11px] font-extrabold uppercase tracking-wide text-slate-500">
-                      Before opening any paper
+                    <div className="flex items-start gap-2">
+                      <BadgeCheck className="mt-0.5 text-emerald-600" size={18} />
+                      <div>
+                        <div className="text-[11px] font-extrabold uppercase tracking-wide text-slate-500">
+                          Before opening any product
+                        </div>
+                        <div className="mt-2 text-base font-extrabold text-slate-900">
+                          Match course, session, and medium
+                        </div>
+                        <p className="mt-2 text-[13px] font-medium leading-6 text-slate-600">
+                          Similar-looking project materials can belong to different academic needs,
+                          so these checks matter.
+                        </p>
+                      </div>
                     </div>
-                    <div className="mt-2 text-base font-extrabold text-slate-900">
-                      Match session and medium
-                    </div>
-                    <p className="mt-2 text-[13px] font-medium leading-6 text-slate-600">
-                      Two papers can look similar, but the correct session and language often
-                      decide which one actually fits your preparation need.
-                    </p>
                   </div>
 
                   <div className="rounded-[24px] border border-blue-200 bg-blue-50/70 p-4 shadow-sm">
-                    <div className="text-[11px] font-extrabold uppercase tracking-wide text-blue-700">
-                      Current view
+                    <div className="flex items-start gap-2">
+                      <Sparkles className="mt-0.5 text-blue-700" size={18} />
+                      <div>
+                        <div className="text-[11px] font-extrabold uppercase tracking-wide text-blue-700">
+                          Current view
+                        </div>
+                        <div className="mt-2 text-base font-extrabold text-slate-900">{countText}</div>
+                        <p className="mt-2 text-[13px] font-medium leading-6 text-slate-700">
+                          {resultSummary}
+                        </p>
+                      </div>
                     </div>
-                    <div className="mt-2 text-base font-extrabold text-slate-900">{countText}</div>
-                    <p className="mt-2 text-[13px] font-medium leading-6 text-slate-700">
-                      {resultSummary}
-                    </p>
                   </div>
                 </div>
               </div>
@@ -2191,46 +2273,46 @@ export default function QuestionPapersClient({
             <div className="grid gap-6 lg:grid-cols-2">
               <article className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-[0_12px_40px_rgba(15,23,42,0.05)] md:p-6">
                 <h3 className="text-xl font-extrabold text-slate-900">
-                  How to choose the correct IGNOU PYQ
+                  How to choose the correct IGNOU project product
                 </h3>
                 <div className="mt-4 space-y-4">
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <div className="text-sm font-extrabold text-slate-900">
-                      1. Search the subject code
+                      1. Search the project title or code
                     </div>
                     <p className="mt-1 text-[14px] font-medium leading-6 text-slate-600">
-                      Subject code is usually the fastest and cleanest way to reach the exact
-                      question paper.
+                      Exact titles and codes usually reach the correct project result faster than
+                      broad keywords.
                     </p>
                   </div>
 
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <div className="text-sm font-extrabold text-slate-900">
-                      2. Confirm the course or programme
+                      2. Match the correct course
                     </div>
                     <p className="mt-1 text-[14px] font-medium leading-6 text-slate-600">
-                      Course filtering helps when similar-looking subject codes appear across
-                      programmes.
+                      Course matching is important because project requirements often differ by
+                      programme.
                     </p>
                   </div>
 
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <div className="text-sm font-extrabold text-slate-900">
-                      3. Match the session
+                      3. Confirm the session
                     </div>
                     <p className="mt-1 text-[14px] font-medium leading-6 text-slate-600">
-                      Previous year papers are session-based, so session matching is essential for
-                      relevance.
+                      Session verification helps students choose the most relevant material for
+                      their current academic cycle.
                     </p>
                   </div>
 
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <div className="text-sm font-extrabold text-slate-900">
-                      4. Check the medium
+                      4. Check the medium and title carefully
                     </div>
                     <p className="mt-1 text-[14px] font-medium leading-6 text-slate-600">
-                      Medium selection matters when students want the exact paper variant they
-                      studied from.
+                      Medium and exact title confirmation helps reduce mismatch before opening the
+                      full product page.
                     </p>
                   </div>
                 </div>
@@ -2238,46 +2320,46 @@ export default function QuestionPapersClient({
 
               <article className="rounded-[28px] border border-slate-200 bg-white p-5 shadow-[0_12px_40px_rgba(15,23,42,0.05)] md:p-6">
                 <h3 className="text-xl font-extrabold text-slate-900">
-                  How to use previous year papers more effectively
+                  Common mistakes students make while choosing project material
                 </h3>
                 <div className="mt-4 space-y-4">
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <div className="text-sm font-extrabold text-slate-900">
-                      Start with recent sessions
+                      Choosing by title only
                     </div>
                     <p className="mt-1 text-[14px] font-medium leading-6 text-slate-600">
-                      Recent papers usually give a better sense of the current exam pattern and
-                      question framing style.
+                      Similar project titles can appear across programmes, so course confirmation is
+                      still important.
                     </p>
                   </div>
 
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <div className="text-sm font-extrabold text-slate-900">
-                      Track repeated topics
+                      Ignoring the academic cycle
                     </div>
                     <p className="mt-1 text-[14px] font-medium leading-6 text-slate-600">
-                      When similar themes appear across sessions, they become good revision
-                      priorities before the exam.
+                      Session matters when students want material aligned with their current stage
+                      of work.
                     </p>
                   </div>
 
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <div className="text-sm font-extrabold text-slate-900">
-                      Practice under time limits
+                      Skipping synopsis context
                     </div>
                     <p className="mt-1 text-[14px] font-medium leading-6 text-slate-600">
-                      Solving a paper in exam-like conditions improves answer speed, structure, and
-                      confidence.
+                      In many programmes, final report preparation is connected to approved proposal
+                      or synopsis stages wherever applicable.
                     </p>
                   </div>
 
                   <div className="rounded-2xl border border-slate-200 bg-slate-50 p-4">
                     <div className="text-sm font-extrabold text-slate-900">
-                      Use filters before opening papers
+                      Opening too many products
                     </div>
                     <p className="mt-1 text-[14px] font-medium leading-6 text-slate-600">
-                      Narrowing by course, session, and medium saves time and keeps your preparation
-                      workflow cleaner.
+                      Use filters first. Narrowing by course, session, and medium saves time and
+                      keeps selection cleaner.
                     </p>
                   </div>
                 </div>
@@ -2290,21 +2372,11 @@ export default function QuestionPapersClient({
               <div className="mt-5 divide-y divide-slate-200">
                 <details className="group py-4" open>
                   <summary className="cursor-pointer list-none pr-8 text-sm font-extrabold text-slate-900 marker:content-none">
-                    How do I find the correct IGNOU question paper on this page?
+                    How do I find the correct IGNOU project report on this page?
                   </summary>
                   <p className="mt-3 text-[14px] font-medium leading-7 text-slate-600">
-                    Search the subject code first, then narrow the result using course, session,
-                    and medium filters. That is usually the fastest and safest method.
-                  </p>
-                </details>
-
-                <details className="group py-4">
-                  <summary className="cursor-pointer list-none pr-8 text-sm font-extrabold text-slate-900 marker:content-none">
-                    Should I search by subject code or course code first?
-                  </summary>
-                  <p className="mt-3 text-[14px] font-medium leading-7 text-slate-600">
-                    Subject code is usually more precise. Course filters are useful when you want
-                    to browse all related PYQs within one programme.
+                    Search the project title or code first, then narrow the results using course,
+                    session, and medium filters. That is usually the fastest and safest method.
                   </p>
                 </details>
 
@@ -2313,8 +2385,19 @@ export default function QuestionPapersClient({
                     Why is session matching important?
                   </summary>
                   <p className="mt-3 text-[14px] font-medium leading-7 text-slate-600">
-                    Previous year question papers are exam-session based. Matching the correct
-                    session helps students open the most relevant paper set for preparation.
+                    Project-related materials are often used within a specific academic cycle, so
+                    session matching helps students choose more relevant material.
+                  </p>
+                </details>
+
+                <details className="group py-4">
+                  <summary className="cursor-pointer list-none pr-8 text-sm font-extrabold text-slate-900 marker:content-none">
+                    Is synopsis-based work important in IGNOU projects?
+                  </summary>
+                  <p className="mt-3 text-[14px] font-medium leading-7 text-slate-600">
+                    In many programme workflows, students prepare the final project report based on
+                    an approved synopsis or proposal wherever applicable, so it is always best to
+                    follow the programme-specific IGNOU guidelines.
                   </p>
                 </details>
 
@@ -2323,10 +2406,29 @@ export default function QuestionPapersClient({
                     What should I verify before opening any product?
                   </summary>
                   <p className="mt-3 text-[14px] font-medium leading-7 text-slate-600">
-                    Verify the subject code, course, session, medium, and title. These details help
-                    you avoid opening the wrong question paper.
+                    Verify the project title, code, course, session, and medium. These details help
+                    avoid opening the wrong project product.
                   </p>
                 </details>
+              </div>
+            </div>
+
+            <div className="rounded-[30px] border border-slate-200 bg-slate-50 p-5 shadow-[0_12px_40px_rgba(15,23,42,0.05)] md:p-6">
+              <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                <div className="min-w-0">
+                  <div className="text-lg font-extrabold text-slate-900">Want to browse everything?</div>
+                  <div className="mt-1 text-sm font-semibold text-slate-600">
+                    Explore all categories in one place, including solved assignments, question
+                    papers, guess papers, ebooks, combo packs, and more.
+                  </div>
+                </div>
+
+                <Link
+                  href="/products"
+                  className="inline-flex shrink-0 items-center justify-center rounded-2xl bg-slate-900 px-5 py-3 font-extrabold text-white transition hover:bg-slate-800"
+                >
+                  Go to All Products →
+                </Link>
               </div>
             </div>
           </section>

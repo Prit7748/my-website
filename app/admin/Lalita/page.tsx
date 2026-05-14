@@ -285,6 +285,8 @@ export default function HiddenPdfVaultPage() {
   const [cutFileId, setCutFileId] = useState("");
   const [cutFileName, setCutFileName] = useState("");
   const [fileActionLoadingId, setFileActionLoadingId] = useState("");
+  const [renamingFileId, setRenamingFileId] = useState("");
+  const [renameFileValue, setRenameFileValue] = useState("");
 
   const [statsLoading, setStatsLoading] = useState(false);
   const [statsError, setStatsError] = useState("");
@@ -1197,6 +1199,103 @@ export default function HiddenPdfVaultPage() {
     }
   }
 
+  function normalizeRenamePdfValue(input: string) {
+    const raw = safeText(input);
+    if (!raw) return "";
+
+    const withoutPdf = raw.toLowerCase().endsWith(".pdf")
+      ? raw.slice(0, -4).trim()
+      : raw.trim();
+
+    if (!withoutPdf) return "";
+    return `${withoutPdf}.pdf`;
+  }
+
+  function startRenamePdf(file: VaultFileItem) {
+    if (showTrash) {
+      alert("Trash view me PDF rename allowed nahi hai.");
+      return;
+    }
+
+    setRenamingFileId(file._id);
+    setRenameFileValue(safeText(file.fileName || ""));
+    resetMessages();
+  }
+
+  function cancelRenamePdf() {
+    setRenamingFileId("");
+    setRenameFileValue("");
+  }
+
+  async function savePdfRename(file: VaultFileItem) {
+    if (showTrash) {
+      alert("Trash view me PDF rename allowed nahi hai.");
+      return;
+    }
+
+    const nextFileName = normalizeRenamePdfValue(renameFileValue);
+    if (!nextFileName) {
+      alert("New PDF filename required hai.");
+      return;
+    }
+
+    const currentName = safeText(file.fileName || "");
+    if (nextFileName === currentName) {
+      cancelRenamePdf();
+      return;
+    }
+
+    setFileActionLoadingId(file._id);
+    try {
+      const res = await fetch("/api/admin/pdf-vault/files", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        credentials: "include",
+        body: JSON.stringify({
+          action: "rename",
+          fileId: file._id,
+          fileName: nextFileName,
+        }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+
+      if (!res.ok || !(data as any)?.ok) {
+        const message = safeText((data as any)?.error || "PDF rename failed");
+        setServerMessage(message);
+        setServerMessageType("error");
+        alert(message);
+
+        if ((data as any)?.needsPuzzle) {
+          setAccessGranted(false);
+          await loadBootstrap();
+        }
+
+        return;
+      }
+
+      const renamedName = safeText((data as any)?.newFileName || nextFileName);
+
+      if (cutFileId === file._id) {
+        setCutFileName(renamedName);
+      }
+
+      setRenamingFileId("");
+      setRenameFileValue("");
+      setServerMessage((data as any)?.message || "PDF renamed successfully.");
+      setServerMessageType("success");
+
+      await Promise.all([loadFiles(currentPath, globalSearch.trim()), loadStats()]);
+    } catch (error: any) {
+      const message = safeText(error?.message || "PDF rename failed");
+      setServerMessage(message);
+      setServerMessageType("error");
+      alert(message);
+    } finally {
+      setFileActionLoadingId("");
+    }
+  }
+
   async function moveFileToTrash(file: VaultFileItem) {
     const ok = window.confirm(`"${file.fileName}" ko trash me bhejna hai?`);
     if (!ok) return;
@@ -1220,6 +1319,10 @@ export default function HiddenPdfVaultPage() {
       if (cutFileId === file._id) {
         setCutFileId("");
         setCutFileName("");
+      }
+
+      if (renamingFileId === file._id) {
+        cancelRenamePdf();
       }
 
       await Promise.all([loadFiles(currentPath, globalSearch.trim()), loadStats()]);
@@ -2293,6 +2396,7 @@ export default function HiddenPdfVaultPage() {
                         const isGreen =
                           file.productExists && String(file.titleColor).toLowerCase() === "green";
                         const isBusy = fileActionLoadingId === file._id;
+                        const isRenamingFile = renamingFileId === file._id;
 
                         return (
                           <div
@@ -2314,21 +2418,75 @@ export default function HiddenPdfVaultPage() {
                                 </div>
 
                                 <div className="min-w-0 flex-1">
-                                  <div
-                                    className={
-                                      showTrash
-                                        ? "font-extrabold text-rose-700 break-words whitespace-normal"
-                                        : isGreen
-                                        ? "font-extrabold text-emerald-700 break-words whitespace-normal"
-                                        : "font-extrabold text-red-700 break-words whitespace-normal"
-                                    }
-                                    style={{
-                                      wordBreak: "break-word",
-                                      overflowWrap: "anywhere",
-                                    }}
-                                  >
-                                    {file.fileName}
-                                  </div>
+                                  {isRenamingFile && !showTrash ? (
+                                    <div className="rounded-2xl border border-amber-200 bg-amber-50 p-3">
+                                      <div className="text-xs font-extrabold text-amber-800 mb-2">
+                                        Rename PDF filename
+                                      </div>
+
+                                      <div className="flex items-center gap-2 flex-wrap">
+                                        <input
+                                          value={renameFileValue}
+                                          onChange={(e) => setRenameFileValue(e.target.value)}
+                                          onKeyDown={(e) => {
+                                            if (e.key === "Enter") {
+                                              e.preventDefault();
+                                              void savePdfRename(file);
+                                            }
+
+                                            if (e.key === "Escape") {
+                                              e.preventDefault();
+                                              cancelRenamePdf();
+                                            }
+                                          }}
+                                          autoFocus
+                                          disabled={isBusy}
+                                          className="min-w-[260px] flex-1 px-3 py-2 rounded-xl border border-amber-300 bg-white outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-100 text-sm font-bold text-slate-900 disabled:opacity-60"
+                                          placeholder="Example: BHIC131ENG202526A.pdf"
+                                        />
+
+                                        <button
+                                          type="button"
+                                          onClick={() => void savePdfRename(file)}
+                                          disabled={isBusy || !safeText(renameFileValue)}
+                                          className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white text-sm font-bold shadow-sm disabled:opacity-60"
+                                        >
+                                          <CheckCircle2 size={15} />
+                                          Save
+                                        </button>
+
+                                        <button
+                                          type="button"
+                                          onClick={cancelRenamePdf}
+                                          disabled={isBusy}
+                                          className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-white hover:bg-gray-50 border border-amber-200 text-amber-700 text-sm font-bold shadow-sm disabled:opacity-60"
+                                        >
+                                          <X size={15} />
+                                          Cancel
+                                        </button>
+                                      </div>
+
+                                      <div className="mt-2 text-[11px] text-amber-800 leading-5">
+                                        Sirf filename edit hoga. Agar .pdf nahi likhoge to system automatically add kar dega.
+                                      </div>
+                                    </div>
+                                  ) : (
+                                    <div
+                                      className={
+                                        showTrash
+                                          ? "font-extrabold text-rose-700 break-words whitespace-normal"
+                                          : isGreen
+                                          ? "font-extrabold text-emerald-700 break-words whitespace-normal"
+                                          : "font-extrabold text-red-700 break-words whitespace-normal"
+                                      }
+                                      style={{
+                                        wordBreak: "break-word",
+                                        overflowWrap: "anywhere",
+                                      }}
+                                    >
+                                      {file.fileName}
+                                    </div>
+                                  )}
 
                                   <div className="text-xs text-slate-500 mt-1 break-all">
                                     SKU: <b>{file.skuNormalized || "-"}</b>
@@ -2394,6 +2552,16 @@ export default function HiddenPdfVaultPage() {
                                         >
                                           <Download size={15} />
                                           Download
+                                        </button>
+
+                                        <button
+                                          type="button"
+                                          onClick={() => startRenamePdf(file)}
+                                          disabled={isBusy || isRenamingFile}
+                                          className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-700 text-sm font-bold shadow-sm disabled:opacity-60"
+                                        >
+                                          <Pencil size={15} />
+                                          Rename
                                         </button>
 
                                         <button

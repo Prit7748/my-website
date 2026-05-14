@@ -633,6 +633,7 @@ function SearchBox({
   suggestions,
   size = "large",
 }: SearchBoxProps) {
+  const router = useRouter();
   const wrapperRef = useRef<HTMLDivElement | null>(null);
   const isLarge = size === "large";
 
@@ -647,6 +648,21 @@ function SearchBox({
     document.addEventListener("mousedown", onDown);
     return () => document.removeEventListener("mousedown", onDown);
   }, [setShowSuggest]);
+
+  function getSuggestionHref(product: ApiProductCard) {
+    return productHref({
+      slug: safeStr(product.slug),
+      category: safeStr(product.category),
+    });
+  }
+
+  function openSuggestion(product: ApiProductCard) {
+    const href = getSuggestionHref(product);
+    if (!href || href === "#") return;
+
+    setShowSuggest(false);
+    router.push(href);
+  }
 
   return (
     <div ref={wrapperRef} className="relative">
@@ -714,17 +730,22 @@ function SearchBox({
               </div>
             ) : suggestions.length ? (
               suggestions.map((p) => {
-                const href = productHref({
-                  slug: safeStr(p.slug),
-                  category: safeStr(p.category),
-                });
+                const href = getSuggestionHref(p);
 
                 return (
-                  <Link
+                  <button
                     key={`${p.slug}-${p.category || "product"}`}
-                    href={href}
-                    onClick={() => setShowSuggest(false)}
-                    className="block border-b border-slate-100 px-4 py-3 transition last:border-b-0 hover:bg-slate-50"
+                    type="button"
+                    onMouseDown={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      openSuggestion(p);
+                    }}
+                    onClick={(e) => {
+                      e.preventDefault();
+                    }}
+                    className="block w-full border-b border-slate-100 px-4 py-3 text-left transition last:border-b-0 hover:bg-slate-50 focus:bg-slate-50 focus:outline-none"
+                    title={href}
                   >
                     <div className="text-sm font-extrabold text-slate-900">
                       {safeStr(p.title) || "Untitled Product"}
@@ -734,7 +755,7 @@ function SearchBox({
                         .filter(Boolean)
                         .join(" • ")}
                     </div>
-                  </Link>
+                  </button>
                 );
               })
             ) : value.trim() ? (

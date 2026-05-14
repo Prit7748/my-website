@@ -6,6 +6,7 @@ export type AdminDashboardTileKey =
   | "want-to-buy"
   | "on-demand-orders"
   | "orders"
+  | "product-reviews"
   | "order-reports"
   | "analytics"
   | "youtube"
@@ -118,6 +119,12 @@ export const ADMIN_DASHBOARD_TILES: AdminDashboardTileConfig[] = [
     defaultTitle: "Orders",
     description: "View payments & delivery",
     href: "/admin/orders",
+  },
+  {
+    key: "product-reviews",
+    defaultTitle: "Product Reviews",
+    description: "Approve verified student ratings & reviews",
+    href: "/admin/product-reviews",
   },
   {
     key: "order-reports",

@@ -5,6 +5,7 @@ import dbConnect from "@/lib/db";
 import PdfVaultFolder from "@/models/PdfVaultFolder";
 import PdfVaultFile from "@/models/PdfVaultFile";
 import OfficialPaper from "@/models/OfficialPaper";
+import Product from "@/models/Product";
 import { getAuthUser, hasPermission } from "@/lib/auth";
 import {
   cleanFolderPath,
@@ -104,6 +105,182 @@ function buildSort(sortByRaw: string, sortDirRaw: string) {
   }
 
   return sort;
+}
+
+function normalizePdfRenameInput(input: any) {
+  const raw = safeStr(input);
+
+  if (!raw) {
+    return {
+      ok: false as const,
+      error: "New PDF filename required",
+      fileName: "",
+      baseName: "",
+      skuNormalized: "",
+    };
+  }
+
+  if (/[\u0000-\u001F\u007F]/.test(raw)) {
+    return {
+      ok: false as const,
+      error: "Filename contains invalid control characters",
+      fileName: "",
+      baseName: "",
+      skuNormalized: "",
+    };
+  }
+
+  if (/[\\/]/.test(raw)) {
+    return {
+      ok: false as const,
+      error: "Filename me folder path ya slash allowed nahi hai",
+      fileName: "",
+      baseName: "",
+      skuNormalized: "",
+    };
+  }
+
+  const compact = raw.trim();
+
+  if (!compact) {
+    return {
+      ok: false as const,
+      error: "New PDF filename required",
+      fileName: "",
+      baseName: "",
+      skuNormalized: "",
+    };
+  }
+
+  const withoutPdf = compact.toLowerCase().endsWith(".pdf")
+    ? compact.slice(0, -4).trim()
+    : compact.trim();
+
+  if (!withoutPdf) {
+    return {
+      ok: false as const,
+      error: "PDF basename empty nahi ho sakta",
+      fileName: "",
+      baseName: "",
+      skuNormalized: "",
+    };
+  }
+
+  if (withoutPdf.length > 300) {
+    return {
+      ok: false as const,
+      error: "PDF basename 300 characters se zyada nahi ho sakta",
+      fileName: "",
+      baseName: "",
+      skuNormalized: "",
+    };
+  }
+
+  const fileName = `${withoutPdf}.pdf`;
+
+  if (fileName.length > 500) {
+    return {
+      ok: false as const,
+      error: "PDF filename 500 characters se zyada nahi ho sakta",
+      fileName: "",
+      baseName: "",
+      skuNormalized: "",
+    };
+  }
+
+  const skuNormalized = withoutPdf
+    .replace(/\s+/g, "")
+    .replace(/[^a-zA-Z0-9]/g, "")
+    .toUpperCase();
+
+  if (!skuNormalized) {
+    return {
+      ok: false as const,
+      error: "Filename se valid SKU generate nahi ho raha. Example: BHIC131ENG202526A.pdf",
+      fileName: "",
+      baseName: "",
+      skuNormalized: "",
+    };
+  }
+
+  if (skuNormalized.length > 60) {
+    return {
+      ok: false as const,
+      error: "Generated SKU 60 characters se zyada ho raha hai",
+      fileName: "",
+      baseName: "",
+      skuNormalized: "",
+    };
+  }
+
+  return {
+    ok: true as const,
+    error: "",
+    fileName,
+    baseName: withoutPdf,
+    skuNormalized,
+  };
+}
+
+async function findProductBySkuNormalized(skuNormalized: string) {
+  const sku = safeStr(skuNormalized).toUpperCase();
+  if (!sku) return null;
+
+  const product: any = await Product.findOne({
+    deletedAt: null,
+    $or: [
+      { skuNormalized: sku },
+      { sku: sku },
+      { productSku: sku },
+    ],
+  })
+    .select({
+      _id: 1,
+      sku: 1,
+      skuNormalized: 1,
+      productSku: 1,
+      slug: 1,
+      deletedAt: 1,
+    })
+    .lean();
+
+  return product || null;
+}
+
+async function applyProductMatchToFile(file: any, skuNormalized: string) {
+  const sku = safeStr(skuNormalized).toUpperCase();
+  const product: any = await findProductBySkuNormalized(sku);
+
+  if (product?._id) {
+    const productSku = safeStr(
+      product.skuNormalized || product.sku || product.productSku || sku
+    ).toUpperCase();
+
+    file.productExists = true;
+    file.titleColor = "green";
+    file.productId = product._id;
+    file.productSku = productSku;
+    file.productSlug = safeStr(product.slug);
+    return {
+      productExists: true,
+      productId: String(product._id),
+      productSku,
+      productSlug: safeStr(product.slug),
+    };
+  }
+
+  file.productExists = false;
+  file.titleColor = "red";
+  file.productId = null;
+  file.productSku = "";
+  file.productSlug = "";
+
+  return {
+    productExists: false,
+    productId: "",
+    productSku: "",
+    productSlug: "",
+  };
 }
 
 async function getFolderMap(rows: any[]) {
@@ -482,6 +659,111 @@ export async function POST(req: NextRequest) {
         action: "download",
         url,
         expiresInSeconds: 60,
+      },
+      { status: 200 }
+    );
+  }
+
+  if (action === "rename") {
+    const parsed = normalizePdfRenameInput(
+      body?.fileName || body?.newFileName || body?.name
+    );
+
+    if (!parsed.ok) {
+      return NextResponse.json({ error: parsed.error }, { status: 400 });
+    }
+
+    const oldSkuToSync = safeStr(file.productSku || file.skuNormalized).toUpperCase();
+    const oldFileName = safeStr(file.fileName);
+    const oldSkuNormalized = safeStr(file.skuNormalized).toUpperCase();
+
+    const sameFolderNameExists: any = await PdfVaultFile.findOne({
+      _id: { $ne: file._id },
+      folderId: file.folderId,
+      fileName: parsed.fileName,
+      deletedAt: null,
+    })
+      .collation({ locale: "en", strength: 2 })
+      .select("_id fileName")
+      .lean();
+
+    if (sameFolderNameExists) {
+      return NextResponse.json(
+        { error: "Same folder me is filename ki active PDF already exists" },
+        { status: 409 }
+      );
+    }
+
+    const sameSkuExists: any = await PdfVaultFile.findOne({
+      _id: { $ne: file._id },
+      skuNormalized: parsed.skuNormalized,
+      deletedAt: null,
+    })
+      .select("_id fileName skuNormalized")
+      .lean();
+
+    if (sameSkuExists) {
+      return NextResponse.json(
+        {
+          error: `Another active PDF already exists for SKU ${parsed.skuNormalized}`,
+          conflictFileId: String(sameSkuExists._id),
+          conflictFileName: safeStr(sameSkuExists.fileName),
+        },
+        { status: 409 }
+      );
+    }
+
+    file.fileName = parsed.fileName;
+    file.fileExt = ".pdf";
+    file.baseName = parsed.baseName;
+    file.skuNormalized = parsed.skuNormalized;
+    file.updatedAt = new Date();
+    file.updatedBy = getUserId(guard.user);
+
+    const productMatch = await applyProductMatchToFile(file, parsed.skuNormalized);
+
+    try {
+      await file.save();
+    } catch (error: any) {
+      if (Number(error?.code) === 11000) {
+        return NextResponse.json(
+          { error: `Another active PDF already exists for SKU ${parsed.skuNormalized}` },
+          { status: 409 }
+        );
+      }
+
+      throw error;
+    }
+
+    const officialPaperCleanup = await removeActiveOfficialPaperForSku(parsed.skuNormalized);
+
+    const newSkuToSync = safeStr(file.productSku || file.skuNormalized).toUpperCase();
+
+    const newSyncResult: any = await syncProductAvailabilityBySku(newSkuToSync);
+
+    let oldSyncResult: any = null;
+    if (oldSkuToSync && oldSkuToSync !== newSkuToSync) {
+      oldSyncResult = await syncProductAvailabilityBySku(oldSkuToSync);
+    }
+
+    const folderMap = await getFolderMap([file]);
+
+    return NextResponse.json(
+      {
+        ok: true,
+        action: "rename",
+        message: "PDF renamed successfully",
+        fileId: String(file._id),
+        oldFileName,
+        newFileName: parsed.fileName,
+        oldSkuNormalized,
+        newSkuNormalized: parsed.skuNormalized,
+        productMatch,
+        officialPaperDeleted: Boolean(officialPaperCleanup.deleted),
+        officialPaperDeletedFileId: safeStr(officialPaperCleanup.fileId),
+        availabilityAfter: safeStr(newSyncResult?.after?.availability || ""),
+        oldAvailabilityAfter: safeStr(oldSyncResult?.after?.availability || ""),
+        file: mapFileRow(file, folderMap),
       },
       { status: 200 }
     );
