@@ -77,9 +77,6 @@ export const metadata: Metadata = {
     "IGNOU projects",
     "IGNOU study material",
   ],
-  alternates: {
-    canonical: "/",
-  },
   robots: {
     index: true,
     follow: true,
@@ -99,7 +96,6 @@ export const metadata: Metadata = {
   },
   openGraph: {
     type: "website",
-    url: BASE_URL,
     siteName: "IGNOU Students Portal",
     title: "IGNOU Students Portal - Solved Assignments & Notes",
     description:
