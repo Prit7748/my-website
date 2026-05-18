@@ -7,6 +7,7 @@ import GlobalToggle from "@/models/GlobalToggle";
 import { attachResolvedOnDemandTimingToProducts } from "@/lib/onDemandTiming";
 
 const BASE_URL = "https://istudentsportal.com";
+const PAGE_URL = `${BASE_URL}/products`;
 
 type PageProps = {
   searchParams?: Promise<{
@@ -49,12 +50,14 @@ function parseList(value?: string | null) {
 function uniqueStrings(arr: string[]) {
   const seen = new Set<string>();
   const out: string[] = [];
+
   for (const v of arr) {
     const k = safeStr(v);
     if (!k || seen.has(k)) continue;
     seen.add(k);
     out.push(k);
   }
+
   return out;
 }
 
@@ -70,22 +73,23 @@ function fileNameOf(urlOrPath: string) {
 
 function normalizeImagesToUrls(images: any) {
   const arr = Array.isArray(images) ? images : [];
+
   if (!arr.length) {
     return { urls: [] as string[], thumbUrl: "", quickUrl: "" };
   }
 
   const allStrings = arr.every((x: any) => typeof x === "string");
+
   if (allStrings) {
     const urls = Array.from(
-      new Set(
-        arr
-          .map((s: string) => safeStr(s))
-          .filter(Boolean)
-      )
-    ).sort((a, b) => fileNameOf(a).localeCompare(fileNameOf(b), undefined, { numeric: true }));
+      new Set(arr.map((s: string) => safeStr(s)).filter(Boolean))
+    ).sort((a, b) =>
+      fileNameOf(a).localeCompare(fileNameOf(b), undefined, { numeric: true })
+    );
 
     const thumbUrl = urls[0] || "";
     const quickUrl = urls[1] || urls[0] || "";
+
     return { urls, thumbUrl, quickUrl };
   }
 
@@ -105,7 +109,7 @@ function normalizeImagesToUrls(images: any) {
     .filter(Boolean);
 
   const urls = Array.from(new Set([...strings, ...objects])).sort((a, b) =>
-    fileNameOf(a).localeCompare(b, undefined, { numeric: true })
+    fileNameOf(a).localeCompare(fileNameOf(b), undefined, { numeric: true })
   );
 
   const thumbUrl = urls[0] || "";
@@ -125,7 +129,9 @@ function normalizeQuery(q: string) {
 
 function tokenize(q: string) {
   const n = normalizeQuery(q);
+
   if (!n) return [];
+
   return n
     .split(" ")
     .map((t) => t.trim())
@@ -135,6 +141,7 @@ function tokenize(q: string) {
 function buildFlexibleCodeRegexFromQuery(q: string) {
   const n = normalizeQuery(q).replace(/\s+/g, "");
   const m = n.match(/^([a-z]{2,10})0*([0-9]{1,6})$/i);
+
   if (!m) return null;
 
   const prefix = m[1];
@@ -161,6 +168,7 @@ function scoreProductForQuery(p: any, q: string) {
   if (cat && nq && cat.includes(nq)) s += 12;
 
   const tokens = tokenize(q);
+
   for (const t of tokens) {
     if (t.length < 2) continue;
     if (subj.includes(t)) s += 20;
@@ -183,6 +191,7 @@ async function getOnDemandSalesEnabled() {
       (await GlobalToggle.findOne({ key: "coming_soon_sales" }).lean());
 
     if (!doc) return true;
+
     return Boolean(doc.enabled);
   } catch {
     return true;
@@ -192,8 +201,13 @@ async function getOnDemandSalesEnabled() {
 function resolveAvailability(rawAvailability: string, onDemandSalesEnabled: boolean) {
   const a = normAvail(rawAvailability);
 
-  if (a === "out_of_stock" || a === "outofstock" || a === "out-of-stock") return "want_to_buy";
-  if (a === "want_to_buy" || a === "wanttobuy" || a === "want-to-buy") return "want_to_buy";
+  if (a === "out_of_stock" || a === "outofstock" || a === "out-of-stock") {
+    return "want_to_buy";
+  }
+
+  if (a === "want_to_buy" || a === "wanttobuy" || a === "want-to-buy") {
+    return "want_to_buy";
+  }
 
   if (a === "coming_soon" || a === "comingsoon" || a === "coming-soon") {
     return onDemandSalesEnabled ? "on_demand" : "want_to_buy";
@@ -203,7 +217,9 @@ function resolveAvailability(rawAvailability: string, onDemandSalesEnabled: bool
     return onDemandSalesEnabled ? "on_demand" : "want_to_buy";
   }
 
-  if (a === "available" || a === "in_stock" || a === "instock" || a === "") return "available";
+  if (a === "available" || a === "in_stock" || a === "instock" || a === "") {
+    return "available";
+  }
 
   return "available";
 }
@@ -214,6 +230,7 @@ function normalizeSearchForClientQuery(raw: string) {
   const compact = cleaned.replace(/\s+/g, "");
 
   const m1 = compact.match(/([A-Z]{2,6})(\d{2,4})/);
+
   if (!m1) return cleaned;
 
   const letters = m1[1];
@@ -236,6 +253,7 @@ function normalizeSearchForClientQuery(raw: string) {
   );
 
   const extra = variants.slice(0, 6).join(" ");
+
   return extra ? `${cleaned} ${extra}` : cleaned;
 }
 
@@ -262,11 +280,7 @@ function buildProductsQueryKey(input: {
   params.set("includeFacets", "0");
 
   const apiSort =
-    sort === "latest"
-      ? "latest"
-      : sort === "price_asc"
-      ? "price_asc"
-      : "price_desc";
+    sort === "latest" ? "latest" : sort === "price_asc" ? "price_asc" : "price_desc";
 
   params.set("sort", apiSort);
 
@@ -276,6 +290,7 @@ function buildProductsQueryKey(input: {
   if (selectedLang.length) params.set("language", selectedLang.join(","));
 
   const normalizedSearch = normalizeSearchForClientQuery(safeStr(input.search));
+
   if (normalizedSearch) params.set("search", normalizedSearch);
 
   return params.toString();
@@ -305,6 +320,7 @@ async function getInitialProductsData(input: {
   const hasSearch = !!search;
 
   let sortObj: any = { createdAt: -1, _id: -1 };
+
   if (sort === "price_asc") sortObj = { price: 1, _id: 1 };
   if (sort === "price_desc") sortObj = { price: -1, _id: -1 };
 
@@ -361,11 +377,20 @@ async function getInitialProductsData(input: {
   if (hasSearch) {
     const textFilter = { ...filter, $text: { $search: search } };
     const textProjection = { ...projection, score: { $meta: "textScore" } };
-    const textSortObj: any = { score: { $meta: "textScore" }, createdAt: -1, _id: -1 };
+    const textSortObj: any = {
+      score: { $meta: "textScore" },
+      createdAt: -1,
+      _id: -1,
+    };
 
     try {
       [rawProducts, total] = await Promise.all([
-        Product.find(textFilter).select(textProjection).sort(textSortObj).skip(skip).limit(limit).lean(),
+        Product.find(textFilter)
+          .select(textProjection)
+          .sort(textSortObj)
+          .skip(skip)
+          .limit(limit)
+          .lean(),
         Product.countDocuments(textFilter),
       ]);
     } catch (err: any) {
@@ -422,7 +447,12 @@ async function getInitialProductsData(input: {
       }
 
       [rawProducts, total] = await Promise.all([
-        Product.find(regexFilter).select(projection).sort(sortObj).skip(skip).limit(limit).lean(),
+        Product.find(regexFilter)
+          .select(projection)
+          .sort(sortObj)
+          .skip(skip)
+          .limit(limit)
+          .lean(),
         Product.countDocuments(regexFilter),
       ]);
 
@@ -430,7 +460,12 @@ async function getInitialProductsData(input: {
     }
   } else {
     [rawProducts, total] = await Promise.all([
-      Product.find(filter).select(projection).sort(sortObj).skip(skip).limit(limit).lean(),
+      Product.find(filter)
+        .select(projection)
+        .sort(sortObj)
+        .skip(skip)
+        .limit(limit)
+        .lean(),
       Product.countDocuments(filter),
     ]);
   }
@@ -454,7 +489,9 @@ async function getInitialProductsData(input: {
       subjectTitleHi: p.subjectTitleHi || "",
       subjectTitleEn: p.subjectTitleEn || "",
       subjectTitle:
-        (safeStr(p.language).toLowerCase().startsWith("hin") ? p.subjectTitleHi : p.subjectTitleEn) ||
+        (safeStr(p.language).toLowerCase().startsWith("hin")
+          ? p.subjectTitleHi
+          : p.subjectTitleEn) ||
         p.subjectTitleEn ||
         p.subjectTitleHi ||
         "",
@@ -500,8 +537,12 @@ async function getInitialProductsData(input: {
     subjectTitleEn: safeStr(p.subjectTitleEn),
     subjectTitle: safeStr(p.subjectTitle),
 
-    courseCodes: Array.isArray(p.courseCodes) ? [...p.courseCodes].map((x: any) => safeStr(x)) : [],
-    courseTitles: Array.isArray(p.courseTitles) ? [...p.courseTitles].map((x: any) => safeStr(x)) : [],
+    courseCodes: Array.isArray(p.courseCodes)
+      ? [...p.courseCodes].map((x: any) => safeStr(x))
+      : [],
+    courseTitles: Array.isArray(p.courseTitles)
+      ? [...p.courseTitles].map((x: any) => safeStr(x))
+      : [],
 
     session: safeStr(p.session),
     language: safeStr(p.language),
@@ -552,33 +593,76 @@ export async function generateMetadata({ searchParams }: PageProps): Promise<Met
   const session = safeStr(sp.session);
   const language = safeStr(sp.language);
   const search = safeStr(sp.search);
+  const sort = safeStr(sp.sort);
+  const page = safeStr(sp.page);
 
-  const hasFilters = !!(category || course || session || language || search);
+  const hasNonCanonicalParams = Boolean(
+    category ||
+      course ||
+      session ||
+      language ||
+      search ||
+      (sort && sort !== "latest") ||
+      (page && page !== "1")
+  );
 
-  const description = hasFilters
-    ? "Browse filtered IGNOU products by category, course, session, medium, or search."
-    : "Explore all IGNOU solved assignments, handwritten PDFs, hardcopy material, guess papers, PYQ, projects and notes.";
+  const description = hasNonCanonicalParams
+    ? `Browse filtered IGNOU products${category ? ` in ${category}` : ""}${
+        course ? ` for ${course}` : ""
+      }${session ? ` (${session})` : ""}${language ? ` in ${language}` : ""}${
+        search ? ` matching "${search}"` : ""
+      }.`
+    : "Explore all IGNOU solved assignments, handwritten PDFs, hardcopy material, guess papers, previous year question papers, projects and notes.";
 
   return {
-    title: "All Products | IGNOU Students Portal",
+    title: "All Products",
     description,
     alternates: {
-      canonical: `${BASE_URL}/products`,
+      canonical: PAGE_URL,
     },
-    robots: hasFilters
-      ? { index: false, follow: true }
-      : { index: true, follow: true },
+    robots: hasNonCanonicalParams
+      ? {
+          index: false,
+          follow: true,
+          googleBot: {
+            index: false,
+            follow: true,
+            "max-image-preview": "large",
+            "max-snippet": -1,
+            "max-video-preview": -1,
+          },
+        }
+      : {
+          index: true,
+          follow: true,
+          googleBot: {
+            index: true,
+            follow: true,
+            "max-image-preview": "large",
+            "max-snippet": -1,
+            "max-video-preview": -1,
+          },
+        },
     openGraph: {
       type: "website",
-      url: `${BASE_URL}/products`,
+      url: PAGE_URL,
       title: "All Products | IGNOU Students Portal",
       description,
       siteName: "IGNOU Students Portal",
+      images: [
+        {
+          url: "/og.jpg",
+          width: 1200,
+          height: 630,
+          alt: "All IGNOU Products - IGNOU Students Portal",
+        },
+      ],
     },
     twitter: {
       card: "summary_large_image",
       title: "All Products | IGNOU Students Portal",
       description,
+      images: ["/og.jpg"],
     },
   };
 }
