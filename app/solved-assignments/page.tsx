@@ -47,12 +47,14 @@ function parseList(value?: string | null) {
 function uniqueStrings(arr: string[]) {
   const seen = new Set<string>();
   const out: string[] = [];
+
   for (const v of arr) {
     const k = safeStr(v);
     if (!k || seen.has(k)) continue;
     seen.add(k);
     out.push(k);
   }
+
   return out;
 }
 
@@ -68,22 +70,23 @@ function fileNameOf(urlOrPath: string) {
 
 function normalizeImagesToUrls(images: unknown) {
   const arr = Array.isArray(images) ? images : [];
+
   if (!arr.length) {
     return { urls: [] as string[], thumbUrl: "", quickUrl: "" };
   }
 
   const allStrings = arr.every((x) => typeof x === "string");
+
   if (allStrings) {
     const urls = Array.from(
-      new Set(
-        arr.map((s) => safeStr(s)).filter(Boolean)
-      )
+      new Set(arr.map((s) => safeStr(s)).filter(Boolean))
     ).sort((a, b) =>
       fileNameOf(a).localeCompare(fileNameOf(b), undefined, { numeric: true })
     );
 
     const thumbUrl = urls[0] || "";
     const quickUrl = urls[1] || urls[0] || "";
+
     return { urls, thumbUrl, quickUrl };
   }
 
@@ -95,7 +98,10 @@ function normalizeImagesToUrls(images: unknown) {
   const objects = arr
     .filter(
       (x): x is { url: string; sortKey?: string; filename?: string } =>
-        !!x && typeof x === "object" && "url" in x && typeof (x as any).url === "string"
+        !!x &&
+        typeof x === "object" &&
+        "url" in x &&
+        typeof (x as any).url === "string"
     )
     .filter((x) => safeStr(x.url))
     .sort((a, b) => {
@@ -127,7 +133,9 @@ function normalizeQuery(q: string) {
 
 function tokenize(q: string) {
   const n = normalizeQuery(q);
+
   if (!n) return [];
+
   return n
     .split(" ")
     .map((t) => t.trim())
@@ -137,6 +145,7 @@ function tokenize(q: string) {
 function buildFlexibleCodeRegexFromQuery(q: string) {
   const n = normalizeQuery(q).replace(/\s+/g, "");
   const m = n.match(/^([a-z]{2,10})0*([0-9]{1,6})$/i);
+
   if (!m) return null;
 
   const prefix = m[1];
@@ -163,6 +172,7 @@ function scoreProductForQuery(p: any, q: string) {
   if (cat && nq && cat.includes(nq)) s += 12;
 
   const tokens = tokenize(q);
+
   for (const t of tokens) {
     if (t.length < 2) continue;
     if (subj.includes(t)) s += 20;
@@ -185,6 +195,7 @@ async function getOnDemandSalesEnabled() {
       (await GlobalToggle.findOne({ key: "coming_soon_sales" }).lean());
 
     if (!doc) return true;
+
     return Boolean(doc.enabled);
   } catch {
     return true;
@@ -197,6 +208,7 @@ function resolveAvailability(rawAvailability: string, onDemandSalesEnabled: bool
   if (a === "out_of_stock" || a === "outofstock" || a === "out-of-stock") {
     return "want_to_buy";
   }
+
   if (a === "want_to_buy" || a === "wanttobuy" || a === "want-to-buy") {
     return "want_to_buy";
   }
@@ -222,6 +234,7 @@ function normalizeSearchForClientQuery(raw: string) {
   const compact = cleaned.replace(/\s+/g, "");
 
   const m1 = compact.match(/([A-Z]{2,6})(\d{2,4})/);
+
   if (!m1) return cleaned;
 
   const letters = m1[1];
@@ -244,6 +257,7 @@ function normalizeSearchForClientQuery(raw: string) {
   );
 
   const extra = variants.slice(0, 6).join(" ");
+
   return extra ? `${cleaned} ${extra}` : cleaned;
 }
 
@@ -260,6 +274,7 @@ function buildSolvedAssignmentsQueryKey(input: {
   const page = Math.max(1, safeNum(input.page, 1));
 
   const params = new URLSearchParams();
+
   params.set("page", String(page));
   params.set("limit", "12");
   params.set("includeFacets", "0");
@@ -271,6 +286,7 @@ function buildSolvedAssignmentsQueryKey(input: {
   if (selectedLang.length) params.set("language", selectedLang.join(","));
 
   const normalizedSearch = normalizeSearchForClientQuery(safeStr(input.search));
+
   if (normalizedSearch) params.set("search", normalizedSearch);
 
   return params.toString();
@@ -350,7 +366,11 @@ async function getInitialSolvedAssignmentsData(input: {
   if (hasSearch) {
     const textFilter = { ...filter, $text: { $search: search } };
     const textProjection = { ...projection, score: { $meta: "textScore" } };
-    const textSortObj: any = { score: { $meta: "textScore" }, createdAt: -1, _id: -1 };
+    const textSortObj: any = {
+      score: { $meta: "textScore" },
+      createdAt: -1,
+      _id: -1,
+    };
 
     try {
       [rawProducts, total] = await Promise.all([
@@ -414,7 +434,12 @@ async function getInitialSolvedAssignmentsData(input: {
       }
 
       [rawProducts, total] = await Promise.all([
-        Product.find(regexFilter).select(projection).sort(sortObj).skip(skip).limit(limit).lean(),
+        Product.find(regexFilter)
+          .select(projection)
+          .sort(sortObj)
+          .skip(skip)
+          .limit(limit)
+          .lean(),
         Product.countDocuments(regexFilter),
       ]);
 
@@ -422,7 +447,12 @@ async function getInitialSolvedAssignmentsData(input: {
     }
   } else {
     [rawProducts, total] = await Promise.all([
-      Product.find(filter).select(projection).sort(sortObj).skip(skip).limit(limit).lean(),
+      Product.find(filter)
+        .select(projection)
+        .sort(sortObj)
+        .skip(skip)
+        .limit(limit)
+        .lean(),
       Product.countDocuments(filter),
     ]);
   }
@@ -544,39 +574,78 @@ async function getInitialSolvedAssignmentsData(input: {
 export async function generateMetadata({ searchParams }: PageProps): Promise<Metadata> {
   const sp = (await searchParams) || {};
 
+  const category = safeStr(sp.category);
   const course = safeStr(sp.course);
   const session = safeStr(sp.session);
   const language = safeStr(sp.language);
   const search = safeStr(sp.search);
+  const page = safeStr(sp.page);
 
-  const hasFilters = !!(course || session || language || search);
+  const hasNonCanonicalParams = Boolean(
+    category || course || session || language || search || (page && page !== "1")
+  );
 
   const baseTitle = "Solved Assignments";
   const parts = [course, session, language].filter(Boolean);
   const dynamicTitle = parts.length ? `${baseTitle} - ${parts.join(" - ")}` : baseTitle;
 
-  const description = hasFilters
-    ? `Browse IGNOU solved assignments${course ? ` for ${course}` : ""}${session ? ` (${session})` : ""}${language ? ` in ${language}` : ""}${search ? ` matching "${search}"` : ""}.`
+  const description = hasNonCanonicalParams
+    ? `Browse IGNOU solved assignments${course ? ` for ${course}` : ""}${
+        session ? ` (${session})` : ""
+      }${language ? ` in ${language}` : ""}${search ? ` matching "${search}"` : ""}.`
     : "Browse session-wise IGNOU solved assignments with course-wise discovery and fast access.";
 
+  const canonical = `${BASE_URL}/solved-assignments`;
+
   return {
-    title: `${dynamicTitle} | IGNOU Students Portal`,
+    title: dynamicTitle,
     description,
     alternates: {
-      canonical: `${BASE_URL}/solved-assignments`,
+      canonical,
     },
-    robots: hasFilters ? { index: false, follow: true } : { index: true, follow: true },
+    robots: hasNonCanonicalParams
+      ? {
+          index: false,
+          follow: true,
+          googleBot: {
+            index: false,
+            follow: true,
+            "max-image-preview": "large",
+            "max-snippet": -1,
+            "max-video-preview": -1,
+          },
+        }
+      : {
+          index: true,
+          follow: true,
+          googleBot: {
+            index: true,
+            follow: true,
+            "max-image-preview": "large",
+            "max-snippet": -1,
+            "max-video-preview": -1,
+          },
+        },
     openGraph: {
       type: "website",
-      url: `${BASE_URL}/solved-assignments`,
+      url: canonical,
       title: `${dynamicTitle} | IGNOU Students Portal`,
       description,
       siteName: "IGNOU Students Portal",
+      images: [
+        {
+          url: "/og.jpg",
+          width: 1200,
+          height: 630,
+          alt: "IGNOU Solved Assignments - IGNOU Students Portal",
+        },
+      ],
     },
     twitter: {
       card: "summary_large_image",
       title: `${dynamicTitle} | IGNOU Students Portal`,
       description,
+      images: ["/og.jpg"],
     },
   };
 }
