@@ -7,22 +7,28 @@ const CANONICAL_URL = `${BASE_URL}${CANONICAL_PATH}`;
 
 type SearchParams = Record<string, string | string[] | undefined>;
 
+function safeStr(value: unknown) {
+  return String(value ?? "").trim();
+}
+
 function hasUsefulSearchParams(searchParams?: SearchParams | null) {
   if (!searchParams) return false;
 
   return Object.entries(searchParams).some(([key, value]) => {
-    const cleanKey = String(key || "").trim();
+    const cleanKey = safeStr(key);
     if (!cleanKey) return false;
 
     if (Array.isArray(value)) {
-      return value.some((item) => String(item ?? "").trim());
+      return value.some((item) => safeStr(item));
     }
 
-    return String(value ?? "").trim();
+    return Boolean(safeStr(value));
   });
 }
 
-async function resolveSearchParams(searchParams?: Promise<SearchParams> | SearchParams) {
+async function resolveSearchParams(
+  searchParams?: Promise<SearchParams> | SearchParams
+) {
   if (searchParams && typeof (searchParams as any).then === "function") {
     return await searchParams;
   }
@@ -38,7 +44,7 @@ export async function generateMetadata({
   const sp = await resolveSearchParams(searchParams);
   const hasFilters = hasUsefulSearchParams(sp);
 
-  const title = "IGNOU Combo Packs | IGNOU Students Portal";
+  const title = "IGNOU Combo Packs";
   const description =
     "Browse IGNOU combo packs for solved assignments, PYQs, guess papers, handwritten PDFs, hardcopy delivery, ebooks and notes.";
 
@@ -46,13 +52,9 @@ export async function generateMetadata({
     metadataBase: new URL(BASE_URL),
     title,
     description,
-
-    // ✅ All /combo query URLs point to the clean SEO URL
     alternates: {
-      canonical: CANONICAL_PATH,
+      canonical: CANONICAL_URL,
     },
-
-    // ✅ /combo is indexable, but /combo?subject=... filter/query URLs are noindex
     robots: hasFilters
       ? {
           index: false,
@@ -76,26 +78,24 @@ export async function generateMetadata({
             "max-video-preview": -1,
           },
         },
-
     openGraph: {
       type: "website",
       url: CANONICAL_URL,
       siteName: "IGNOU Students Portal",
-      title,
+      title: `${title} | IGNOU Students Portal`,
       description,
       images: [
         {
           url: "/og.jpg",
           width: 1200,
           height: 630,
-          alt: "IGNOU Combo Packs",
+          alt: "IGNOU Combo Packs - IGNOU Students Portal",
         },
       ],
     },
-
     twitter: {
       card: "summary_large_image",
-      title,
+      title: `${title} | IGNOU Students Portal`,
       description,
       images: ["/og.jpg"],
     },

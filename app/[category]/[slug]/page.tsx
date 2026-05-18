@@ -51,6 +51,7 @@ type ApiProduct = {
 
   isDigital?: boolean;
   pdfUrl?: string;
+  isActive?: boolean;
 
   images?: string[];
   thumbnailUrl?: string;
@@ -138,6 +139,7 @@ function categoryLabelFromSlug(categorySlug: string) {
     combo: "Combo",
     products: "Products",
   };
+
   return map[categorySlug] || categorySlug.replaceAll("-", " ");
 }
 
@@ -158,6 +160,7 @@ function normAvail(v?: string) {
 function categorySlugFromHref(href: string, fallback = "products") {
   const clean = safeText(href);
   if (!clean.startsWith("/")) return fallback;
+
   const parts = clean.split("/").filter(Boolean);
   return parts[0] || fallback;
 }
@@ -169,6 +172,7 @@ function buildMasterThumbnailFallback(product: ApiProduct) {
   const firstImage = Array.isArray(product.images)
     ? safeText(product.images.find((x) => safeText(x)))
     : "";
+
   if (firstImage) return firstImage;
 
   if (isSolvedAssignmentProduct(product as any)) {
@@ -191,6 +195,7 @@ const fetchProduct = cache(async (slug: string) => {
 
   const doc: any = await Product.findOne({
     slug,
+    isActive: true,
     $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
   }).lean();
 
@@ -230,6 +235,7 @@ const fetchProduct = cache(async (slug: string) => {
 
     isDigital: Boolean(doc.isDigital ?? true),
     pdfUrl: safeText(doc.pdfUrl),
+    isActive: Boolean(doc.isActive),
 
     images: Array.isArray(doc.images)
       ? doc.images.map((x: any) => safeText(x)).filter(Boolean)
@@ -251,12 +257,25 @@ export async function generateMetadata({ params }: { params: any }): Promise<Met
   const slug = decodeURIComponent(p?.slug || "").trim();
 
   if (!slug) {
-    return { title: "Product Not Found", robots: { index: false, follow: false } };
+    return {
+      title: "Product Not Found",
+      robots: {
+        index: false,
+        follow: false,
+      },
+    };
   }
 
   const { product } = await fetchProduct(slug);
+
   if (!product) {
-    return { title: "Product Not Found", robots: { index: false, follow: false } };
+    return {
+      title: "Product Not Found",
+      robots: {
+        index: false,
+        follow: false,
+      },
+    };
   }
 
   const base = siteUrl();
@@ -266,6 +285,8 @@ export async function generateMetadata({ params }: { params: any }): Promise<Met
     canonicalPath,
     requestedCategorySlug || "products"
   );
+
+  const canIndex = Boolean(canonicalCategorySlug && canonicalCategorySlug !== "products");
 
   const title = safeText(product.title);
   const description = (
@@ -278,10 +299,35 @@ export async function generateMetadata({ params }: { params: any }): Promise<Met
   const ogImage = absoluteUrl(ogImageRaw);
 
   return {
+    metadataBase: new URL(base),
     title: `${title} | ${categoryLabelFromSlug(canonicalCategorySlug)}`,
     description,
-    alternates: { canonical },
-    robots: { index: true, follow: true },
+    alternates: {
+      canonical,
+    },
+    robots: canIndex
+      ? {
+          index: true,
+          follow: true,
+          googleBot: {
+            index: true,
+            follow: true,
+            "max-image-preview": "large",
+            "max-snippet": -1,
+            "max-video-preview": -1,
+          },
+        }
+      : {
+          index: false,
+          follow: true,
+          googleBot: {
+            index: false,
+            follow: true,
+            "max-image-preview": "large",
+            "max-snippet": -1,
+            "max-video-preview": -1,
+          },
+        },
     openGraph: {
       type: "website",
       url: canonical,
@@ -367,7 +413,10 @@ export default async function Page({ params }: { params: any }) {
     description: desc,
     sku: safeText(product.sku) || safeText(product.slug),
     mpn: safeText(product.slug),
-    brand: { "@type": "Brand", name: "IGNOU Students Portal" },
+    brand: {
+      "@type": "Brand",
+      name: "IGNOU Students Portal",
+    },
     category: categoryLabel,
     url: productUrl,
     offers: {
@@ -384,7 +433,12 @@ export default async function Page({ params }: { params: any }) {
     "@context": "https://schema.org",
     "@type": "BreadcrumbList",
     itemListElement: [
-      { "@type": "ListItem", position: 1, name: "Home", item: `${base}/` },
+      {
+        "@type": "ListItem",
+        position: 1,
+        name: "Home",
+        item: `${base}/`,
+      },
       {
         "@type": "ListItem",
         position: 2,
@@ -405,7 +459,11 @@ export default async function Page({ params }: { params: any }) {
     "@type": "WebPage",
     name: safeText(product.title),
     url: productUrl,
-    isPartOf: { "@type": "WebSite", name: "IGNOU Students Portal", url: base },
+    isPartOf: {
+      "@type": "WebSite",
+      name: "IGNOU Students Portal",
+      url: base,
+    },
   };
 
   return (

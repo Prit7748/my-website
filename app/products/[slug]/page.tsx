@@ -18,6 +18,8 @@ type ProductDoc = {
   session?: string;
 };
 
+export const dynamic = "force-dynamic";
+
 function safeText(input: unknown) {
   return String(input ?? "").trim();
 }
@@ -60,11 +62,21 @@ function siteUrl() {
   return normalizeBaseUrl(process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL);
 }
 
-function bestOgImage(p: ProductDoc) {
+function absoluteUrl(pathOrUrl?: string) {
+  const value = safeText(pathOrUrl);
+
+  if (!value) return "";
+  if (/^https?:\/\//i.test(value)) return value;
+
+  const base = siteUrl();
+  return `${base}${value.startsWith("/") ? value : `/${value}`}`;
+}
+
+function bestOgImage(product: ProductDoc) {
   return (
-    safeText(p.thumbnailUrl) ||
-    safeText(p.quickUrl) ||
-    (Array.isArray(p.images) ? safeText(p.images[0]) : "") ||
+    safeText(product.thumbnailUrl) ||
+    safeText(product.quickUrl) ||
+    (Array.isArray(product.images) ? safeText(product.images[0]) : "") ||
     ""
   );
 }
@@ -79,6 +91,7 @@ async function fetchProduct(slug: string): Promise<ProductDoc | null> {
 
   const doc: any = await Product.findOne({
     slug,
+    isActive: true,
     $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
   })
     .select({
@@ -113,8 +126,6 @@ async function fetchProduct(slug: string): Promise<ProductDoc | null> {
   };
 }
 
-export const dynamic = "force-dynamic";
-
 export async function generateMetadata({ params }: { params: any }): Promise<Metadata> {
   const p = await resolveParams<{ slug: string }>(params);
   const slug = decodeURIComponent(p?.slug || "").trim();
@@ -122,7 +133,10 @@ export async function generateMetadata({ params }: { params: any }): Promise<Met
   if (!slug) {
     return {
       title: "Product Not Found",
-      robots: { index: false, follow: false },
+      robots: {
+        index: false,
+        follow: false,
+      },
     };
   }
 
@@ -131,41 +145,73 @@ export async function generateMetadata({ params }: { params: any }): Promise<Met
   if (!product) {
     return {
       title: "Product Not Found",
-      robots: { index: false, follow: false },
+      robots: {
+        index: false,
+        follow: false,
+      },
     };
   }
 
   const base = siteUrl();
+
   const canonicalPath = productHref({
     slug: product.slug,
     category: product.category,
   });
-  const canonical =
-    canonicalPath && canonicalPath !== `/products/${product.slug}`
-      ? `${base}${canonicalPath}`
-      : `${base}/products/${product.slug}`;
+
+  const hasValidCanonical =
+    Boolean(canonicalPath) &&
+    canonicalPath !== "/products" &&
+    canonicalPath !== `/products/${product.slug}`;
+
+  const canonical = hasValidCanonical
+    ? `${base}${canonicalPath}`
+    : `${base}/products/${product.slug}`;
 
   const title = safeText(product.title) || "Product";
+
   const description = (
     safeText(product.shortDesc) ||
     stripHtml(safeText(product.descriptionHtml)).slice(0, 180) ||
-    `IGNOU study material for ${safeText(product.subjectCode) || "your subject"}${safeText(product.session) ? ` (${safeText(product.session)})` : ""}.`
+    `IGNOU study material for ${safeText(product.subjectCode) || "your subject"}${
+      safeText(product.session) ? ` (${safeText(product.session)})` : ""
+    }.`
   ).slice(0, 180);
 
-  const ogImage = bestOgImage(product);
+  const ogImage = absoluteUrl(bestOgImage(product));
 
   return {
-    title: `${title} | IGNOU Students Portal`,
+    metadataBase: new URL(base),
+    title,
     description,
-    alternates: { canonical },
-    robots: { index: false, follow: true },
+    alternates: {
+      canonical,
+    },
+    robots: {
+      index: false,
+      follow: true,
+      googleBot: {
+        index: false,
+        follow: true,
+        "max-image-preview": "large",
+        "max-snippet": -1,
+        "max-video-preview": -1,
+      },
+    },
     openGraph: {
       type: "website",
       url: canonical,
       title,
       description,
       siteName: "IGNOU Students Portal",
-      images: ogImage ? [{ url: ogImage, alt: title }] : [],
+      images: ogImage
+        ? [
+            {
+              url: ogImage,
+              alt: title,
+            },
+          ]
+        : [],
     },
     twitter: {
       card: "summary_large_image",
@@ -190,7 +236,11 @@ export default async function Page({ params }: { params: any }) {
     category: product.category,
   });
 
-  if (!canonicalPath || canonicalPath === `/products/${product.slug}`) {
+  if (
+    !canonicalPath ||
+    canonicalPath === "/products" ||
+    canonicalPath === `/products/${product.slug}`
+  ) {
     notFound();
   }
 
