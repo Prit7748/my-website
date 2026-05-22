@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import mongoose from "mongoose";
 import dbConnect from "@/lib/db";
 import Order from "@/models/Order";
 import Product from "@/models/Product";
@@ -51,8 +52,52 @@ function normalizeAvailability(input: any) {
   return "available";
 }
 
+function isObjectIdLike(input: any) {
+  return mongoose.Types.ObjectId.isValid(safeStr(input));
+}
+
+function uniqueStrings(arr: any[]) {
+  return Array.from(
+    new Set(
+      (Array.isArray(arr) ? arr : [])
+        .map((x: any) => safeStr(x))
+        .filter(Boolean)
+    )
+  );
+}
+
 function isComboItem(item: any) {
   return safeStr(item?.itemType).toLowerCase() === "combo";
+}
+
+function isBuilderComboItem(item: any) {
+  const productId = safeStr(item?.productId);
+  return Boolean(item?.isBuilderCombo) || productId.toLowerCase().startsWith("builder-combo:");
+}
+
+function extractBuilderComboProductIds(item: any) {
+  const explicitIds = Array.isArray(item?.comboBuilderProductIds)
+    ? item.comboBuilderProductIds.map((x: any) => safeStr(x)).filter(Boolean)
+    : [];
+
+  if (explicitIds.length > 0) {
+    return uniqueStrings(explicitIds).filter(isObjectIdLike);
+  }
+
+  const productId = safeStr(item?.productId);
+
+  if (!productId.toLowerCase().startsWith("builder-combo:")) {
+    return [];
+  }
+
+  const parts = productId.split(":");
+  const encodedIds = safeStr(parts.slice(2).join(":"));
+
+  if (!encodedIds) {
+    return [];
+  }
+
+  return uniqueStrings(encodedIds.split("-")).filter(isObjectIdLike);
 }
 
 function isPhysicalItem(item: any) {
@@ -87,8 +132,184 @@ function buildShiprocketSnapshot(order: any) {
   };
 }
 
+function buildDownloadUrl(productId: string, download = false) {
+  const id = safeStr(productId);
+  if (!id) return "";
+
+  const qs = new URLSearchParams({
+    productId: id,
+  });
+
+  if (download) {
+    qs.set("download", "1");
+  }
+
+  return `/api/products/download?${qs.toString()}`;
+}
+
+function buildProductRow(params: {
+  order: any;
+  item: any;
+  productDoc: any;
+  productId: string;
+  orderId: string;
+  status: string;
+  currency: string;
+  paidAt: string | null;
+  expiresAt: string | null;
+  createdAt: string | null;
+  shiprocket: any;
+  resolveTiming: any;
+  source?: "direct" | "builder_combo_child";
+  parentCombo?: any;
+}) {
+  const {
+    item,
+    productDoc,
+    productId,
+    orderId,
+    status,
+    currency,
+    paidAt,
+    expiresAt,
+    createdAt,
+    shiprocket,
+    resolveTiming,
+    source = "direct",
+    parentCombo = null,
+  } = params;
+
+  const resolvedTiming = resolveTiming({
+    category: productDoc?.category || item?.category,
+    courseCodes: Array.isArray(productDoc?.courseCodes)
+      ? productDoc.courseCodes
+      : Array.isArray(item?.courseCodes)
+      ? item.courseCodes
+      : [],
+    deliverWithinMinutes: productDoc?.deliverWithinMinutes,
+    onDemandNote: productDoc?.onDemandNote,
+  });
+
+  const physical =
+    source === "builder_combo_child"
+      ? isPhysicalItem({
+          ...item,
+          category: productDoc?.category || item?.category,
+          title: productDoc?.title || item?.title,
+        }) || productDoc?.isDigital === false
+      : isPhysicalItem(item) || productDoc?.isDigital === false;
+
+  const currentAvailability = normalizeAvailability(
+    productDoc?.availability || item?.currentAvailability || "available"
+  );
+
+  return {
+    orderId,
+    status,
+    currency,
+    paidAt,
+    expiresAt,
+    createdAt,
+
+    productId,
+    itemType: "product",
+    isBuilderCombo: false,
+    isFromBuilderCombo: source === "builder_combo_child",
+    parentComboId: parentCombo ? safeStr(parentCombo?.productId) : "",
+    parentComboTitle: parentCombo ? safeStr(parentCombo?.title) : "",
+
+    title: safeStr(productDoc?.title || item?.title),
+    category: safeStr(productDoc?.category || item?.category),
+    price:
+      source === "builder_combo_child"
+        ? 0
+        : safeNum(item?.payableUnitPrice ?? item?.price, 0),
+    originalProductPrice: safeNum(productDoc?.price, 0),
+    quantity: source === "builder_combo_child" ? 1 : Math.max(1, safeNum(item?.quantity, 1)),
+
+    comboSlug: "",
+    comboCategorySlug: parentCombo ? safeStr(parentCombo?.comboCategorySlug) : "",
+    comboBadge: parentCombo ? safeStr(parentCombo?.comboBadge) : "",
+    comboSaveLabel: parentCombo ? safeStr(parentCombo?.comboSaveLabel) : "",
+    comboMediumLabel: parentCombo ? safeStr(parentCombo?.comboMediumLabel) : "",
+    comboSessionLabel: parentCombo ? safeStr(parentCombo?.comboSessionLabel) : "",
+    comboItems: [],
+
+    isPhysical: physical,
+    currentAvailability,
+
+    deliverWithinMinutes: safeNum(resolvedTiming?.deliverWithinMinutes, 0),
+    onDemandNote: safeStr(resolvedTiming?.onDemandNote || productDoc?.onDemandNote),
+    onDemandTimingSource: safeStr(resolvedTiming?.source),
+
+    canDownload: !physical,
+    previewUrl: !physical ? buildDownloadUrl(productId, false) : "",
+    downloadUrl: !physical ? buildDownloadUrl(productId, true) : "",
+
+    shiprocket,
+  };
+}
+
+function buildComboParentRow(params: {
+  orderId: string;
+  status: string;
+  currency: string;
+  paidAt: string | null;
+  expiresAt: string | null;
+  createdAt: string | null;
+  item: any;
+  shiprocket: any;
+}) {
+  const { orderId, status, currency, paidAt, expiresAt, createdAt, item, shiprocket } = params;
+
+  return {
+    orderId,
+    status,
+    currency,
+    paidAt,
+    expiresAt,
+    createdAt,
+
+    productId: safeStr(item?.productId),
+    itemType: "combo",
+    isBuilderCombo: isBuilderComboItem(item),
+
+    title: safeStr(item?.title),
+    category: safeStr(item?.category || "Combo"),
+    price: safeNum(item?.payableUnitPrice ?? item?.price, 0),
+    quantity: Math.max(1, safeNum(item?.quantity, 1)),
+
+    comboSlug: safeStr(item?.comboSlug),
+    comboCategorySlug: safeStr(item?.comboCategorySlug),
+    comboBadge: safeStr(item?.comboBadge),
+    comboSaveLabel: safeStr(item?.comboSaveLabel),
+    comboMediumLabel: safeStr(item?.comboMediumLabel),
+    comboSessionLabel: safeStr(item?.comboSessionLabel),
+    comboItems: Array.isArray(item?.comboItems)
+      ? item.comboItems.map((x: any) => ({
+          title: safeStr(x?.title),
+          subtitle: safeStr(x?.subtitle),
+        }))
+      : [],
+
+    isPhysical: isPhysicalItem(item),
+    currentAvailability: "available",
+
+    deliverWithinMinutes: 0,
+    onDemandNote: "",
+    onDemandTimingSource: "",
+
+    canDownload: false,
+    previewUrl: "",
+    downloadUrl: "",
+
+    shiprocket,
+  };
+}
+
 export async function GET(req: Request) {
   const user = await getAuthUser();
+
   if (!user) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
@@ -111,26 +332,30 @@ export async function GET(req: Request) {
     .select("status items totalAmount currency paidAt expiresAt createdAt orderRef shipping meta")
     .lean();
 
-  const productIds = Array.from(
-    new Set(
-      orders.flatMap((o) =>
-        Array.isArray(o?.items)
-          ? o.items
-              .filter((it: any) => !isComboItem(it))
-              .map((it: any) => safeStr(it?.productId))
-              .filter(Boolean)
-          : []
-      )
+  const productIds = uniqueStrings(
+    orders.flatMap((o) =>
+      Array.isArray(o?.items)
+        ? o.items.flatMap((it: any) => {
+            if (isComboItem(it)) {
+              return isBuilderComboItem(it) ? extractBuilderComboProductIds(it) : [];
+            }
+
+            return [safeStr(it?.productId)];
+          })
+        : []
     )
-  );
+  ).filter(isObjectIdLike);
 
   const products: any[] = productIds.length
     ? await Product.find({ _id: { $in: productIds } })
-        .select("category courseCodes availability deliverWithinMinutes onDemandNote title")
+        .select(
+          "title category courseCodes availability deliverWithinMinutes onDemandNote price isDigital"
+        )
         .lean()
     : [];
 
   const productMap = new Map<string, any>();
+
   for (const p of products) {
     productMap.set(String(p?._id || ""), p);
   }
@@ -149,107 +374,106 @@ export async function GET(req: Request) {
     const shiprocket = buildShiprocketSnapshot(o);
 
     const its = Array.isArray(o?.items) ? o.items : [];
+
     for (const it of its) {
       const combo = isComboItem(it);
-      const physical = isPhysicalItem(it);
       const pid = safeStr(it?.productId);
-      const productDoc = combo ? null : productMap.get(pid);
 
-      const resolvedTiming = !combo
-        ? resolveTiming({
-            category: productDoc?.category || it?.category,
-            courseCodes: Array.isArray(productDoc?.courseCodes)
-              ? productDoc.courseCodes
-              : Array.isArray(it?.courseCodes)
-              ? it.courseCodes
-              : [],
-            deliverWithinMinutes: productDoc?.deliverWithinMinutes,
-            onDemandNote: productDoc?.onDemandNote,
-          })
-        : null;
+      if (combo) {
+        const parentRow = buildComboParentRow({
+          orderId,
+          status,
+          currency,
+          paidAt,
+          expiresAt,
+          createdAt,
+          item: it,
+          shiprocket,
+        });
 
-      items.push({
-        orderId,
-        status,
-        currency,
-        paidAt,
-        expiresAt,
-        createdAt,
+        items.push(parentRow);
 
-        productId: pid,
-        itemType: combo ? "combo" : "product",
-        isBuilderCombo: Boolean(it?.isBuilderCombo),
+        if (isBuilderComboItem(it)) {
+          const childProductIds = extractBuilderComboProductIds(it);
 
-        title: safeStr(it?.title),
-        category: safeStr(it?.category),
-        price: safeNum(it?.payableUnitPrice ?? it?.price, 0),
-        quantity: Math.max(1, safeNum(it?.quantity, 1)),
+          for (const childProductId of childProductIds) {
+            const productDoc = productMap.get(childProductId);
 
-        comboSlug: safeStr(it?.comboSlug),
-        comboCategorySlug: safeStr(it?.comboCategorySlug),
-        comboBadge: safeStr(it?.comboBadge),
-        comboSaveLabel: safeStr(it?.comboSaveLabel),
-        comboMediumLabel: safeStr(it?.comboMediumLabel),
-        comboSessionLabel: safeStr(it?.comboSessionLabel),
-        comboItems: Array.isArray(it?.comboItems)
-          ? it.comboItems.map((x: any) => ({
-              title: safeStr(x?.title),
-              subtitle: safeStr(x?.subtitle),
-            }))
-          : [],
+            if (!productDoc) {
+              continue;
+            }
 
-        isPhysical: physical,
-        currentAvailability: combo
-          ? "available"
-          : normalizeAvailability(productDoc?.availability),
+            items.push(
+              buildProductRow({
+                order: o,
+                item: it,
+                productDoc,
+                productId: childProductId,
+                orderId,
+                status,
+                currency,
+                paidAt,
+                expiresAt,
+                createdAt,
+                shiprocket,
+                resolveTiming,
+                source: "builder_combo_child",
+                parentCombo: it,
+              })
+            );
+          }
+        }
 
-        deliverWithinMinutes: combo
-          ? 0
-          : Math.max(1, safeNum(resolvedTiming?.deliverWithinMinutes, productDoc?.deliverWithinMinutes || 20)),
-        onDemandNote: combo ? "" : safeStr(resolvedTiming?.onDemandNote || productDoc?.onDemandNote),
+        continue;
+      }
 
-        rawDeliverWithinMinutes: combo ? 0 : safeNum(productDoc?.deliverWithinMinutes, 20),
-        rawOnDemandNote: combo ? "" : safeStr(productDoc?.onDemandNote),
+      if (!isObjectIdLike(pid)) {
+        continue;
+      }
 
-        onDemandTimingSource: combo ? "" : safeStr(resolvedTiming?.source),
-        onDemandMatchedCourseCode: combo ? "" : safeStr(resolvedTiming?.matchedCourseCode),
-        onDemandMatchedRuleId: combo ? "" : safeStr(resolvedTiming?.matchedRuleId),
-        onDemandMatchedRuleType: combo ? "" : safeStr(resolvedTiming?.matchedRuleType),
+      const productDoc = productMap.get(pid);
 
-        shipping:
-          o?.shipping && typeof o.shipping === "object"
-            ? {
-                address: safeStr(o.shipping?.address),
-                pincode: safeStr(o.shipping?.pincode),
-                city: safeStr(o.shipping?.city),
-                state: safeStr(o.shipping?.state),
-              }
-            : null,
-
-        shiprocketStatus: physical ? safeStr(shiprocket.status) : "",
-        shiprocketMessage: physical ? safeStr(shiprocket.message) : "",
-        shiprocketOrderId: physical ? safeStr(shiprocket.shiprocketOrderId) : "",
-        shiprocketShipmentId: physical ? safeStr(shiprocket.shipmentId) : "",
-        shiprocketAwbCode: physical ? safeStr(shiprocket.awbCode) : "",
-        shiprocketCourierName: physical ? safeStr(shiprocket.courierName) : "",
-        shiprocketSyncedAt: physical ? safeStr(shiprocket.syncedAt) : "",
-      });
+      items.push(
+        buildProductRow({
+          order: o,
+          item: it,
+          productDoc,
+          productId: pid,
+          orderId,
+          status,
+          currency,
+          paidAt,
+          expiresAt,
+          createdAt,
+          shiprocket,
+          resolveTiming,
+          source: "direct",
+        })
+      );
     }
   }
 
   if (q) {
     items = items.filter((item) => {
       const hay = [
-        safeStr(item?.title),
-        safeStr(item?.category),
-        safeStr(item?.orderId),
-        safeStr(item?.productId),
-        safeStr(item?.shiprocketAwbCode),
-        safeStr(item?.shiprocketCourierName),
-        safeStr(item?.onDemandTimingSource),
+        item.orderId,
+        item.title,
+        item.category,
+        item.productId,
+        item.comboSlug,
+        item.comboCategorySlug,
+        item.comboBadge,
+        item.comboSaveLabel,
+        item.comboMediumLabel,
+        item.comboSessionLabel,
+        item.parentComboTitle,
+        item.currentAvailability,
+        ...(Array.isArray(item.comboItems)
+          ? item.comboItems.flatMap((x: any) => [safeStr(x?.title), safeStr(x?.subtitle)])
+          : []),
       ]
-        .join(" ")
-        .toLowerCase();
+        .map((x) => safeStr(x).toLowerCase())
+        .join(" ");
 
       return hay.includes(q);
     });
@@ -259,17 +483,18 @@ export async function GET(req: Request) {
   const totalPages = Math.max(1, Math.ceil(total / limit));
   const safePage = Math.min(page, totalPages);
   const start = (safePage - 1) * limit;
-  const pagedItems = items.slice(start, start + limit);
+  const paginated = items.slice(start, start + limit);
 
   return NextResponse.json(
     {
       ok: true,
-      items: pagedItems,
-      total,
       page: safePage,
-      pageSize: limit,
+      limit,
+      total,
       totalPages,
-      q,
+      hasNextPage: safePage < totalPages,
+      hasPrevPage: safePage > 1,
+      items: paginated,
     },
     { status: 200 }
   );

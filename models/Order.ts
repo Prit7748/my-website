@@ -14,6 +14,18 @@ function roundMoney(x: any) {
   return Math.round(n * 100) / 100;
 }
 
+function uniqueStringArray(arr: any) {
+  if (!Array.isArray(arr)) return [];
+
+  return Array.from(
+    new Set(
+      arr
+        .map((x: any) => safeStr(x))
+        .filter(Boolean)
+    )
+  );
+}
+
 const ComboItemSnapshotSchema = new Schema(
   {
     title: {
@@ -186,6 +198,12 @@ const OrderItemSchema = new Schema(
       index: true,
     },
 
+    comboBuilderProductIds: {
+      type: [String],
+      default: [],
+      index: true,
+    },
+
     comboItems: {
       type: [ComboItemSnapshotSchema],
       default: [],
@@ -322,6 +340,7 @@ OrderSchema.pre("save", function () {
     const quantity = Math.max(1, Math.trunc(Number(item?.quantity || 1)));
     const originalPrice = roundMoney(item?.originalPrice || item?.price || 0);
     const discountedUnitPrice = roundMoney(item?.price || 0);
+
     const payableUnitPrice =
       item?.payableUnitPrice !== undefined && item?.payableUnitPrice !== null
         ? roundMoney(item?.payableUnitPrice)
@@ -342,9 +361,13 @@ OrderSchema.pre("save", function () {
         ? roundMoney(item?.payableAmount)
         : roundMoney(payableUnitPrice * quantity);
 
+    const itemType =
+      safeStr(item?.itemType || "product").toLowerCase() === "combo" ? "combo" : "product";
+
+    const comboBuilderProductIds = uniqueStringArray(item?.comboBuilderProductIds);
+
     return {
-      itemType:
-        safeStr(item?.itemType || "product").toLowerCase() === "combo" ? "combo" : "product",
+      itemType,
       productId: safeStr(item?.productId),
       title: safeStr(item?.title),
       category: safeStr(item?.category),
@@ -377,7 +400,8 @@ OrderSchema.pre("save", function () {
       comboMediumLabel: safeStr(item?.comboMediumLabel),
       comboSessionLabel: safeStr(item?.comboSessionLabel),
 
-      isBuilderCombo: Boolean(item?.isBuilderCombo),
+      isBuilderCombo: Boolean(item?.isBuilderCombo) || comboBuilderProductIds.length > 0,
+      comboBuilderProductIds,
 
       comboItems: Array.isArray(item?.comboItems)
         ? item.comboItems
@@ -419,6 +443,7 @@ OrderSchema.pre("save", function () {
       if (item.payableAmount !== undefined && item.payableAmount !== null) {
         return acc + roundMoney(item.payableAmount || 0);
       }
+
       return acc + roundMoney(item.price || 0) * Math.max(1, Number(item.quantity || 1));
     }, 0)
   );
@@ -447,6 +472,7 @@ OrderSchema.index({ userId: 1, status: 1, expiresAt: 1, createdAt: -1 });
 OrderSchema.index({ orderRef: 1, status: 1 });
 OrderSchema.index({ "items.itemType": 1, createdAt: -1 });
 OrderSchema.index({ "items.isBuilderCombo": 1, createdAt: -1 });
+OrderSchema.index({ "items.comboBuilderProductIds": 1, createdAt: -1 });
 OrderSchema.index({ "shiprocket.status": 1, createdAt: -1 });
 OrderSchema.index({ "shiprocket.shipmentId": 1 });
 OrderSchema.index({ "shiprocket.orderId": 1 });

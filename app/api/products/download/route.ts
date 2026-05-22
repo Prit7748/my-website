@@ -67,6 +67,112 @@ function normalizeSkuLike(input: string) {
   return asString(input).toUpperCase().replace(/[^A-Z0-9]/g, "");
 }
 
+function isComboItem(item: any) {
+  return asString(item?.itemType).toLowerCase() === "combo";
+}
+
+function isBuilderComboItem(item: any) {
+  const productId = asString(item?.productId);
+  return (
+    Boolean(item?.isBuilderCombo) ||
+    productId.toLowerCase().startsWith("builder-combo:")
+  );
+}
+
+function extractBuilderComboProductIds(item: any) {
+  const explicitIds = Array.isArray(item?.comboBuilderProductIds)
+    ? item.comboBuilderProductIds.map((x: any) => asString(x)).filter(Boolean)
+    : [];
+
+  if (explicitIds.length > 0) {
+    return Array.from(new Set(explicitIds));
+  }
+
+  const productId = asString(item?.productId);
+
+  if (!productId.toLowerCase().startsWith("builder-combo:")) {
+    return [];
+  }
+
+  const parts = productId.split(":");
+  const encodedIds = asString(parts.slice(2).join(":"));
+
+  if (!encodedIds) {
+    return [];
+  }
+
+  return Array.from(
+    new Set(
+      encodedIds
+        .split("-")
+        .map((x) => asString(x))
+        .filter((x) => mongoose.Types.ObjectId.isValid(x))
+    )
+  );
+}
+
+function orderItemGrantsProductAccess(item: any, productId: string) {
+  const requestedId = asString(productId);
+
+  if (!requestedId) {
+    return false;
+  }
+
+  if (!isComboItem(item)) {
+    return asString(item?.productId) === requestedId;
+  }
+
+  if (!isBuilderComboItem(item)) {
+    return false;
+  }
+
+  const builderProductIds = extractBuilderComboProductIds(item);
+  return builderProductIds.includes(requestedId);
+}
+
+function findAccessItemFromOrder(order: any, productId: string) {
+  const items = Array.isArray(order?.items) ? order.items : [];
+  return items.find((item: any) => orderItemGrantsProductAccess(item, productId)) || null;
+}
+
+async function findPaidOrderWithAccess(userId: string, productId: string) {
+  const now = new Date();
+
+  const directOrder: any = await Order.findOne({
+    userId: new mongoose.Types.ObjectId(userId),
+    status: "paid",
+    expiresAt: { $gt: now },
+    "items.productId": productId,
+  }).lean();
+
+  if (directOrder && findAccessItemFromOrder(directOrder, productId)) {
+    return directOrder;
+  }
+
+  const candidateOrders: any[] = await Order.find({
+    userId: new mongoose.Types.ObjectId(userId),
+    status: "paid",
+    expiresAt: { $gt: now },
+    items: {
+      $elemMatch: {
+        itemType: "combo",
+        $or: [
+          { isBuilderCombo: true },
+          { productId: { $regex: "^builder-combo:", $options: "i" } },
+        ],
+      },
+    },
+  })
+    .sort({ paidAt: -1, createdAt: -1 })
+    .select("items paidAt expiresAt status userId")
+    .lean();
+
+  return (
+    candidateOrders.find((order: any) => Boolean(findAccessItemFromOrder(order, productId))) ||
+    null
+  );
+}
+
 async function findVaultPdfKeyForProduct(product: any) {
   const directPdfKey = asString(product?.pdfKey);
   if (directPdfKey) {
@@ -114,14 +220,7 @@ export async function GET(req: Request) {
 
   await dbConnect();
 
-  const now = new Date();
-
-  const paid: any = await Order.findOne({
-    userId: new mongoose.Types.ObjectId(user.id),
-    status: "paid",
-    expiresAt: { $gt: now },
-    "items.productId": new mongoose.Types.ObjectId(productId),
-  }).lean();
+  const paid: any = await findPaidOrderWithAccess(user.id, productId);
 
   if (!paid) {
     return NextResponse.json(
@@ -130,9 +229,7 @@ export async function GET(req: Request) {
     );
   }
 
-  const item = Array.isArray(paid?.items)
-    ? paid.items.find((it: any) => String(it?.productId) === String(productId))
-    : null;
+  const item = findAccessItemFromOrder(paid, productId);
 
   const product: any = await Product.findById(productId)
     .select("pdfKey availability deliverWithinMinutes onDemandNote comingSoonNote sku isActive pages")
@@ -142,7 +239,10 @@ export async function GET(req: Request) {
     return NextResponse.json({ error: "Product not found" }, { status: 404 });
   }
 
-  let key = asString(item?.pdfKey);
+  const directOrderItem =
+    item && !isComboItem(item) && asString(item?.productId) === productId ? item : null;
+
+  let key = asString(directOrderItem?.pdfKey);
 
   if (!key) {
     key = await findVaultPdfKeyForProduct(product);
@@ -159,17 +259,19 @@ export async function GET(req: Request) {
         }
       );
 
-      await Order.updateOne(
-        {
-          _id: paid._id,
-          "items.productId": new mongoose.Types.ObjectId(productId),
-        },
-        {
-          $set: {
-            "items.$.pdfKey": key,
+      if (directOrderItem) {
+        await Order.updateOne(
+          {
+            _id: paid._id,
+            "items.productId": productId,
           },
-        }
-      );
+          {
+            $set: {
+              "items.$.pdfKey": key,
+            },
+          }
+        );
+      }
     }
   }
 
@@ -187,6 +289,7 @@ export async function GET(req: Request) {
     return NextResponse.json({ ok: true, url: signed, expiresIn: 60 }, { status: 200 });
   }
 
+  const now = new Date();
   const availability = normalizeAvailability(product?.availability);
   const minsRaw = Number(product?.deliverWithinMinutes ?? 20);
   const deliverWithinMinutes = clamp(Number.isFinite(minsRaw) ? minsRaw : 20, 1, 1440);

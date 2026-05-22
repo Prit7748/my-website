@@ -37,9 +37,12 @@ function asNum(x: any, def = 0) {
 function safeBool(x: any, def = false) {
   if (typeof x === "boolean") return x;
   if (typeof x === "number") return x === 1;
+
   const v = asString(x).toLowerCase();
+
   if (["true", "1", "yes", "on"].includes(v)) return true;
   if (["false", "0", "no", "off"].includes(v)) return false;
+
   return def;
 }
 
@@ -96,7 +99,12 @@ async function getComingSoonSalesEnabled() {
 function resolveAvailability(rawAvailability: string, comingSoonSalesEnabled: boolean) {
   const a = normAvail(rawAvailability);
 
-  if (a === "outofstock" || a === "out-of-stock" || a === "want_to_buy" || a === "wanttobuy") {
+  if (
+    a === "outofstock" ||
+    a === "out-of-stock" ||
+    a === "want_to_buy" ||
+    a === "wanttobuy"
+  ) {
     return "out_of_stock";
   }
 
@@ -144,6 +152,7 @@ function normalizeCategoryKey(input: any) {
 
 function normalizeCategoryLabelFromSlug(slug: string) {
   const s = asString(slug).toLowerCase();
+
   if (s === "solved-assignments") return "Solved Assignments";
   if (s === "question-papers") return "Question Papers (PYQ)";
   if (s === "guess-papers") return "Guess Papers";
@@ -151,6 +160,7 @@ function normalizeCategoryLabelFromSlug(slug: string) {
   if (s === "handwritten-pdfs") return "Handwritten PDFs";
   if (s === "handwritten-hardcopy") return "Handwritten Hardcopy (Delivery)";
   if (s === "projects-synopsis") return "Projects & Synopsis";
+
   return "";
 }
 
@@ -172,6 +182,7 @@ function sessionSortValue(session6: string, session: string) {
 
   const raw = asString(session).toUpperCase();
   const m = raw.match(/(JUN|JUNE|DEC|DECEMBER)[\s\-]*(\d{2,4})/i);
+
   if (m) {
     const monRaw = m[1].toUpperCase();
     const yyRaw = m[2];
@@ -183,6 +194,7 @@ function sessionSortValue(session6: string, session: string) {
   const nums = raw.replace(/\D/g, "");
   if (nums.length >= 6) return Number(nums.slice(0, 6));
   if (nums.length === 4) return Number(`${nums}00`);
+
   return 0;
 }
 
@@ -190,6 +202,7 @@ function buildGeneratedComboTitle(categoryLabel: string, selectedProducts: any[]
   const subjectCodes = uniqueStrings(
     selectedProducts.map((x: any) => asString(x.subjectCode).toUpperCase())
   );
+
   const courseCodes = uniqueStrings(
     selectedProducts.flatMap((x: any) =>
       safeArr(x.courseCodes).map((c: any) => asString(c).toUpperCase())
@@ -215,9 +228,11 @@ function buildBuilderBadge(discountType: string, discountValue: number, selected
   if (asString(discountType).toLowerCase() === "flat") {
     return `Save ₹${Number(discountValue || 0)}`;
   }
+
   if (Number(discountValue || 0) > 0) {
     return `Save ${Number(discountValue || 0)}%`;
   }
+
   return `${selectedCount} Items`;
 }
 
@@ -300,9 +315,24 @@ function getDefaultResellerConfig() {
         benefitMode: "wallet_deduction",
         isActive: true,
         planBenefits: [
-          { planCode: "basic", discountPercent: 10, discountProductLimit: 0, walletDeductionEnabled: true },
-          { planCode: "standard", discountPercent: 15, discountProductLimit: 0, walletDeductionEnabled: true },
-          { planCode: "premium", discountPercent: 20, discountProductLimit: 0, walletDeductionEnabled: true },
+          {
+            planCode: "basic",
+            discountPercent: 10,
+            discountProductLimit: 0,
+            walletDeductionEnabled: true,
+          },
+          {
+            planCode: "standard",
+            discountPercent: 15,
+            discountProductLimit: 0,
+            walletDeductionEnabled: true,
+          },
+          {
+            planCode: "premium",
+            discountPercent: 20,
+            discountProductLimit: 0,
+            walletDeductionEnabled: true,
+          },
         ],
       },
       {
@@ -310,9 +340,24 @@ function getDefaultResellerConfig() {
         benefitMode: "wallet_deduction",
         isActive: true,
         planBenefits: [
-          { planCode: "basic", discountPercent: 10, discountProductLimit: 0, walletDeductionEnabled: true },
-          { planCode: "standard", discountPercent: 15, discountProductLimit: 0, walletDeductionEnabled: true },
-          { planCode: "premium", discountPercent: 20, discountProductLimit: 0, walletDeductionEnabled: true },
+          {
+            planCode: "basic",
+            discountPercent: 10,
+            discountProductLimit: 0,
+            walletDeductionEnabled: true,
+          },
+          {
+            planCode: "standard",
+            discountPercent: 15,
+            discountProductLimit: 0,
+            walletDeductionEnabled: true,
+          },
+          {
+            planCode: "premium",
+            discountPercent: 20,
+            discountProductLimit: 0,
+            walletDeductionEnabled: true,
+          },
         ],
       },
       {
@@ -320,9 +365,24 @@ function getDefaultResellerConfig() {
         benefitMode: "discount_only",
         isActive: true,
         planBenefits: [
-          { planCode: "basic", discountPercent: 10, discountProductLimit: 10, walletDeductionEnabled: false },
-          { planCode: "standard", discountPercent: 15, discountProductLimit: 15, walletDeductionEnabled: false },
-          { planCode: "premium", discountPercent: 20, discountProductLimit: 20, walletDeductionEnabled: false },
+          {
+            planCode: "basic",
+            discountPercent: 10,
+            discountProductLimit: 10,
+            walletDeductionEnabled: false,
+          },
+          {
+            planCode: "standard",
+            discountPercent: 15,
+            discountProductLimit: 15,
+            walletDeductionEnabled: false,
+          },
+          {
+            planCode: "premium",
+            discountPercent: 20,
+            discountProductLimit: 20,
+            walletDeductionEnabled: false,
+          },
         ],
       },
       {
@@ -330,9 +390,24 @@ function getDefaultResellerConfig() {
         benefitMode: "discount_only",
         isActive: true,
         planBenefits: [
-          { planCode: "basic", discountPercent: 10, discountProductLimit: 10, walletDeductionEnabled: false },
-          { planCode: "standard", discountPercent: 15, discountProductLimit: 15, walletDeductionEnabled: false },
-          { planCode: "premium", discountPercent: 20, discountProductLimit: 20, walletDeductionEnabled: false },
+          {
+            planCode: "basic",
+            discountPercent: 10,
+            discountProductLimit: 10,
+            walletDeductionEnabled: false,
+          },
+          {
+            planCode: "standard",
+            discountPercent: 15,
+            discountProductLimit: 15,
+            walletDeductionEnabled: false,
+          },
+          {
+            planCode: "premium",
+            discountPercent: 20,
+            discountProductLimit: 20,
+            walletDeductionEnabled: false,
+          },
         ],
       },
     ],
@@ -358,28 +433,34 @@ function mapFromUsage(raw: any) {
 
 function mapToObject(map: Map<string, number>) {
   const obj: Record<string, number> = {};
+
   for (const [k, v] of map.entries()) {
     obj[k] = Math.max(0, asNum(v, 0));
   }
+
   return obj;
 }
 
 function buildRuleMap(config: any) {
   const map = new Map<string, any>();
   const rules = Array.isArray(config?.categoryRules) ? config.categoryRules : [];
+
   for (const rule of rules) {
     const key = normalizeCategoryKey(rule?.categoryKey || rule?.categoryLabel);
     if (!key) continue;
     map.set(key, rule);
   }
+
   return map;
 }
 
 function getPlanMeta(config: any, planCode: string) {
   const plans = Array.isArray(config?.plans) ? config.plans : [];
+
   const found = plans.find(
     (x: any) => asString(x?.code).toLowerCase() === asString(planCode).toLowerCase()
   );
+
   return {
     planCode: asString(found?.code || planCode).toLowerCase(),
     planName: asString(found?.name || planCode),
@@ -388,6 +469,7 @@ function getPlanMeta(config: any, planCode: string) {
 
 function getPlanBenefit(rule: any, planCode: string) {
   const list = Array.isArray(rule?.planBenefits) ? rule.planBenefits : [];
+
   return (
     list.find(
       (x: any) => asString(x?.planCode).toLowerCase() === asString(planCode).toLowerCase()
@@ -408,6 +490,7 @@ function buildGroupKey(item: any) {
     pricingMode: item.pricingMode,
     comboSlug: item.comboSlug,
     comboCategorySlug: item.comboCategorySlug,
+    comboBuilderProductIds: uniqueStrings(item?.comboBuilderProductIds || []).sort(),
     resellerPlanCode: item.resellerPlanCode,
   });
 }
@@ -423,6 +506,7 @@ function mergeGroupedItem(store: Map<string, any>, item: any) {
       discountAmount: roundMoney(item.discountAmount || 0),
       walletDebitAmount: roundMoney(item.walletDebitAmount || 0),
       payableAmount: roundMoney(item.payableAmount || 0),
+      comboBuilderProductIds: uniqueStrings(item?.comboBuilderProductIds || []),
     });
     return;
   }
@@ -437,6 +521,11 @@ function mergeGroupedItem(store: Map<string, any>, item: any) {
   existing.payableAmount = roundMoney(
     existing.payableAmount + roundMoney(item.payableAmount || 0)
   );
+  existing.comboBuilderProductIds = uniqueStrings([
+    ...(existing.comboBuilderProductIds || []),
+    ...(item?.comboBuilderProductIds || []),
+  ]);
+
   store.set(key, existing);
 }
 
@@ -607,6 +696,7 @@ function buildPromoItemsSnapshot(orderItems: any[]) {
     comboSlug: asString(item?.comboSlug),
     comboCategorySlug: asString(item?.comboCategorySlug),
     isBuilderCombo: Boolean(item?.isBuilderCombo),
+    comboBuilderProductIds: uniqueStrings(item?.comboBuilderProductIds || []),
   }));
 }
 
@@ -620,11 +710,13 @@ async function upsertPromoUsageRecord(params: {
   paymentId?: string;
 }) {
   const promoCode = asString(params?.promoCode).toUpperCase();
+
   if (!promoCode) {
     return { ok: false, transitionedToSuccess: false };
   }
 
   const orderDoc = params.orderDoc;
+
   if (!orderDoc?._id) {
     return { ok: false, transitionedToSuccess: false };
   }
@@ -812,7 +904,10 @@ async function applyWalletAndUsageForWalletOnlyOrder({
 
 export async function POST(req: Request) {
   const authUser = await getAuthUser();
-  if (!authUser) return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+
+  if (!authUser) {
+    return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
+  }
 
   const keyId = asString(process.env.RAZORPAY_KEY_ID);
   const keySecret = asString(process.env.RAZORPAY_KEY_SECRET);
@@ -865,7 +960,9 @@ export async function POST(req: Request) {
     ...productRequests.map((x: any) => x.productId),
     ...builderComboRequests.flatMap((x: any) => x.comboBuilderProductIds || []),
   ]);
+
   const comboSlugs = uniqueStrings(comboRequests.map((x: any) => x.comboSlug).filter(Boolean));
+
   const builderCategorySlugs = uniqueStrings(
     builderComboRequests.map((x: any) => x.comboCategorySlug).filter(Boolean)
   );
@@ -939,6 +1036,7 @@ export async function POST(req: Request) {
   }
 
   const missingIds: string[] = [];
+
   const blockedItems: Array<{
     productId: string;
     title: string;
@@ -975,6 +1073,7 @@ export async function POST(req: Request) {
         }
 
         const comboCategorySlug = asString(comboDoc?.categorySlug);
+
         const comboItems = Array.isArray(comboDoc?.itemsSnapshot)
           ? comboDoc.itemsSnapshot.map((x: any) => ({
               title: asString(x?.title),
@@ -1020,6 +1119,7 @@ export async function POST(req: Request) {
           comboMediumLabel: asString(comboDoc?.mediumLabel || reqItem.comboMediumLabel),
           comboSessionLabel: asString(comboDoc?.sessionLabel || reqItem.comboSessionLabel),
           isBuilderCombo: false,
+          comboBuilderProductIds: [],
           comboItems,
         });
 
@@ -1061,6 +1161,7 @@ export async function POST(req: Request) {
       const sameMediumOnly = Boolean(builderRules?.sameMediumOnly);
 
       const builderProductIds = uniqueStrings(reqItem.comboBuilderProductIds);
+
       if (builderProductIds.length === 0) {
         return NextResponse.json(
           { error: "Builder combo product selection missing" },
@@ -1083,12 +1184,15 @@ export async function POST(req: Request) {
       }
 
       const builderProducts: any[] = [];
+
       for (const id of builderProductIds) {
         const p: any = byProductId.get(id);
+
         if (!p) {
           missingIds.push(id);
           continue;
         }
+
         builderProducts.push(p);
       }
 
@@ -1121,6 +1225,7 @@ export async function POST(req: Request) {
         }
 
         const basePrice = roundMoney(p.price || 0);
+
         if (!Number.isFinite(basePrice) || basePrice <= 0) {
           return NextResponse.json(
             { error: `Invalid product price for ${asString(p.title || "product")}` },
@@ -1137,6 +1242,7 @@ export async function POST(req: Request) {
         const subjectCodes = uniqueStrings(
           builderProducts.map((p: any) => asString(p.subjectCode).toUpperCase())
         );
+
         if (subjectCodes.length > 1) {
           return NextResponse.json(
             { error: "Builder combo same subject rule failed" },
@@ -1147,6 +1253,7 @@ export async function POST(req: Request) {
 
       if (sameMediumOnly) {
         const mediums = uniqueStrings(builderProducts.map((p: any) => asString(p.language)));
+
         if (mediums.length > 1) {
           return NextResponse.json(
             { error: "Builder combo same medium rule failed" },
@@ -1185,6 +1292,7 @@ export async function POST(req: Request) {
 
       const firstSession = asString(sortedBySession[0]?.session);
       const lastSession = asString(sortedBySession[sortedBySession.length - 1]?.session);
+
       const detectedSessionLabel =
         firstSession && lastSession && firstSession !== lastSession
           ? `${firstSession} to ${lastSession}`
@@ -1243,6 +1351,7 @@ export async function POST(req: Request) {
         comboMediumLabel: detectedMedium,
         comboSessionLabel: detectedSessionLabel,
         isBuilderCombo: true,
+        comboBuilderProductIds: builderProductIds,
         comboItems,
       });
 
@@ -1250,6 +1359,7 @@ export async function POST(req: Request) {
     }
 
     const p: any = byProductId.get(reqItem.productId);
+
     if (!p) {
       missingIds.push(reqItem.productId);
       continue;
@@ -1272,6 +1382,7 @@ export async function POST(req: Request) {
     }
 
     const basePrice = roundMoney(p.price || 0);
+
     if (!Number.isFinite(basePrice) || basePrice <= 0) {
       return NextResponse.json(
         { error: `Invalid product price for ${asString(p.title || "product")}` },
@@ -1351,6 +1462,7 @@ export async function POST(req: Request) {
         comboMediumLabel: "",
         comboSessionLabel: "",
         isBuilderCombo: false,
+        comboBuilderProductIds: [],
         comboItems: [],
       });
     }
@@ -1385,6 +1497,7 @@ export async function POST(req: Request) {
 
   if (actualHasPhysicalItem) {
     const shipping = body?.shipping && typeof body.shipping === "object" ? body.shipping : null;
+
     if (!asString(shipping?.address) || !asString(shipping?.pincode) || !asString(shipping?.city)) {
       return NextResponse.json(
         { error: "Shipping address is required for physical items" },
@@ -1428,6 +1541,7 @@ export async function POST(req: Request) {
         itemType: asString(item.itemType).toLowerCase() === "combo" ? "combo" : "product",
         comboSlug: asString(item.comboSlug),
         comboCategorySlug: asString(item.comboCategorySlug),
+        comboBuilderProductIds: uniqueStrings(item?.comboBuilderProductIds || []),
       })),
       userId: asString(authUser.id),
       isReseller: Boolean(userReseller?.isReseller),
@@ -1494,8 +1608,10 @@ export async function POST(req: Request) {
   const hardcopySubtotalAmount = roundMoney(
     orderItems.reduce((acc: number, item: any) => {
       if (!isHardcopyOrderItem(item)) return acc;
+
       const lineAmount =
         roundMoney(item?.payableAmount || 0) + roundMoney(item?.walletDebitAmount || 0);
+
       return acc + roundMoney(lineAmount);
     }, 0)
   );
@@ -1519,6 +1635,7 @@ export async function POST(req: Request) {
   const deliveryChargeWalletDebitPlanned = roundMoney(
     Math.min(availableWallet, deliveryChargeBaseAmount)
   );
+
   availableWallet = roundMoney(availableWallet - deliveryChargeWalletDebitPlanned);
 
   const deliveryChargePayableAmount = roundMoney(
@@ -1698,6 +1815,7 @@ export async function POST(req: Request) {
   const receipt = rndReceipt();
 
   const basic = Buffer.from(`${keyId}:${keySecret}`).toString("base64");
+
   const rz = await fetch("https://api.razorpay.com/v1/orders", {
     method: "POST",
     headers: {
@@ -1724,6 +1842,7 @@ export async function POST(req: Request) {
   });
 
   const rzData: any = await rz.json().catch(() => ({}));
+
   if (!rz.ok) {
     return NextResponse.json(
       { error: "Razorpay order create failed", details: rzData },

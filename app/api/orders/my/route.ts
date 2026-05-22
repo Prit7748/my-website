@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import mongoose from "mongoose";
 import dbConnect from "@/lib/db";
 import { getAuthUser } from "@/lib/auth";
 import Order from "@/models/Order";
@@ -20,11 +21,14 @@ function safeNum(x: any, def = 0) {
 
 function safeBool(x: any, def = false) {
   if (typeof x === "boolean") return x;
+  if (typeof x === "number") return x === 1;
+
   if (typeof x === "string") {
     const v = x.trim().toLowerCase();
     if (["true", "1", "yes", "on"].includes(v)) return true;
     if (["false", "0", "no", "off"].includes(v)) return false;
   }
+
   return def;
 }
 
@@ -63,6 +67,20 @@ function normalizeAvailability(input: any) {
   return "available";
 }
 
+function isObjectIdLike(input: any) {
+  return mongoose.Types.ObjectId.isValid(safeStr(input));
+}
+
+function uniqueStrings(arr: any[]) {
+  return Array.from(
+    new Set(
+      (Array.isArray(arr) ? arr : [])
+        .map((x: any) => safeStr(x))
+        .filter(Boolean)
+    )
+  );
+}
+
 function isPhysicalLike(item: any) {
   const category = safeStr(item?.category).toLowerCase();
   const title = safeStr(item?.title).toLowerCase();
@@ -89,26 +107,217 @@ function extractShiprocket(meta: any) {
   return {
     enabled: safeBool(sr?.enabled, false),
     status: safeStr(
-      sr?.status ||
-        sr?.shipmentStatus ||
-        sr?.currentStatus ||
-        sr?.trackingStatus
+      sr?.status || sr?.shipmentStatus || sr?.currentStatus || sr?.trackingStatus
     ),
     message: safeStr(sr?.message || sr?.note || sr?.statusMessage),
-    shiprocketOrderId: safeStr(
-      sr?.shiprocketOrderId || sr?.orderId || sr?.srOrderId
-    ),
+    shiprocketOrderId: safeStr(sr?.shiprocketOrderId || sr?.orderId || sr?.srOrderId),
     shipmentId: safeStr(sr?.shipmentId || sr?.shipment_id),
     awbCode: safeStr(sr?.awbCode || sr?.awb_code || sr?.awb),
-    courierName: safeStr(
-      sr?.courierName || sr?.courier || sr?.courierCompanyName
-    ),
+    courierName: safeStr(sr?.courierName || sr?.courier || sr?.courierCompanyName),
     syncedAt: safeStr(sr?.syncedAt || sr?.updatedAt || sr?.lastSyncAt),
   };
 }
 
 function itTypeFromItem(it: any) {
   return safeStr(it?.itemType).toLowerCase() === "combo" ? "combo" : "product";
+}
+
+function isBuilderComboItem(it: any) {
+  const productId = safeStr(it?.productId).toLowerCase();
+
+  return Boolean(it?.isBuilderCombo) || productId.startsWith("builder-combo:");
+}
+
+function extractBuilderComboProductIds(it: any) {
+  const explicitIds = Array.isArray(it?.comboBuilderProductIds)
+    ? it.comboBuilderProductIds.map((x: any) => safeStr(x)).filter(Boolean)
+    : [];
+
+  if (explicitIds.length > 0) {
+    return uniqueStrings(explicitIds).filter(isObjectIdLike);
+  }
+
+  const productId = safeStr(it?.productId);
+
+  if (!productId.toLowerCase().startsWith("builder-combo:")) {
+    return [];
+  }
+
+  const parts = productId.split(":");
+  const encodedIds = safeStr(parts.slice(2).join(":"));
+
+  if (!encodedIds) {
+    return [];
+  }
+
+  return uniqueStrings(encodedIds.split("-")).filter(isObjectIdLike);
+}
+
+function buildDownloadUrl(productId: string, download = false) {
+  const id = safeStr(productId);
+  if (!id) return "";
+
+  const qs = new URLSearchParams({ productId: id });
+
+  if (download) {
+    qs.set("download", "1");
+  }
+
+  return `/api/products/download?${qs.toString()}`;
+}
+
+function normalizeComboItems(items: any[]) {
+  return Array.isArray(items)
+    ? items
+        .map((x: any) => ({
+          title: safeStr(x?.title),
+          subtitle: safeStr(x?.subtitle),
+        }))
+        .filter((x: any) => x.title)
+    : [];
+}
+
+function buildProductItemFromOrderLine(params: {
+  item: any;
+  productId: string;
+  productDoc: any;
+  resolveTiming: any;
+  shiprocket: any;
+  source?: "direct" | "builder_combo_child";
+  parentCombo?: any;
+}) {
+  const {
+    item,
+    productId,
+    productDoc,
+    resolveTiming,
+    shiprocket,
+    source = "direct",
+    parentCombo = null,
+  } = params;
+
+  const resolvedTiming = resolveTiming({
+    category: productDoc?.category || item?.category,
+    courseCodes: Array.isArray(productDoc?.courseCodes)
+      ? productDoc.courseCodes
+      : Array.isArray(item?.courseCodes)
+      ? item.courseCodes
+      : [],
+    deliverWithinMinutes: productDoc?.deliverWithinMinutes,
+    onDemandNote: productDoc?.onDemandNote,
+  });
+
+  const isPhysical =
+    isPhysicalLike({
+      ...item,
+      category: productDoc?.category || item?.category,
+      title: productDoc?.title || item?.title,
+      comboCategorySlug: parentCombo?.comboCategorySlug || item?.comboCategorySlug,
+    }) || !safeBool(productDoc?.isDigital, true);
+
+  const currentAvailability = normalizeAvailability(
+    productDoc?.availability || item?.currentAvailability
+  );
+
+  return {
+    productId,
+    itemType: "product",
+    isBuilderCombo: false,
+    isFromBuilderCombo: source === "builder_combo_child",
+    parentComboId: parentCombo ? safeStr(parentCombo?.productId) : "",
+    parentComboTitle: parentCombo ? safeStr(parentCombo?.title) : "",
+
+    title: safeStr(productDoc?.title || item?.title),
+    category: safeStr(productDoc?.category || item?.category),
+    price:
+      source === "builder_combo_child"
+        ? 0
+        : safeNum(item?.price ?? item?.payableUnitPrice, 0),
+    quantity: source === "builder_combo_child" ? 1 : Math.max(1, safeNum(item?.quantity, 1)),
+
+    comboSlug: "",
+    comboCategorySlug: parentCombo ? safeStr(parentCombo?.comboCategorySlug) : "",
+    comboBadge: parentCombo ? safeStr(parentCombo?.comboBadge) : "",
+    comboSaveLabel: parentCombo ? safeStr(parentCombo?.comboSaveLabel) : "",
+    comboMediumLabel: parentCombo ? safeStr(parentCombo?.comboMediumLabel) : "",
+    comboSessionLabel: parentCombo ? safeStr(parentCombo?.comboSessionLabel) : "",
+    comboItems: [],
+
+    isPhysical,
+    currentAvailability,
+
+    deliverWithinMinutes: Math.max(
+      1,
+      safeNum(resolvedTiming?.deliverWithinMinutes, productDoc?.deliverWithinMinutes || 20)
+    ),
+    onDemandNote: safeStr(resolvedTiming?.onDemandNote || productDoc?.onDemandNote),
+
+    rawDeliverWithinMinutes: Math.max(1, safeNum(productDoc?.deliverWithinMinutes, 20)),
+    rawOnDemandNote: safeStr(productDoc?.onDemandNote),
+
+    onDemandTimingSource: safeStr(resolvedTiming?.source),
+    onDemandMatchedCourseCode: safeStr(resolvedTiming?.matchedCourseCode),
+    onDemandMatchedRuleId: safeStr(resolvedTiming?.matchedRuleId),
+    onDemandMatchedRuleType: safeStr(resolvedTiming?.matchedRuleType),
+
+    previewUrl: !isPhysical ? buildDownloadUrl(productId, false) : "",
+    downloadUrl: !isPhysical ? buildDownloadUrl(productId, true) : "",
+    canDownload: !isPhysical,
+
+    shiprocketStatus: isPhysical ? safeStr(shiprocket?.status) : "",
+    shiprocketMessage: isPhysical ? safeStr(shiprocket?.message) : "",
+    shiprocketOrderId: isPhysical ? safeStr(shiprocket?.shiprocketOrderId) : "",
+    shiprocketShipmentId: isPhysical ? safeStr(shiprocket?.shipmentId) : "",
+    shiprocketAwbCode: isPhysical ? safeStr(shiprocket?.awbCode) : "",
+    shiprocketCourierName: isPhysical ? safeStr(shiprocket?.courierName) : "",
+  };
+}
+
+function buildComboParentItem(it: any) {
+  return {
+    productId: safeStr(it?.productId),
+    itemType: "combo",
+    isBuilderCombo: isBuilderComboItem(it),
+    comboBuilderProductIds: extractBuilderComboProductIds(it),
+
+    title: safeStr(it?.title),
+    category: safeStr(it?.category),
+    price: safeNum(it?.price, 0),
+    quantity: Math.max(1, safeNum(it?.quantity, 1)),
+
+    comboSlug: safeStr(it?.comboSlug),
+    comboCategorySlug: safeStr(it?.comboCategorySlug),
+    comboBadge: safeStr(it?.comboBadge),
+    comboSaveLabel: safeStr(it?.comboSaveLabel),
+    comboMediumLabel: safeStr(it?.comboMediumLabel),
+    comboSessionLabel: safeStr(it?.comboSessionLabel),
+    comboItems: normalizeComboItems(it?.comboItems),
+
+    isPhysical: false,
+    currentAvailability: "",
+
+    deliverWithinMinutes: 0,
+    onDemandNote: "",
+
+    rawDeliverWithinMinutes: 0,
+    rawOnDemandNote: "",
+
+    onDemandTimingSource: "",
+    onDemandMatchedCourseCode: "",
+    onDemandMatchedRuleId: "",
+    onDemandMatchedRuleType: "",
+
+    previewUrl: "",
+    downloadUrl: "",
+    canDownload: false,
+
+    shiprocketStatus: "",
+    shiprocketMessage: "",
+    shiprocketOrderId: "",
+    shiprocketShipmentId: "",
+    shiprocketAwbCode: "",
+    shiprocketCourierName: "",
+  };
 }
 
 function matchesTypeFilter(order: any, type: OrderTypeFilter) {
@@ -162,6 +371,7 @@ function matchesSearch(order: any, q: string) {
       safeStr(it?.comboSaveLabel),
       safeStr(it?.comboMediumLabel),
       safeStr(it?.comboSessionLabel),
+      safeStr(it?.parentComboTitle),
       safeStr(it?.currentAvailability),
       safeStr(it?.shiprocketStatus),
       safeStr(it?.shiprocketAwbCode),
@@ -169,6 +379,9 @@ function matchesSearch(order: any, q: string) {
       safeStr(it?.onDemandTimingSource),
       ...(Array.isArray(it?.comboItems)
         ? it.comboItems.flatMap((x: any) => [safeStr(x?.title), safeStr(x?.subtitle)])
+        : []),
+      ...(Array.isArray(it?.comboBuilderProductIds)
+        ? it.comboBuilderProductIds.map((x: any) => safeStr(x))
         : []),
     ]),
   ]
@@ -180,6 +393,7 @@ function matchesSearch(order: any, q: string) {
 
 export async function GET(req: NextRequest) {
   const user = await getAuthUser();
+
   if (!user) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
@@ -189,6 +403,7 @@ export async function GET(req: NextRequest) {
   const url = new URL(req.url);
   const q = safeStr(url.searchParams.get("q"));
   const typeRaw = safeStr(url.searchParams.get("type")).toLowerCase();
+
   const type: OrderTypeFilter =
     typeRaw === "digital" || typeRaw === "hardcopy" || typeRaw === "combo"
       ? typeRaw
@@ -210,26 +425,32 @@ export async function GET(req: NextRequest) {
     .sort({ paidAt: -1, createdAt: -1, _id: -1 })
     .lean();
 
-  const productIds = Array.from(
-    new Set(
-      orders.flatMap((o: any) =>
-        Array.isArray(o?.items)
-          ? o.items
-              .filter((it: any) => itTypeFromItem(it) !== "combo")
-              .map((it: any) => safeStr(it?.productId))
-              .filter(Boolean)
-          : []
-      )
+  const productIds = uniqueStrings(
+    orders.flatMap((o: any) =>
+      Array.isArray(o?.items)
+        ? o.items.flatMap((it: any) => {
+            const itemType = itTypeFromItem(it);
+
+            if (itemType === "combo") {
+              return isBuilderComboItem(it) ? extractBuilderComboProductIds(it) : [];
+            }
+
+            return [safeStr(it?.productId)];
+          })
+        : []
     )
-  );
+  ).filter(isObjectIdLike);
 
   const products: any[] = productIds.length
     ? await Product.find({ _id: { $in: productIds } })
-        .select("category courseCodes availability deliverWithinMinutes onDemandNote title isDigital")
+        .select(
+          "title category courseCodes availability deliverWithinMinutes onDemandNote price isDigital"
+        )
         .lean()
     : [];
 
   const productMap = new Map<string, any>();
+
   for (const p of products) {
     productMap.set(String(p?._id || ""), p);
   }
@@ -239,87 +460,62 @@ export async function GET(req: NextRequest) {
   const enrichedOrders = orders.map((o: any) => {
     const items = Array.isArray(o?.items) ? o.items : [];
     const shiprocket = extractShiprocket(o?.meta);
-    const hasPhysicalItem =
-      safeBool(o?.meta?.hasPhysicalItem, false) || items.some((it: any) => isPhysicalLike(it));
 
-    const enrichedItems = items.map((it: any) => {
+    const enrichedItems = items.flatMap((it: any) => {
       const pid = safeStr(it?.productId);
       const itemType = itTypeFromItem(it);
       const combo = itemType === "combo";
-      const productDoc = !combo ? productMap.get(pid) : null;
 
-      const currentAvailability = combo
-        ? ""
-        : normalizeAvailability(productDoc?.availability || it?.currentAvailability);
+      if (combo) {
+        const parentComboItem = buildComboParentItem(it);
 
-      const isPhysical = combo
-        ? false
-        : isPhysicalLike(it) || !safeBool(productDoc?.isDigital, true);
+        if (!isBuilderComboItem(it)) {
+          return [parentComboItem];
+        }
 
-      const resolvedTiming = !combo
-        ? resolveTiming({
-            category: productDoc?.category || it?.category,
-            courseCodes: Array.isArray(productDoc?.courseCodes)
-              ? productDoc.courseCodes
-              : Array.isArray(it?.courseCodes)
-              ? it.courseCodes
-              : [],
-            deliverWithinMinutes: productDoc?.deliverWithinMinutes,
-            onDemandNote: productDoc?.onDemandNote,
+        const childProductIds = extractBuilderComboProductIds(it);
+
+        const childItems = childProductIds
+          .map((childProductId: string) => {
+            const productDoc = productMap.get(childProductId);
+            if (!productDoc) return null;
+
+            return buildProductItemFromOrderLine({
+              item: it,
+              productId: childProductId,
+              productDoc,
+              resolveTiming,
+              shiprocket,
+              source: "builder_combo_child",
+              parentCombo: it,
+            });
           })
-        : null;
+          .filter(Boolean);
 
-      return {
-        productId: pid,
-        itemType: combo ? "combo" : "product",
-        isBuilderCombo: Boolean(it?.isBuilderCombo),
+        return [parentComboItem, ...childItems];
+      }
 
-        title: safeStr(it?.title),
-        category: safeStr(it?.category),
-        price: safeNum(it?.price, 0),
-        quantity: Math.max(1, safeNum(it?.quantity, 1)),
+      if (!isObjectIdLike(pid)) {
+        return [];
+      }
 
-        comboSlug: safeStr(it?.comboSlug),
-        comboCategorySlug: safeStr(it?.comboCategorySlug),
-        comboBadge: safeStr(it?.comboBadge),
-        comboSaveLabel: safeStr(it?.comboSaveLabel),
-        comboMediumLabel: safeStr(it?.comboMediumLabel),
-        comboSessionLabel: safeStr(it?.comboSessionLabel),
-        comboItems: Array.isArray(it?.comboItems)
-          ? it.comboItems.map((x: any) => ({
-              title: safeStr(x?.title),
-              subtitle: safeStr(x?.subtitle),
-            }))
-          : [],
+      const productDoc = productMap.get(pid);
 
-        isPhysical,
-        currentAvailability,
-
-        deliverWithinMinutes: !combo
-          ? Math.max(1, safeNum(resolvedTiming?.deliverWithinMinutes, productDoc?.deliverWithinMinutes || 20))
-          : 0,
-        onDemandNote: !combo
-          ? safeStr(resolvedTiming?.onDemandNote || productDoc?.onDemandNote)
-          : "",
-
-        rawDeliverWithinMinutes: !combo
-          ? Math.max(1, safeNum(productDoc?.deliverWithinMinutes, 20))
-          : 0,
-        rawOnDemandNote: !combo ? safeStr(productDoc?.onDemandNote) : "",
-
-        onDemandTimingSource: !combo ? safeStr(resolvedTiming?.source) : "",
-        onDemandMatchedCourseCode: !combo ? safeStr(resolvedTiming?.matchedCourseCode) : "",
-        onDemandMatchedRuleId: !combo ? safeStr(resolvedTiming?.matchedRuleId) : "",
-        onDemandMatchedRuleType: !combo ? safeStr(resolvedTiming?.matchedRuleType) : "",
-
-        shiprocketStatus: isPhysical ? safeStr(shiprocket?.status) : "",
-        shiprocketMessage: isPhysical ? safeStr(shiprocket?.message) : "",
-        shiprocketOrderId: isPhysical ? safeStr(shiprocket?.shiprocketOrderId) : "",
-        shiprocketShipmentId: isPhysical ? safeStr(shiprocket?.shipmentId) : "",
-        shiprocketAwbCode: isPhysical ? safeStr(shiprocket?.awbCode) : "",
-        shiprocketCourierName: isPhysical ? safeStr(shiprocket?.courierName) : "",
-      };
+      return [
+        buildProductItemFromOrderLine({
+          item: it,
+          productId: pid,
+          productDoc,
+          resolveTiming,
+          shiprocket,
+          source: "direct",
+        }),
+      ];
     });
+
+    const hasPhysicalItem =
+      safeBool(o?.meta?.hasPhysicalItem, false) ||
+      enrichedItems.some((it: any) => Boolean(it?.isPhysical));
 
     const walletUsedAmount = roundMoney(o?.walletDebitAmount || 0);
     const payableAmount = roundMoney(o?.totalAmount || 0);
