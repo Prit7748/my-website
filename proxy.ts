@@ -1,16 +1,11 @@
-// D:\my-website\middleware.ts
+// D:\my-website\proxy.ts
 import { NextRequest, NextResponse } from "next/server";
 
 const NEW_SITE_ORIGIN = "https://istudentsportal.com";
 
-const OLD_HOSTS = new Set([
-  "ignoustudentsportal.com",
-  "www.ignoustudentsportal.com",
-]);
-
 const NEW_WWW_HOSTS = new Set(["www.istudentsportal.com"]);
 
-// ✅ Edge-safe base64url decode (no jsonwebtoken in middleware)
+// ✅ Edge-safe base64url decode
 function decodeJwtPayload(token?: string) {
   if (!token) return null;
 
@@ -44,134 +39,12 @@ function cleanHost(hostHeader: string | null) {
     .trim();
 }
 
-function normalizePathname(pathname: string) {
-  const clean = String(pathname || "/").trim();
-  if (!clean || clean === "") return "/";
-  return clean.startsWith("/") ? clean : `/${clean}`;
-}
-
-function getOldDomainTargetPath(pathname: string) {
-  const path = normalizePathname(pathname);
-  const lowerPath = path.toLowerCase();
-
-  // ✅ Homepage old domain -> homepage new domain
-  if (lowerPath === "/") return "/";
-
-  // ✅ Old product URLs usually existed like /product/old-slug
-  // Since old products are mostly expired, we redirect them to relevant category pages.
-  if (lowerPath.startsWith("/product/") || lowerPath.startsWith("/products/")) {
-    if (
-      lowerPath.includes("guess") ||
-      lowerPath.includes("guess-paper") ||
-      lowerPath.includes("important-question")
-    ) {
-      return "/guess-papers";
-    }
-
-    if (
-      lowerPath.includes("assignment") ||
-      lowerPath.includes("assignments") ||
-      lowerPath.includes("solved-assignment")
-    ) {
-      return "/solved-assignments";
-    }
-
-    if (
-      lowerPath.includes("pyq") ||
-      lowerPath.includes("question-paper") ||
-      lowerPath.includes("question-papers") ||
-      lowerPath.includes("previous-year") ||
-      lowerPath.includes("previous-year-paper")
-    ) {
-      return "/question-papers";
-    }
-
-    if (
-      lowerPath.includes("hardcopy") ||
-      lowerPath.includes("handwritten-hardcopy")
-    ) {
-      return "/handwritten-hardcopy";
-    }
-
-    if (
-      lowerPath.includes("handwritten-pdf") ||
-      lowerPath.includes("handwritten-pdfs")
-    ) {
-      return "/handwritten-pdfs";
-    }
-
-    if (
-      lowerPath.includes("ebook") ||
-      lowerPath.includes("ebooks") ||
-      lowerPath.includes("notes")
-    ) {
-      return "/ebooks";
-    }
-
-    if (
-      lowerPath.includes("project") ||
-      lowerPath.includes("projects") ||
-      lowerPath.includes("synopsis")
-    ) {
-      return "/projects";
-    }
-
-    return "/products";
-  }
-
-  // ✅ If old domain already has a useful public category/page path, preserve it.
-  const publicPrefixesToPreserve = [
-    "/solved-assignments",
-    "/question-papers",
-    "/guess-papers",
-    "/handwritten-hardcopy",
-    "/handwritten-pdfs",
-    "/ebooks",
-    "/projects",
-    "/combo",
-    "/courses",
-    "/blog",
-    "/about",
-    "/contact",
-    "/faq",
-    "/privacy",
-    "/terms",
-    "/refund-policy",
-    "/products",
-  ];
-
-  const shouldPreserve = publicPrefixesToPreserve.some(
-    (prefix) => lowerPath === prefix || lowerPath.startsWith(`${prefix}/`)
-  );
-
-  if (shouldPreserve) return path;
-
-  // ✅ Admin/user/private/unknown old paths should not remain active on old domain.
-  return "/";
-}
-
-function permanentRedirectToNewSite(req: NextRequest, targetPath: string) {
-  const url = new URL(NEW_SITE_ORIGIN);
-  url.pathname = normalizePathname(targetPath);
-
-  // ✅ Do not carry old query params for product/category redirects.
-  // This keeps the migration clean and avoids old tracking/filter URLs becoming indexed.
-  url.search = "";
-
-  return NextResponse.redirect(url, 301);
-}
-
 export function proxy(req: NextRequest) {
   const host = cleanHost(req.headers.get("host"));
   const pathname = req.nextUrl.pathname;
 
-  // ✅ 1) OLD DOMAIN -> NEW DOMAIN permanent SEO redirect
-  if (OLD_HOSTS.has(host)) {
-    const targetPath = getOldDomainTargetPath(pathname);
-    return permanentRedirectToNewSite(req, targetPath);
-  }
-
-  // ✅ 2) NEW www domain -> NEW non-www canonical domain
+  // ✅ Keep only NEW www domain -> NEW non-www canonical domain redirect.
+  // ✅ Do NOT redirect old domain ignoustudentsportal.com to istudentsportal.com anymore.
   if (NEW_WWW_HOSTS.has(host)) {
     const url = new URL(NEW_SITE_ORIGIN);
     url.pathname = pathname;
@@ -181,11 +54,11 @@ export function proxy(req: NextRequest) {
 
   const token = req.cookies.get("token")?.value;
 
-  // ✅ Protect only pages (not APIs). APIs already protected in route handlers.
+  // ✅ Protect only pages, not APIs. APIs are protected in route handlers.
   const protectedRoutes = ["/dashboard", "/orders", "/library", "/admin"];
   const isProtected = protectedRoutes.some((p) => pathname.startsWith(p));
 
-  // ✅ If not logged-in → redirect to /login
+  // ✅ If not logged in → redirect to /login
   if (isProtected && !token) {
     const url = req.nextUrl.clone();
     url.pathname = "/login";
@@ -218,9 +91,8 @@ export function proxy(req: NextRequest) {
 export const config = {
   matcher: [
     /*
-      ✅ Run middleware on normal pages and old-domain URLs.
-      ✅ Skip _next assets, favicon, images, and common static files.
-      ✅ API routes are skipped because API auth is handled in route handlers.
+      ✅ Run proxy on normal pages.
+      ✅ Skip API routes, Next assets, favicon, images, and common static files.
     */
     "/((?!api|_next/static|_next/image|favicon.ico|icon.png|logo.png|og.jpg|.*\\.(?:png|jpg|jpeg|gif|webp|svg|ico|css|js|map|txt|xml|mp4|pdf)$).*)",
   ],
