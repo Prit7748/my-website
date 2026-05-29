@@ -97,12 +97,6 @@ function isOnDemandAvailability(v?: string) {
   );
 }
 
-function schemaAvailability(v?: string) {
-  if (isWantToBuyAvailability(v)) return "https://schema.org/OutOfStock";
-  if (isOnDemandAvailability(v)) return "https://schema.org/PreOrder";
-  return "https://schema.org/InStock";
-}
-
 function isPyqCategory(input: any) {
   const c = safeText(input).toLowerCase();
   return (
@@ -202,7 +196,11 @@ function sendWantToBuyRequest(product: ApiProduct) {
       try {
         data = await res.json();
       } catch {}
-      if (!res.ok) throw new Error(data?.error || data?.message || "Request failed");
+
+      if (!res.ok) {
+        throw new Error(data?.error || data?.message || "Request failed");
+      }
+
       return { ok: true, data };
     })
     .catch((e: any) => ({
@@ -270,7 +268,6 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
   const toastTimer = useRef<any>(null);
 
   const productTitle = safeText(product.title) || "IGNOU Product";
-  const categoryLabel = safeText(product.category) || "Product";
   const subjectCode = safeText(product.subjectCode);
   const courseCodeText = extractCourseCodesText(product) || "";
   const sessionText = safeText(product.session);
@@ -295,6 +292,7 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
 
   const hasDiscount =
     !!product.oldPrice && Number(product.oldPrice) > Number(product.price || 0);
+
   const discountPct = hasDiscount
     ? Math.round(
         ((Number(product.oldPrice) - Number(product.price)) / Number(product.oldPrice)) * 100
@@ -346,6 +344,7 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
   async function handleWantToBuy(e: React.MouseEvent) {
     e.preventDefault();
     e.stopPropagation();
+
     if (wantLoading) return;
 
     setWantLoading(true);
@@ -384,6 +383,7 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
         availability: availability || "available",
         canPurchase: true,
       } as any);
+
       showToast("add");
     } else {
       removeFromCart(cartId);
@@ -426,11 +426,18 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
       };
     }
 
+    if (isOnDemand) {
+      return {
+        text: "Pre-order Now",
+        cls: "bg-blue-600 text-white border-blue-600 hover:bg-blue-700",
+      };
+    }
+
     return {
       text: "Add to Cart",
       cls: "bg-blue-600 text-white border-blue-600 hover:bg-blue-700",
     };
-  }, [inCart, isWantToBuy, wantToBuySent, wantLoading]);
+  }, [inCart, isOnDemand, isWantToBuy, wantToBuySent, wantLoading]);
 
   const showPrimaryImage = !!imgPrimary && !imgBroken;
   const showHoverImage =
@@ -441,21 +448,9 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
 
   return (
     <article
-      itemScope
-      itemType="https://schema.org/Product"
+      data-product-card="true"
       className="group relative overflow-hidden rounded-[22px] border border-slate-200 bg-white transition-all duration-300 hover:-translate-y-1 hover:border-slate-300 hover:shadow-[0_18px_45px_rgba(15,23,42,0.10)] active:scale-[0.99]"
     >
-      <meta itemProp="name" content={productTitle} />
-      <meta itemProp="category" content={categoryLabel} />
-      {subjectCode ? <meta itemProp="sku" content={subjectCode} /> : null}
-      {imgPrimary ? <meta itemProp="image" content={imgPrimary} /> : null}
-
-      <div itemProp="offers" itemScope itemType="https://schema.org/Offer">
-        <meta itemProp="priceCurrency" content="INR" />
-        <meta itemProp="price" content={String(Number(product.price || 0))} />
-        <link itemProp="availability" href={schemaAvailability(product.availability)} />
-      </div>
-
       {toast.show ? (
         <div className="absolute left-1/2 top-3 z-20 -translate-x-1/2">
           <div
@@ -485,7 +480,6 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
 
       <Link
         href={href}
-        itemProp="url"
         className="block"
         aria-label={productTitle}
         onClick={handleProductOpen}
@@ -561,7 +555,6 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
 
         <div className="p-3 pb-2 md:p-3.5 md:pb-2.5">
           <h3
-            itemProp="name"
             className="mt-0 line-clamp-2 text-[12px] font-extrabold text-slate-900 transition group-hover:text-blue-700 md:text-sm"
             title={productTitle}
           >
@@ -572,6 +565,7 @@ export default function ProductCard({ product }: { product: ApiProduct }) {
             <div className="text-sm font-extrabold text-blue-700 md:text-base">
               ₹{money(product.price)}
             </div>
+
             {!!product.oldPrice && Number(product.oldPrice) > 0 ? (
               <div className="text-xs font-bold text-gray-400 line-through">
                 ₹{money(Number(product.oldPrice))}

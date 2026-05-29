@@ -20,6 +20,9 @@ export const runtime = "nodejs";
 export const revalidate = 86400;
 export const dynamicParams = true;
 
+const OFFICIAL_SITE_URL = "https://istudentsportal.com";
+const SITE_NAME = "IGNOU Students Portal";
+
 export async function generateStaticParams() {
   return [];
 }
@@ -49,6 +52,9 @@ type ApiProduct = {
   pages?: number;
   importantNote?: string;
 
+  metaTitle?: string;
+  metaDescription?: string;
+
   isDigital?: boolean;
   pdfUrl?: string;
   isActive?: boolean;
@@ -75,51 +81,74 @@ function safeText(input: unknown) {
   return String(input ?? "").trim();
 }
 
+function compactText(input: unknown) {
+  return safeText(input).replace(/\s+/g, " ").trim();
+}
+
 function stripHtml(html: string) {
   return safeText(html)
     .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, " ")
     .replace(/<style[\s\S]*?>[\s\S]*?<\/style>/gi, " ")
     .replace(/<\/?[^>]+(>|$)/g, " ")
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#39;/gi, "'")
     .replace(/\s+/g, " ")
     .trim();
 }
 
-function normalizeBaseUrl(input?: string) {
-  const raw = safeText(input) || "https://istudentsportal.com";
-  const withProtocol = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
-  const normalized = withProtocol.replace(/\/+$/, "");
+function truncateText(input: unknown, maxLength: number) {
+  const text = compactText(input);
+  if (!text) return "";
+  if (text.length <= maxLength) return text;
 
-  try {
-    const url = new URL(normalized);
+  const sliced = text.slice(0, maxLength).trim();
+  const lastSpace = sliced.lastIndexOf(" ");
 
-    if (
-      url.hostname === "www.istudentsportal.com" ||
-      url.hostname === "istudentsportal.com"
-    ) {
-      return "https://istudentsportal.com";
-    }
-
-    if (url.hostname === "localhost" || url.hostname === "127.0.0.1") {
-      return normalized;
-    }
-
-    return normalized;
-  } catch {
-    return "https://istudentsportal.com";
+  if (lastSpace > Math.floor(maxLength * 0.65)) {
+    return sliced.slice(0, lastSpace).trim();
   }
+
+  return sliced;
 }
 
 function siteUrl() {
-  return normalizeBaseUrl(process.env.NEXT_PUBLIC_SITE_URL || process.env.SITE_URL);
+  return OFFICIAL_SITE_URL;
+}
+
+function isLocalHost(hostname: string) {
+  const host = safeText(hostname).toLowerCase();
+  return host === "localhost" || host === "127.0.0.1" || host === "::1";
 }
 
 function absoluteUrl(pathOrUrl?: string) {
   const value = safeText(pathOrUrl);
   if (!value) return "";
-  if (/^https?:\/\//i.test(value)) return value;
 
-  const base = siteUrl();
-  return `${base}${value.startsWith("/") ? value : `/${value}`}`;
+  if (value.startsWith("//")) {
+    return `https:${value}`;
+  }
+
+  if (/^https?:\/\//i.test(value)) {
+    try {
+      const parsed = new URL(value);
+
+      if (
+        isLocalHost(parsed.hostname) ||
+        parsed.hostname === "istudentsportal.com" ||
+        parsed.hostname === "www.istudentsportal.com"
+      ) {
+        return `${OFFICIAL_SITE_URL}${parsed.pathname}${parsed.search}${parsed.hash}`;
+      }
+
+      return value;
+    } catch {
+      return "";
+    }
+  }
+
+  return `${OFFICIAL_SITE_URL}${value.startsWith("/") ? value : `/${value}`}`;
 }
 
 async function resolveParams<T extends Record<string, any>>(params: any): Promise<T> {
@@ -190,6 +219,168 @@ function buildMasterThumbnailFallback(product: ApiProduct) {
   return "";
 }
 
+function buildSeoTitle(product: ApiProduct, categoryLabel: string) {
+  const customMetaTitle = truncateText(product.metaTitle, 95);
+  if (customMetaTitle) return customMetaTitle;
+
+  const title = truncateText(product.title, 80);
+  if (!title) return `${categoryLabel} | ${SITE_NAME}`;
+
+  return truncateText(`${title} | ${categoryLabel}`, 105);
+}
+
+function buildSeoDescription(product: ApiProduct, categoryLabel: string) {
+  const customMetaDescription = truncateText(product.metaDescription, 180);
+  if (customMetaDescription) return customMetaDescription;
+
+  const shortDesc = truncateText(product.shortDesc, 180);
+  if (shortDesc) return shortDesc;
+
+  const htmlDesc = truncateText(stripHtml(product.descriptionHtml || ""), 180);
+  if (htmlDesc) return htmlDesc;
+
+  const sessionText = safeText(product.session);
+  const languageText = safeText(product.language);
+  const subjectCodeText = safeText(product.subjectCode);
+
+  return truncateText(
+    [
+      safeText(product.title),
+      categoryLabel,
+      subjectCodeText ? `Subject Code: ${subjectCodeText}` : "",
+      sessionText ? `Session: ${sessionText}` : "",
+      languageText ? `${languageText} Medium` : "",
+      `available at ${SITE_NAME}.`,
+    ]
+      .filter(Boolean)
+      .join(" "),
+    180
+  );
+}
+
+function buildSchemaDescription(product: ApiProduct, categoryLabel: string) {
+  const description =
+    compactText(product.metaDescription) ||
+    compactText(product.shortDesc) ||
+    stripHtml(product.descriptionHtml || "") ||
+    `${safeText(product.title)} ${categoryLabel} for IGNOU students.`;
+
+  return truncateText(description, 500);
+}
+
+function buildSchemaSku(product: ApiProduct) {
+  const raw =
+    safeText(product.sku) ||
+    safeText(product.subjectCode) ||
+    safeText(product.slug);
+
+  const sku = raw
+    .toUpperCase()
+    .replace(/\s+/g, "-")
+    .replace(/[^A-Z0-9._-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/(^-|-$)/g, "")
+    .slice(0, 70);
+
+  return sku || undefined;
+}
+
+function schemaAvailability(product: ApiProduct) {
+  const rawAvail = normAvail(product.effectiveAvailability || product.availability);
+
+  if (
+    rawAvail === "out_of_stock" ||
+    rawAvail === "outofstock" ||
+    rawAvail === "out-of-stock" ||
+    rawAvail === "want_to_buy" ||
+    rawAvail === "wanttobuy" ||
+    rawAvail === "want-to-buy"
+  ) {
+    return "https://schema.org/OutOfStock";
+  }
+
+  if (
+    rawAvail === "on_demand" ||
+    rawAvail === "ondemand" ||
+    rawAvail === "on-demand" ||
+    rawAvail === "coming_soon" ||
+    rawAvail === "comingsoon" ||
+    rawAvail === "coming-soon"
+  ) {
+    return "https://schema.org/PreOrder";
+  }
+
+  return "https://schema.org/InStock";
+}
+
+function productAdditionalProperties(product: ApiProduct) {
+  const properties = [
+    ["Subject Code", product.subjectCode],
+    ["Subject Title", product.subjectTitleEn || product.subjectTitleHi],
+    ["Course Codes", Array.isArray(product.courseCodes) ? product.courseCodes.join(", ") : ""],
+    ["Session", product.session],
+    ["Medium", product.language],
+    ["Pages", product.pages && product.pages > 0 ? String(product.pages) : ""],
+  ];
+
+  return properties
+    .map(([name, value]) => ({
+      "@type": "PropertyValue",
+      name: safeText(name),
+      value: safeText(value),
+    }))
+    .filter((item) => item.name && item.value);
+}
+
+function cleanJsonLd(value: any): any {
+  if (Array.isArray(value)) {
+    const arr = value.map(cleanJsonLd).filter((item) => {
+      if (item === undefined || item === null) return false;
+      if (typeof item === "string" && !item.trim()) return false;
+      if (Array.isArray(item) && item.length === 0) return false;
+      if (
+        typeof item === "object" &&
+        !Array.isArray(item) &&
+        Object.keys(item).length === 0
+      ) {
+        return false;
+      }
+      return true;
+    });
+
+    return arr.length ? arr : undefined;
+  }
+
+  if (value && typeof value === "object") {
+    const output: Record<string, any> = {};
+
+    Object.entries(value).forEach(([key, item]) => {
+      const cleaned = cleanJsonLd(item);
+
+      if (cleaned === undefined || cleaned === null) return;
+      if (typeof cleaned === "string" && !cleaned.trim()) return;
+      if (Array.isArray(cleaned) && cleaned.length === 0) return;
+      if (
+        typeof cleaned === "object" &&
+        !Array.isArray(cleaned) &&
+        Object.keys(cleaned).length === 0
+      ) {
+        return;
+      }
+
+      output[key] = cleaned;
+    });
+
+    return Object.keys(output).length ? output : undefined;
+  }
+
+  return value;
+}
+
+function jsonLdScript(data: any) {
+  return JSON.stringify(cleanJsonLd(data)).replace(/</g, "\\u003c");
+}
+
 const fetchProduct = cache(async (slug: string) => {
   await dbConnect();
 
@@ -232,6 +423,9 @@ const fetchProduct = cache(async (slug: string) => {
     descriptionHtml: safeText(doc.descriptionHtml),
     pages: Number(doc.pages || 0),
     importantNote: safeText(doc.importantNote),
+
+    metaTitle: safeText(doc.metaTitle),
+    metaDescription: safeText(doc.metaDescription),
 
     isDigital: Boolean(doc.isDigital ?? true),
     pdfUrl: safeText(doc.pdfUrl),
@@ -285,22 +479,19 @@ export async function generateMetadata({ params }: { params: any }): Promise<Met
     canonicalPath,
     requestedCategorySlug || "products"
   );
+  const categoryLabel = categoryLabelFromSlug(canonicalCategorySlug);
 
   const canIndex = Boolean(canonicalCategorySlug && canonicalCategorySlug !== "products");
 
-  const title = safeText(product.title);
-  const description = (
-    safeText(product.shortDesc) ||
-    stripHtml(safeText(product.descriptionHtml)).slice(0, 180) ||
-    "IGNOU study material product."
-  ).slice(0, 180);
+  const title = buildSeoTitle(product, categoryLabel);
+  const description = buildSeoDescription(product, categoryLabel);
 
   const ogImageRaw = buildMasterThumbnailFallback(product);
   const ogImage = absoluteUrl(ogImageRaw);
 
   return {
     metadataBase: new URL(base),
-    title: `${title} | ${categoryLabelFromSlug(canonicalCategorySlug)}`,
+    title,
     description,
     alternates: {
       canonical,
@@ -333,7 +524,7 @@ export async function generateMetadata({ params }: { params: any }): Promise<Met
       url: canonical,
       title,
       description,
-      siteName: "IGNOU Students Portal",
+      siteName: SITE_NAME,
       images: ogImage ? [{ url: ogImage, alt: title }] : [],
     },
     twitter: {
@@ -374,10 +565,8 @@ export default async function Page({ params }: { params: any }) {
   const categoryLabel = categoryLabelFromSlug(expectedCategorySlug);
   const variant = variantFromCategorySlug(expectedCategorySlug);
 
-  const desc =
-    safeText(product.shortDesc) ||
-    stripHtml(product.descriptionHtml || "").slice(0, 220) ||
-    `${categoryLabel} product for IGNOU students.`;
+  const seoTitle = buildSeoTitle(product, categoryLabel);
+  const schemaDescription = buildSchemaDescription(product, categoryLabel);
 
   const fallbackThumb = buildMasterThumbnailFallback(product);
 
@@ -394,38 +583,35 @@ export default async function Page({ params }: { params: any }) {
     )
   );
 
-  const rawAvail = normAvail(product.effectiveAvailability || product.availability);
-  const schemaAvailability =
-    rawAvail === "out_of_stock" ||
-    rawAvail === "outofstock" ||
-    rawAvail === "out-of-stock" ||
-    rawAvail === "want_to_buy" ||
-    rawAvail === "wanttobuy" ||
-    rawAvail === "want-to-buy"
-      ? "https://schema.org/OutOfStock"
-      : "https://schema.org/InStock";
+  const additionalProperty = productAdditionalProperties(product);
 
   const productJsonLd: any = {
     "@context": "https://schema.org",
     "@type": "Product",
     name: safeText(product.title),
     image: images.length ? images : undefined,
-    description: desc,
-    sku: safeText(product.sku) || safeText(product.slug),
-    mpn: safeText(product.slug),
+    description: schemaDescription,
+    sku: buildSchemaSku(product),
     brand: {
       "@type": "Brand",
-      name: "IGNOU Students Portal",
+      name: SITE_NAME,
     },
     category: categoryLabel,
     url: productUrl,
+    mainEntityOfPage: productUrl,
+    additionalProperty: additionalProperty.length ? additionalProperty : undefined,
     offers: {
       "@type": "Offer",
       url: productUrl,
       priceCurrency: "INR",
       price: Number(product.price || 0),
-      availability: schemaAvailability,
+      availability: schemaAvailability(product),
       itemCondition: "https://schema.org/NewCondition",
+      seller: {
+        "@type": "Organization",
+        name: SITE_NAME,
+        url: base,
+      },
     },
   };
 
@@ -457,12 +643,16 @@ export default async function Page({ params }: { params: any }) {
   const webPageJsonLd = {
     "@context": "https://schema.org",
     "@type": "WebPage",
-    name: safeText(product.title),
+    name: seoTitle,
     url: productUrl,
+    description: buildSeoDescription(product, categoryLabel),
     isPartOf: {
       "@type": "WebSite",
-      name: "IGNOU Students Portal",
+      name: SITE_NAME,
       url: base,
+    },
+    mainEntity: {
+      "@id": productUrl,
     },
   };
 
@@ -471,17 +661,17 @@ export default async function Page({ params }: { params: any }) {
       <Script
         id="isp-jsonld-product"
         type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(productJsonLd) }}
+        dangerouslySetInnerHTML={{ __html: jsonLdScript(productJsonLd) }}
       />
       <Script
         id="isp-jsonld-breadcrumb"
         type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(breadcrumbJsonLd) }}
+        dangerouslySetInnerHTML={{ __html: jsonLdScript(breadcrumbJsonLd) }}
       />
       <Script
         id="isp-jsonld-webpage"
         type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(webPageJsonLd) }}
+        dangerouslySetInnerHTML={{ __html: jsonLdScript(webPageJsonLd) }}
       />
 
       <ProductDetailsClient
