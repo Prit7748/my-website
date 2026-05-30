@@ -44,7 +44,7 @@ function getUserId(user: any) {
 }
 
 const DEFAULT_IMPORTANT_NOTE =
-  "Please verify the question paper shown in the preview/thumbnail before purchasing. Purchase only if it matches your subject code, medium, session, and questions.";
+  "Please verify the subject code, course title, medium, session, preview/thumbnail and product details before purchasing. Buy only if all details match your requirement.";
 
 function allowedBulkCategories() {
   return CATEGORY_CONFIG.map((x) => x.label).filter(
@@ -57,31 +57,35 @@ function buildCategoryDefaults(): Record<string, TemplateItem> {
     "Solved Assignments": {
       category: "Solved Assignments",
       titleTemplate: "IGNOU %B Solved Assignment %C (%D Medium)",
-      importantNoteTemplate: DEFAULT_IMPORTANT_NOTE,
+      importantNoteTemplate:
+        "Please verify subject code %B, subject title %F, course code %E, course title %G, session %C and %D medium before purchasing this solved assignment PDF.",
       shortDescTemplate:
-        "Download IGNOU %B (%F) solved assignment for session %C in %D medium.",
+        "Download IGNOU %B solved assignment for %C session in %D medium. Subject: %F. Course: %G.",
       longDescTemplate:
-        "This IGNOU %B (%F) solved assignment is prepared for session %C in %D medium. Course title is auto-matched from master data: %G.",
+        "IGNOU %B Solved Assignment %C (%D Medium) is prepared for students who need a clear, well-organized and exam-oriented assignment reference for their IGNOU course. This product is mapped with subject code %B and subject title %F. The course code linked with this material is %E and the course title is %G.\n\nThis solved assignment is useful for understanding the expected answer style, important points, answer structure and presentation method for the %C session. Students can use it as a study support document while preparing their own assignment answers in neat and proper format.\n\nKey details: Subject Code: %B. Subject Title: %F. Course Code: %E. Course Title: %G. Session: %C. Medium: %D. The material is arranged to help IGNOU learners save time, revise concepts and prepare assignment answers with better clarity.\n\nBefore purchasing, please check the preview/thumbnail and confirm that the subject code, session and medium match your requirement. This product is provided by IGNOU Students Portal for educational support and student guidance.",
       slugTemplate: "",
       metaTitleTemplate:
         "IGNOU %B Solved Assignment %C (%D Medium) PDF Download",
       metaDescriptionTemplate:
-        "Download IGNOU %B (%F) solved assignment for session %C in %D medium. Course title: %G. Instant access and verified subject mapping.",
+        "Download IGNOU %B solved assignment for %C session in %D medium. Subject %F, course %G, verified mapping and instant student support.",
       publishNow: false,
     },
 
     "Question Papers (PYQ)": {
       category: "Question Papers (PYQ)",
-      titleTemplate: "IGNOU %B Question Paper %C (%D Medium)",
-      importantNoteTemplate: DEFAULT_IMPORTANT_NOTE,
+      titleTemplate:
+        "IGNOU %B Solved Previous Year Paper %C (%D Medium)",
+      importantNoteTemplate:
+        "Please verify the preview/thumbnail, subject code %B, subject title %F, session %C and %D medium before purchasing this previous year paper.",
       shortDescTemplate:
-        "Download IGNOU %B (%F) question paper for session %C in %D medium.",
+        "Download IGNOU %B solved previous year question paper for %C in %D medium. Subject: %F. Course: %G.",
       longDescTemplate:
-        "This IGNOU %B (%F) question paper is mapped for session %C in %D medium. Course title is auto-matched from master data: %G.",
+        "IGNOU %B Solved Previous Year Paper %C (%D Medium) is useful for students who want to understand exam pattern, repeated question style and important areas for revision. This PYQ product is mapped with subject code %B and subject title %F. The linked course code is %E and course title is %G.\n\nPrevious year papers help learners identify the type of questions asked in term-end examinations, the depth of answers expected and the way topics are distributed across the paper. This material can be used for practice, revision and focused exam preparation.\n\nKey details: Subject Code: %B. Subject Title: %F. Course Code: %E. Course Title: %G. Session: %C. Medium: %D. Students can use this paper to improve answer planning, time management and confidence before the examination.\n\nBefore purchasing, please verify the preview/thumbnail and confirm that the subject code, session, medium and paper details match your requirement.",
       slugTemplate: "",
-      metaTitleTemplate: "IGNOU %B Question Paper %C (%D Medium) PDF Download",
+      metaTitleTemplate:
+        "IGNOU %B Solved Previous Year Paper %C (%D Medium)",
       metaDescriptionTemplate:
-        "Download IGNOU %B (%F) question paper for session %C in %D medium. Course title: %G. Instant access and verified subject mapping.",
+        "Download IGNOU %B solved previous year paper for %C in %D medium. Subject %F, course %G, exam pattern and PYQ revision support.",
       publishNow: true,
     },
 
@@ -89,47 +93,50 @@ function buildCategoryDefaults(): Record<string, TemplateItem> {
       category: "Handwritten PDFs",
       titleTemplate: "IGNOU %B Handwritten PDF %C (%D Medium)",
       importantNoteTemplate:
-        "Please verify subject code, medium, session, and course details before purchasing this handwritten PDF.",
+        "Please verify subject code %B, subject title %F, course code %E, session %C, medium %D and preview/thumbnail before purchasing this handwritten PDF.",
       shortDescTemplate:
-        "Download IGNOU %B (%F) handwritten PDF for session %C in %D medium.",
+        "Download IGNOU %B handwritten PDF for %C session in %D medium. Subject: %F. Course: %G.",
       longDescTemplate:
-        "This IGNOU %B (%F) handwritten PDF is prepared for session %C in %D medium. Course title is auto-matched from master data: %G.",
+        "IGNOU %B Handwritten PDF %C (%D Medium) is prepared for students who prefer handwritten-style study material for assignment preparation, revision and exam support. This product is mapped with subject code %B and subject title %F. The course code linked with this PDF is %E and the course title is %G.\n\nHandwritten PDFs are useful for learners who want material in a natural notebook-style format. The content can help students understand answer presentation, important headings, points and flow of writing for their IGNOU subject.\n\nKey details: Subject Code: %B. Subject Title: %F. Course Code: %E. Course Title: %G. Session: %C. Medium: %D. This material is designed to support study, revision and assignment writing in an easy-to-follow format.\n\nBefore purchasing, please check the preview/thumbnail carefully and confirm that the subject code, session and medium match your requirement.",
       slugTemplate: "",
-      metaTitleTemplate: "IGNOU %B Handwritten PDF %C (%D Medium) Download",
+      metaTitleTemplate:
+        "IGNOU %B Handwritten PDF %C (%D Medium) Download",
       metaDescriptionTemplate:
-        "Download IGNOU %B (%F) handwritten PDF for session %C in %D medium. Course title: %G. Instant access and verified subject mapping.",
+        "Download IGNOU %B handwritten PDF for %C session in %D medium. Subject %F, course %G, notebook-style study material.",
       publishNow: false,
     },
 
     Ebooks: {
       category: "Ebooks",
-      titleTemplate: "IGNOU %B Ebook %C (%D Medium)",
+      titleTemplate: "IGNOU %B Ebook Notes %C (%D Medium)",
       importantNoteTemplate:
-        "Please verify subject code, medium, session, and course details before purchasing this ebook.",
+        "Please verify subject code %B, subject title %F, course code %E, session %C and %D medium before purchasing this ebook/notes material.",
       shortDescTemplate:
-        "Download IGNOU %B (%F) ebook for session %C in %D medium.",
+        "Download IGNOU %B ebook notes for %C session in %D medium. Subject: %F. Course: %G.",
       longDescTemplate:
-        "This IGNOU %B (%F) ebook is prepared for session %C in %D medium. Course title is auto-matched from master data: %G.",
+        "IGNOU %B Ebook Notes %C (%D Medium) is created for students who need organized digital study material for quick reading, revision and concept clarity. This product is mapped with subject code %B and subject title %F. The course code linked with this ebook is %E and the course title is %G.\n\nEbook notes can help learners revise important topics, understand chapter-wise ideas and prepare short notes before exams or assignments. The material is suitable for students who want subject-related support in a convenient digital format.\n\nKey details: Subject Code: %B. Subject Title: %F. Course Code: %E. Course Title: %G. Session: %C. Medium: %D. This ebook/notes material is intended to support learning, revision and better organization of study content.\n\nBefore purchasing, please verify the preview/thumbnail and confirm that the subject code, course, session and medium are correct.",
       slugTemplate: "",
-      metaTitleTemplate: "IGNOU %B Ebook %C (%D Medium) Download",
+      metaTitleTemplate:
+        "IGNOU %B Ebook Notes %C (%D Medium) Download",
       metaDescriptionTemplate:
-        "Download IGNOU %B (%F) ebook for session %C in %D medium. Course title: %G. Instant access and verified subject mapping.",
+        "Download IGNOU %B ebook notes for %C session in %D medium. Subject %F, course %G, digital study and revision material.",
       publishNow: false,
     },
 
     projects: {
       category: "projects",
-      titleTemplate: "IGNOU %B Project %C (%D Medium)",
+      titleTemplate: "IGNOU %B Project Synopsis %C (%D Medium)",
       importantNoteTemplate:
-        "Please verify subject code, medium, session, and course details before purchasing this project file.",
+        "Please verify subject code %B, subject title %F, course code %E, session %C, medium %D and project details before purchasing this project/synopsis material.",
       shortDescTemplate:
-        "Download IGNOU %B (%F) project material for session %C in %D medium.",
+        "Download IGNOU %B project/synopsis material for %C session in %D medium. Subject: %F. Course: %G.",
       longDescTemplate:
-        "This IGNOU %B (%F) project material is prepared for session %C in %D medium. Course title is auto-matched from master data: %G.",
+        "IGNOU %B Project Synopsis %C (%D Medium) is prepared for students who need project-related study support, topic understanding and structured reference material. This product is mapped with subject code %B and subject title %F. The course code linked with this material is %E and the course title is %G.\n\nProject and synopsis material can help learners understand the expected structure, presentation style, academic flow and important sections of project work. It is useful as a reference while preparing your own project document according to IGNOU guidelines.\n\nKey details: Subject Code: %B. Subject Title: %F. Course Code: %E. Course Title: %G. Session: %C. Medium: %D. This material is designed to support project planning, topic clarity and document preparation.\n\nBefore purchasing, please verify the preview/thumbnail and confirm that the subject code, session, medium and project details match your requirement.",
       slugTemplate: "",
-      metaTitleTemplate: "IGNOU %B Project %C (%D Medium) Download",
+      metaTitleTemplate:
+        "IGNOU %B Project Synopsis %C (%D Medium) Download",
       metaDescriptionTemplate:
-        "Download IGNOU %B (%F) project material for session %C in %D medium. Course title: %G. Instant access and verified subject mapping.",
+        "Download IGNOU %B project/synopsis material for %C session in %D medium. Subject %F, course %G, project reference support.",
       publishNow: false,
     },
 
@@ -137,15 +144,16 @@ function buildCategoryDefaults(): Record<string, TemplateItem> {
       category: "Guess Papers",
       titleTemplate: "IGNOU %B Guess Paper %C (%D Medium)",
       importantNoteTemplate:
-        "Please verify subject code, medium, session, and course details before purchasing this guess paper.",
+        "Please verify subject code %B, subject title %F, course code %E, session %C and %D medium before purchasing this guess paper.",
       shortDescTemplate:
-        "Download IGNOU %B (%F) guess paper for session %C in %D medium.",
+        "Download IGNOU %B guess paper for %C session in %D medium. Subject: %F. Course: %G.",
       longDescTemplate:
-        "This IGNOU %B (%F) guess paper is prepared for session %C in %D medium. Course title is auto-matched from master data: %G.",
+        "IGNOU %B Guess Paper %C (%D Medium) is prepared for students who want focused exam practice and important question-based revision support. This product is mapped with subject code %B and subject title %F. The course code linked with this material is %E and the course title is %G.\n\nGuess papers can help learners revise important topics, practice possible question patterns and improve exam preparation strategy. This material is useful for quick revision, self-practice and understanding the type of answers that may be expected in the examination.\n\nKey details: Subject Code: %B. Subject Title: %F. Course Code: %E. Course Title: %G. Session: %C. Medium: %D. Students can use this guess paper as a focused preparation support document before the exam.\n\nBefore purchasing, please verify the preview/thumbnail and confirm that the subject code, session and medium match your requirement.",
       slugTemplate: "",
-      metaTitleTemplate: "IGNOU %B Guess Paper %C (%D Medium) Download",
+      metaTitleTemplate:
+        "IGNOU %B Guess Paper %C (%D Medium) Download",
       metaDescriptionTemplate:
-        "Download IGNOU %B (%F) guess paper for session %C in %D medium. Course title: %G. Instant access and verified subject mapping.",
+        "Download IGNOU %B guess paper for %C session in %D medium. Subject %F, course %G, focused exam preparation support.",
       publishNow: false,
     },
   };
@@ -215,6 +223,7 @@ function listResponseFromMap(
 
 export async function GET(req: NextRequest) {
   const user = await getAuthUser();
+
   if (!user) {
     return NextResponse.json(
       { ok: false, error: "Not authenticated" },
@@ -238,8 +247,10 @@ export async function GET(req: NextRequest) {
   const itemsMap = mergeWithDefaults(doc?.items);
 
   const category = safeStr(req.nextUrl.searchParams.get("category"));
+
   if (category) {
     const allowed = new Set(allowedBulkCategories());
+
     if (!allowed.has(category)) {
       return NextResponse.json(
         { ok: false, error: "Invalid category requested" },
@@ -274,6 +285,7 @@ export async function GET(req: NextRequest) {
 
 export async function PUT(req: NextRequest) {
   const user = await getAuthUser();
+
   if (!user) {
     return NextResponse.json(
       { ok: false, error: "Not authenticated" },
@@ -289,6 +301,7 @@ export async function PUT(req: NextRequest) {
   }
 
   let body: any = {};
+
   try {
     body = await req.json();
   } catch {
@@ -388,6 +401,7 @@ export async function PUT(req: NextRequest) {
   ).lean();
 
   const finalMap = mergeWithDefaults(updatedDoc?.items);
+
   const responsePayload = listResponseFromMap(
     finalMap,
     safeStr(updatedDoc?.updatedBy),

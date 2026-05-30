@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import SolvedAssignmentsClient from "./SolvedAssignmentsClient";
+import SeoPaginationLinks from "@/components/seo/SeoPaginationLinks";
 
 import dbConnect from "@/lib/db";
 import Product from "@/models/Product";
@@ -679,16 +680,35 @@ export default async function Page({ searchParams }: PageProps) {
   });
 
   return (
-    <SolvedAssignmentsClient
-      initialCategoryParam={initialCategoryParam}
-      initialCourseParam={initialCourseParam}
-      initialSessionParam={initialSessionParam}
-      initialLanguageParam={initialLanguageParam}
-      initialSearchParam={initialSearchParam}
-      initialPageParam={String(pageNum)}
-      initialProducts={products}
-      initialMeta={meta}
-      initialQueryKey={initialQueryKey}
-    />
+    <>
+      <SolvedAssignmentsClient
+        initialCategoryParam={initialCategoryParam}
+        initialCourseParam={initialCourseParam}
+        initialSessionParam={initialSessionParam}
+        initialLanguageParam={initialLanguageParam}
+        initialSearchParam={initialSearchParam}
+        initialPageParam={String(pageNum)}
+        initialProducts={products}
+        initialMeta={meta}
+        initialQueryKey={initialQueryKey}
+      />
+
+      <section className="bg-slate-50 px-4 pb-10">
+        <div className="mx-auto max-w-7xl">
+          <SeoPaginationLinks
+            basePath="/solved-assignments"
+            currentPage={meta.page}
+            totalPages={meta.totalPages}
+            searchParams={{
+              course: initialCourseParam,
+              session: initialSessionParam,
+              language: initialLanguageParam,
+              search: initialSearchParam,
+            }}
+            label="Solved assignments pagination"
+          />
+        </div>
+      </section>
+    </>
   );
 }

@@ -317,7 +317,10 @@ function productAdditionalProperties(product: ApiProduct) {
   const properties = [
     ["Subject Code", product.subjectCode],
     ["Subject Title", product.subjectTitleEn || product.subjectTitleHi],
-    ["Course Codes", Array.isArray(product.courseCodes) ? product.courseCodes.join(", ") : ""],
+    [
+      "Course Codes",
+      Array.isArray(product.courseCodes) ? product.courseCodes.join(", ") : "",
+    ],
     ["Session", product.session],
     ["Medium", product.language],
     ["Pages", product.pages && product.pages > 0 ? String(product.pages) : ""],
@@ -330,6 +333,54 @@ function productAdditionalProperties(product: ApiProduct) {
       value: safeText(value),
     }))
     .filter((item) => item.name && item.value);
+}
+
+function isHardcopyCategory(categorySlug: string) {
+  return categorySlug === "handwritten-hardcopy";
+}
+
+function buildMerchantReturnPolicy() {
+  return {
+    "@type": "MerchantReturnPolicy",
+    url: `${OFFICIAL_SITE_URL}/refund-policy`,
+    applicableCountry: "IN",
+  };
+}
+
+function buildHardcopyShippingDetails() {
+  return {
+    "@type": "OfferShippingDetails",
+    shippingDestination: {
+      "@type": "DefinedRegion",
+      addressCountry: "IN",
+    },
+    shippingRate: {
+      "@type": "MonetaryAmount",
+      value: "0",
+      currency: "INR",
+    },
+    deliveryTime: {
+      "@type": "ShippingDeliveryTime",
+      handlingTime: {
+        "@type": "QuantitativeValue",
+        minValue: 1,
+        maxValue: 3,
+        unitCode: "DAY",
+      },
+      transitTime: {
+        "@type": "QuantitativeValue",
+        minValue: 3,
+        maxValue: 7,
+        unitCode: "DAY",
+      },
+    },
+  };
+}
+
+function buildPriceValidUntil() {
+  const date = new Date();
+  date.setFullYear(date.getFullYear() + 1);
+  return date.toISOString().slice(0, 10);
 }
 
 function cleanJsonLd(value: any): any {
@@ -584,6 +635,8 @@ export default async function Page({ params }: { params: any }) {
   );
 
   const additionalProperty = productAdditionalProperties(product);
+  const isHardcopy = isHardcopyCategory(expectedCategorySlug);
+  const price = Number(product.price || 0);
 
   const productJsonLd: any = {
     "@context": "https://schema.org",
@@ -604,9 +657,12 @@ export default async function Page({ params }: { params: any }) {
       "@type": "Offer",
       url: productUrl,
       priceCurrency: "INR",
-      price: Number(product.price || 0),
+      price,
+      priceValidUntil: buildPriceValidUntil(),
       availability: schemaAvailability(product),
       itemCondition: "https://schema.org/NewCondition",
+      hasMerchantReturnPolicy: buildMerchantReturnPolicy(),
+      shippingDetails: isHardcopy ? buildHardcopyShippingDetails() : undefined,
       seller: {
         "@type": "Organization",
         name: SITE_NAME,

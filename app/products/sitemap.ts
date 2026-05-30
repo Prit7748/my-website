@@ -1,7 +1,7 @@
 import type { MetadataRoute } from "next";
 import dbConnect from "@/lib/db";
 import Product from "@/models/Product";
-import { productHref } from "@/lib/productHref";
+import { productHref, slugifyCategory } from "@/lib/productHref";
 
 export const runtime = "nodejs";
 export const revalidate = 21600;
@@ -17,38 +17,43 @@ const INDEXABLE_PRODUCT_PREFIXES = new Set([
   "guess-papers",
   "ebooks",
   "projects",
-  "combo",
 ]);
+
+const INDEXABLE_CATEGORY_VALUES = [
+  "Solved Assignments",
+  "solved-assignments",
+
+  "Handwritten PDFs",
+  "handwritten-pdfs",
+
+  "Handwritten Hardcopy (Delivery)",
+  "Handwritten Hardcopy",
+  "handwritten-hardcopy",
+
+  "Question Papers (PYQ)",
+  "Question Papers",
+  "question-papers",
+
+  "Guess Papers",
+  "guess-papers",
+
+  "eBooks/Notes",
+  "Ebooks/Notes",
+  "eBooks",
+  "Ebooks",
+  "ebooks",
+
+  "Projects & Synopsis",
+  "Projects",
+  "projects",
+];
 
 function safeStr(value: unknown) {
   return String(value ?? "").trim();
 }
 
-function absUrl(path: string) {
-  const clean = safeStr(path);
-
-  if (!clean) return BASE_URL;
-
-  if (/^https?:\/\//i.test(clean)) {
-    try {
-      const url = new URL(clean);
-
-      if (
-        url.hostname === "localhost" ||
-        url.hostname === "127.0.0.1" ||
-        url.hostname === "www.istudentsportal.com" ||
-        url.hostname === "istudentsportal.com"
-      ) {
-        return `${BASE_URL}${url.pathname}${url.search}${url.hash}`;
-      }
-
-      return clean;
-    } catch {
-      return BASE_URL;
-    }
-  }
-
-  return `${BASE_URL}${clean.startsWith("/") ? clean : `/${clean}`}`;
+function resolveMaybe<T>(value: T | Promise<T>): Promise<T> {
+  return Promise.resolve(value);
 }
 
 function toDate(value: unknown) {
@@ -70,31 +75,65 @@ function firstPathSegment(path: string) {
   return cleanPath(path).split("/").filter(Boolean)[0] || "";
 }
 
+function absUrl(path: string) {
+  const clean = cleanPath(path);
+
+  if (!clean || clean === "/") return `${BASE_URL}/`;
+
+  return `${BASE_URL}${clean}`;
+}
+
+function isValidProductSlug(slug: string) {
+  const clean = safeStr(slug);
+
+  if (!clean) return false;
+  if (clean.toLowerCase() === "undefined") return false;
+  if (clean.toLowerCase() === "null") return false;
+  if (clean.includes("?") || clean.includes("#")) return false;
+  if (clean.startsWith("/") || clean.endsWith("/")) return false;
+
+  return true;
+}
+
 function isIndexableProductPath(path: string) {
   const clean = cleanPath(path);
   if (!clean) return false;
 
-  const prefix = firstPathSegment(clean);
-  if (!INDEXABLE_PRODUCT_PREFIXES.has(prefix)) return false;
-
   const parts = clean.split("/").filter(Boolean);
-  return parts.length === 2 && Boolean(parts[1]);
+  if (parts.length !== 2) return false;
+
+  const prefix = parts[0];
+  const slug = parts[1];
+
+  if (!INDEXABLE_PRODUCT_PREFIXES.has(prefix)) return false;
+  if (!isValidProductSlug(slug)) return false;
+
+  return true;
 }
 
 function getProductCanonicalPath(product: any) {
   const slug = safeStr(product?.slug);
   const category = safeStr(product?.category);
 
-  if (!slug || !category) return "";
+  if (!isValidProductSlug(slug)) return "";
+  if (!category) return "";
+
+  const categorySlug = slugifyCategory(category);
+
+  if (!INDEXABLE_PRODUCT_PREFIXES.has(categorySlug)) return "";
 
   const href = cleanPath(productHref({ slug, category }));
 
   if (!href) return "";
 
-  // Legacy/fallback route must never enter product sitemap.
   if (href === "/products" || href.startsWith("/products/")) return "";
+  if (href === "/combo" || href.startsWith("/combo/")) return "";
 
   if (!isIndexableProductPath(href)) return "";
+
+  const hrefPrefix = firstPathSegment(href);
+
+  if (hrefPrefix !== categorySlug) return "";
 
   return href;
 }
@@ -109,7 +148,6 @@ function productPriority(path: string) {
   if (prefix === "handwritten-pdfs") return 0.74;
   if (prefix === "ebooks") return 0.72;
   if (prefix === "projects") return 0.72;
-  if (prefix === "combo") return 0.7;
 
   return 0.7;
 }
@@ -118,7 +156,7 @@ function productFilter() {
   return {
     isActive: true,
     slug: { $exists: true, $ne: "" },
-    category: { $exists: true, $ne: "" },
+    category: { $in: INDEXABLE_CATEGORY_VALUES },
     $or: [{ deletedAt: null }, { deletedAt: { $exists: false } }],
   };
 }
@@ -164,9 +202,9 @@ export async function generateSitemaps() {
 }
 
 export default async function sitemap(props: {
-  id: Promise<string>;
+  id: Promise<string | number> | string | number;
 }): Promise<MetadataRoute.Sitemap> {
-  const rawId = await props.id;
+  const rawId = await resolveMaybe(props.id);
   const sitemapIndex = Math.max(0, Number.parseInt(String(rawId), 10) || 0);
 
   await dbConnect();

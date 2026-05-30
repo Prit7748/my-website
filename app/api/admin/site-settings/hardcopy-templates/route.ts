@@ -37,15 +37,21 @@ function getUserId(user: any) {
 
 const DEFAULTS = {
   titleTemplate: "IGNOU %1 Handwritten Hardcopy Assignment %5 (%6 Medium)",
+
   shortDescTemplate:
-    "Buy IGNOU %1 handwritten hardcopy assignment for session %5 in %6 medium. This is a physical handwritten delivery product.",
+    "Order IGNOU %1 handwritten hardcopy assignment for %5 session in %6 medium. Subject: %2. Course: %3 - %4.",
+
   longDescTemplate:
-    "This product is the handwritten hardcopy delivery version of the solved assignment for subject %1 (%2). It is mapped to course %3 (%4), prepared for session %5, and available in %6 medium. This is a physical handwritten product, not a downloadable PDF.",
+    "IGNOU %1 Handwritten Hardcopy Assignment %5 (%6 Medium) is a physical delivery product prepared for students who want handwritten assignment material delivered to their address. This hardcopy product is mapped with subject code %1 and subject title %2. The linked course code is %3 and the course title is %4.\n\nThis product is useful for IGNOU learners who prefer ready handwritten assignment material in physical form. It helps students save time, understand answer presentation style and keep a neat handwritten reference for the %5 session.\n\nKey details: Subject Code: %1. Subject Title: %2. Course Code: %3. Course Title: %4. Session: %5. Medium: %6. This is a physical handwritten hardcopy delivery product, not a downloadable PDF.\n\nBefore placing the order, please verify the subject code, course code, session, medium and preview/thumbnail carefully. Delivery time may vary according to location, order volume and courier availability.",
+
   importantNoteTemplate:
-    "This product is a handwritten physical hardcopy delivery version of the related solved assignment. PDF is not included with this product. Please verify subject code, medium, session, and course before placing the order.",
-  metaTitleTemplate: "IGNOU %1 Handwritten Hardcopy Assignment %5 (%6 Medium)",
+    "This is a handwritten physical hardcopy delivery product. PDF/download is not included with this item. Please verify subject code %1, subject title %2, course code %3, course title %4, session %5 and %6 medium before placing the order.",
+
+  metaTitleTemplate:
+    "IGNOU %1 Handwritten Hardcopy Assignment %5 (%6 Medium)",
+
   metaDescriptionTemplate:
-    "Order IGNOU %1 handwritten hardcopy assignment for session %5 in %6 medium. Physical delivery product based on the solved assignment source.",
+    "Order IGNOU %1 handwritten hardcopy assignment for %5 session in %6 medium. Subject %2, course %3 - %4, physical delivery product.",
 
   deliveryChargeEnabled: true,
   deliveryChargeThresholdAmount: 1000,
@@ -56,6 +62,7 @@ const DEFAULTS = {
 
 export async function GET() {
   const user = await getAuthUser();
+
   if (!user) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
@@ -84,6 +91,7 @@ export async function GET() {
     ok: true,
     item: {
       key: HARDCOPY_TEMPLATE_CONFIG_KEY,
+
       titleTemplate: safeStr(doc?.titleTemplate || DEFAULTS.titleTemplate),
       shortDescTemplate: safeStr(doc?.shortDescTemplate || DEFAULTS.shortDescTemplate),
       longDescTemplate: safeStr(doc?.longDescTemplate || DEFAULTS.longDescTemplate),
@@ -122,6 +130,7 @@ export async function GET() {
 
 export async function PUT(req: NextRequest) {
   const user = await getAuthUser();
+
   if (!user) {
     return NextResponse.json({ error: "Not authenticated" }, { status: 401 });
   }
@@ -134,6 +143,7 @@ export async function PUT(req: NextRequest) {
   }
 
   let body: any = {};
+
   try {
     body = await req.json();
   } catch {
@@ -207,6 +217,7 @@ export async function PUT(req: NextRequest) {
     message: "Hardcopy templates and delivery charge settings saved successfully.",
     item: {
       key: HARDCOPY_TEMPLATE_CONFIG_KEY,
+
       titleTemplate: safeStr(doc?.titleTemplate),
       shortDescTemplate: safeStr(doc?.shortDescTemplate),
       longDescTemplate: safeStr(doc?.longDescTemplate),
