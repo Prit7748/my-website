@@ -17,7 +17,7 @@ import {
 } from "@/lib/thumbUrls";
 
 export const runtime = "nodejs";
-export const revalidate = "force-dynamic";
+export const revalidate = 300;
 export const dynamicParams = true;
 
 const OFFICIAL_SITE_URL = "https://istudentsportal.com";
