@@ -107,6 +107,161 @@ function sortLanguages(values: string[]) {
 }
 
 /* =========================
+   Flexible session helpers
+   ========================= */
+
+const SESSION_MONTHS = [
+  { full: "January", short: "Jan", aliases: ["january", "jan"] },
+  { full: "February", short: "Feb", aliases: ["february", "feb"] },
+  { full: "March", short: "Mar", aliases: ["march", "mar"] },
+  { full: "April", short: "Apr", aliases: ["april", "apr"] },
+  { full: "May", short: "May", aliases: ["may"] },
+  { full: "June", short: "Jun", aliases: ["june", "jun"] },
+  { full: "July", short: "Jul", aliases: ["july", "jul"] },
+  { full: "August", short: "Aug", aliases: ["august", "aug"] },
+  { full: "September", short: "Sep", aliases: ["september", "sept", "sep"] },
+  { full: "October", short: "Oct", aliases: ["october", "oct"] },
+  { full: "November", short: "Nov", aliases: ["november", "nov"] },
+  { full: "December", short: "Dec", aliases: ["december", "dec"] },
+];
+
+function normalizeSessionForDetect(value: any) {
+  return safeStr(value).toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+function detectSessionMonth(value: any) {
+  const raw = normalizeSessionForDetect(value);
+  const compact = raw.replace(/[^a-z0-9]/g, "");
+
+  for (const month of SESSION_MONTHS) {
+    for (const alias of month.aliases) {
+      const aliasLower = alias.toLowerCase();
+
+      if (compact.startsWith(aliasLower)) {
+        return month;
+      }
+
+      const rx = new RegExp(`(^|[^a-z])${escapeRegex(aliasLower)}([^a-z]|$|\\d)`, "i");
+      if (rx.test(raw)) {
+        return month;
+      }
+    }
+  }
+
+  return null;
+}
+
+function detectSessionYear(value: any) {
+  const raw = normalizeSessionForDetect(value);
+  const compact = raw.replace(/[^a-z0-9]/g, "");
+
+  const year4 = raw.match(/\b(20\d{2})\b/) || compact.match(/(20\d{2})/);
+  if (year4?.[1]) return year4[1];
+
+  const year2 = raw.match(/(^|[^0-9])(\d{2})([^0-9]|$)/) || compact.match(/(\d{2})$/);
+  const yy = year2?.[2] || year2?.[1];
+
+  if (yy && /^\d{2}$/.test(yy)) {
+    return `20${yy}`;
+  }
+
+  return "";
+}
+
+function buildMonthYearSessionRegex(value: string) {
+  const month = detectSessionMonth(value);
+  const year = detectSessionYear(value);
+
+  if (!month || !year) return null;
+
+  const aliasPattern = month.aliases.map(escapeRegex).join("|");
+  const shortYear = year.slice(-2);
+
+  return new RegExp(
+    `^\\s*(?:${aliasPattern})\\s*[,._/\\-–—]*\\s*(?:${escapeRegex(year)}|${escapeRegex(
+      shortYear
+    )})\\s*$`,
+    "i"
+  );
+}
+
+function buildLooseExactSessionRegex(value: string) {
+  const tokens = safeStr(value)
+    .split(/[\s,._/\-–—]+/g)
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  if (!tokens.length) return null;
+
+  const pattern = tokens.map(escapeRegex).join("[\\s,._/\\-–—]*");
+
+  return new RegExp(`^\\s*${pattern}\\s*$`, "i");
+}
+
+function buildMonthYearSessionCandidates(value: string) {
+  const month = detectSessionMonth(value);
+  const year = detectSessionYear(value);
+
+  if (!month || !year) return [];
+
+  const shortYear = year.slice(-2);
+
+  return uniqueStrings([
+    `${month.full} ${year}`,
+    `${month.full}, ${year}`,
+    `${month.full}-${year}`,
+    `${month.full}/${year}`,
+    `${month.full} ${shortYear}`,
+    `${month.full}-${shortYear}`,
+
+    `${month.short} ${year}`,
+    `${month.short}, ${year}`,
+    `${month.short}-${year}`,
+    `${month.short}/${year}`,
+    `${month.short} ${shortYear}`,
+    `${month.short}-${shortYear}`,
+
+    `${month.short.toUpperCase()}${shortYear}`,
+    `${month.short.toUpperCase()}${year}`,
+    `${month.full.toUpperCase()} ${year}`,
+    `${month.full.toUpperCase()}-${year}`,
+    `${month.short.toUpperCase()} ${year}`,
+    `${month.short.toUpperCase()}-${year}`,
+  ]);
+}
+
+function buildSessionMatchValues(sessions: string[]) {
+  const values: any[] = [];
+  const seen = new Set<string>();
+
+  function add(value: any) {
+    if (!value) return;
+
+    const key = value instanceof RegExp ? value.toString() : `str:${safeStr(value)}`;
+    if (seen.has(key)) return;
+
+    seen.add(key);
+    values.push(value);
+  }
+
+  for (const session of sessions) {
+    const clean = safeStr(session);
+    if (!clean) continue;
+
+    add(clean);
+
+    for (const candidate of buildMonthYearSessionCandidates(clean)) {
+      add(candidate);
+    }
+
+    add(buildMonthYearSessionRegex(clean));
+    add(buildLooseExactSessionRegex(clean));
+  }
+
+  return values.length ? values : sessions;
+}
+
+/* =========================
    Image normalization
    ========================= */
 
@@ -428,12 +583,6 @@ function buildGuessPaperRuntimeThumbUrl(p: any, templateVersionToken: string) {
     .filter(Boolean)
     .join("|");
 
-  /*
-    Temporary safe fallback:
-    Project me already /api/thumb/pyq route available hai.
-    Guess Papers ke liye isi runtime thumbnail route ko reuse kiya gaya hai,
-    taki live listing/card/quick-view par blank image na aaye.
-  */
   const qs = new URLSearchParams({
     session,
     code,
@@ -598,7 +747,7 @@ export async function GET(req: Request) {
 
   if (categories.length) filter.category = { $in: categories };
   if (courses.length) filter.courseCodes = { $in: courses };
-  if (sessions.length) filter.session = { $in: sessions };
+  if (sessions.length) filter.session = { $in: buildSessionMatchValues(sessions) };
   if (languages.length) filter.language = { $in: languages };
 
   await dbConnect();
