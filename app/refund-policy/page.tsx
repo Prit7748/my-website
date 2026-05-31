@@ -92,7 +92,7 @@ export default async function RefundPolicyPage() {
                 <p>If you have any questions about our Refunds Policy, please contact us:</p>
                 <ul className="list-none mt-2 space-y-1 font-medium text-blue-600">
                   <li>• WhatsApp: 7496865680</li>
-                  <li>• Email: support@ignouportal.com</li>
+                  <li>• Email: support@istudentsportal.com</li>
                 </ul>
               </section>
             </div>

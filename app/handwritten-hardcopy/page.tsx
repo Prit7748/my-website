@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
 import HandwrittenHardcopyClient from "./HandwrittenHardcopyClient";
-import SeoPaginationLinks from "@/components/seo/SeoPaginationLinks";
 
 import dbConnect from "@/lib/db";
 import Product from "@/models/Product";
@@ -744,36 +743,17 @@ export default async function Page({ searchParams }: PageProps) {
   });
 
   return (
-    <>
-      <Suspense fallback={<div className="p-6">Loading...</div>}>
-        <HandwrittenHardcopyClient
-          initialCourseParam={initialCourseParam}
-          initialSessionParam={initialSessionParam}
-          initialLanguageParam={initialLanguageParam}
-          initialSearchParam={initialSearchParam}
-          initialPageParam={String(pageNum)}
-          initialProducts={products}
-          initialMeta={meta}
-          initialQueryKey={initialQueryKey}
-        />
-      </Suspense>
-
-      <section className="bg-white px-4 pb-10">
-        <div className="mx-auto max-w-[1600px]">
-          <SeoPaginationLinks
-            basePath={PAGE_PATH}
-            currentPage={meta.page}
-            totalPages={meta.totalPages}
-            searchParams={{
-              course: initialCourseParam,
-              session: initialSessionParam,
-              language: initialLanguageParam,
-              search: initialSearchParam,
-            }}
-            label="Handwritten hardcopy pagination"
-          />
-        </div>
-      </section>
-    </>
+    <Suspense fallback={<div className="p-6">Loading...</div>}>
+      <HandwrittenHardcopyClient
+        initialCourseParam={initialCourseParam}
+        initialSessionParam={initialSessionParam}
+        initialLanguageParam={initialLanguageParam}
+        initialSearchParam={initialSearchParam}
+        initialPageParam={String(pageNum)}
+        initialProducts={products}
+        initialMeta={meta}
+        initialQueryKey={initialQueryKey}
+      />
+    </Suspense>
   );
 }

@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
 import GuessPapersClient from "./GuessPapersClient";
-import SeoPaginationLinks from "@/components/seo/SeoPaginationLinks";
 
 import dbConnect from "@/lib/db";
 import Product from "@/models/Product";
@@ -650,11 +649,9 @@ export async function generateMetadata({ searchParams }: PageProps): Promise<Met
     category || course || session || language || search || (page && page !== "1")
   );
 
-  const baseTitle = "Guess Papers";
+  const baseTitle = "IGNOU Guess Papers";
   const parts = [course, session, language].filter(Boolean);
-  const dynamicTitle = parts.length
-    ? `${baseTitle} - ${parts.join(" - ")}`
-    : "IGNOU Guess Papers for All Courses and Sessions";
+  const dynamicTitle = parts.length ? `${baseTitle} - ${parts.join(" - ")}` : baseTitle;
 
   const description = hasNonCanonicalParams
     ? `Browse IGNOU guess papers${course ? ` for ${course}` : ""}${
@@ -663,7 +660,6 @@ export async function generateMetadata({ searchParams }: PageProps): Promise<Met
     : "Browse IGNOU guess papers by subject code, course, session, and medium. Find exam-focused IGNOU guess papers quickly for your subject and programme.";
 
   return {
-    metadataBase: new URL(BASE_URL),
     title: dynamicTitle,
     description,
     alternates: {
@@ -744,36 +740,17 @@ export default async function Page({ searchParams }: PageProps) {
   });
 
   return (
-    <>
-      <Suspense fallback={<div className="p-6">Loading...</div>}>
-        <GuessPapersClient
-          initialCourseParam={initialCourseParam}
-          initialSessionParam={initialSessionParam}
-          initialLanguageParam={initialLanguageParam}
-          initialSearchParam={initialSearchParam}
-          initialPageParam={String(pageNum)}
-          initialProducts={products}
-          initialMeta={meta}
-          initialQueryKey={initialQueryKey}
-        />
-      </Suspense>
-
-      <section className="bg-white px-4 pb-10">
-        <div className="mx-auto max-w-[1600px]">
-          <SeoPaginationLinks
-            basePath={PAGE_PATH}
-            currentPage={meta.page}
-            totalPages={meta.totalPages}
-            searchParams={{
-              course: initialCourseParam,
-              session: initialSessionParam,
-              language: initialLanguageParam,
-              search: initialSearchParam,
-            }}
-            label="Guess papers pagination"
-          />
-        </div>
-      </section>
-    </>
+    <Suspense fallback={<div className="p-6">Loading...</div>}>
+      <GuessPapersClient
+        initialCourseParam={initialCourseParam}
+        initialSessionParam={initialSessionParam}
+        initialLanguageParam={initialLanguageParam}
+        initialSearchParam={initialSearchParam}
+        initialPageParam={String(pageNum)}
+        initialProducts={products}
+        initialMeta={meta}
+        initialQueryKey={initialQueryKey}
+      />
+    </Suspense>
   );
 }

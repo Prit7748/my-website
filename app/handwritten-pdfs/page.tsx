@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
 import HandwrittenPdfsClient from "./HandwrittenPdfsClient";
-import SeoPaginationLinks from "@/components/seo/SeoPaginationLinks";
 
 import dbConnect from "@/lib/db";
 import Product from "@/models/Product";
@@ -658,9 +657,8 @@ export async function generateMetadata({ searchParams }: PageProps): Promise<Met
     : "IGNOU Handwritten PDFs";
 
   const description = hasNonCanonicalParams
-    ? `Browse IGNOU handwritten PDFs${course ? ` for ${course}` : ""}${
-        session ? ` (${session})` : ""
-      }${language ? ` in ${language}` : ""}${search ? ` matching "${search}"` : ""}.`
+    ? `Browse IGNOU handwritten PDFs${course ? ` for ${course}` : ""}${session ? ` (${session})` : ""
+    }${language ? ` in ${language}` : ""}${search ? ` matching "${search}"` : ""}.`
     : "Browse IGNOU handwritten PDFs by subject code, course, session, and medium. Find handwritten study material quickly for your IGNOU subject.";
 
   return {
@@ -671,27 +669,27 @@ export async function generateMetadata({ searchParams }: PageProps): Promise<Met
     },
     robots: hasNonCanonicalParams
       ? {
+        index: false,
+        follow: true,
+        googleBot: {
           index: false,
           follow: true,
-          googleBot: {
-            index: false,
-            follow: true,
-            "max-image-preview": "large",
-            "max-snippet": -1,
-            "max-video-preview": -1,
-          },
-        }
+          "max-image-preview": "large",
+          "max-snippet": -1,
+          "max-video-preview": -1,
+        },
+      }
       : {
+        index: true,
+        follow: true,
+        googleBot: {
           index: true,
           follow: true,
-          googleBot: {
-            index: true,
-            follow: true,
-            "max-image-preview": "large",
-            "max-snippet": -1,
-            "max-video-preview": -1,
-          },
+          "max-image-preview": "large",
+          "max-snippet": -1,
+          "max-video-preview": -1,
         },
+      },
     openGraph: {
       type: "website",
       url: PAGE_URL,
@@ -744,36 +742,17 @@ export default async function Page({ searchParams }: PageProps) {
   });
 
   return (
-    <>
-      <Suspense fallback={<div className="p-6">Loading...</div>}>
-        <HandwrittenPdfsClient
-          initialCourseParam={initialCourseParam}
-          initialSessionParam={initialSessionParam}
-          initialLanguageParam={initialLanguageParam}
-          initialSearchParam={initialSearchParam}
-          initialPageParam={String(pageNum)}
-          initialProducts={products}
-          initialMeta={meta}
-          initialQueryKey={initialQueryKey}
-        />
-      </Suspense>
-
-      <section className="bg-white px-4 pb-10">
-        <div className="mx-auto max-w-[1600px]">
-          <SeoPaginationLinks
-            basePath={PAGE_PATH}
-            currentPage={meta.page}
-            totalPages={meta.totalPages}
-            searchParams={{
-              course: initialCourseParam,
-              session: initialSessionParam,
-              language: initialLanguageParam,
-              search: initialSearchParam,
-            }}
-            label="Handwritten PDFs pagination"
-          />
-        </div>
-      </section>
-    </>
+    <Suspense fallback={<div className="p-6">Loading...</div>}>
+      <HandwrittenPdfsClient
+        initialCourseParam={initialCourseParam}
+        initialSessionParam={initialSessionParam}
+        initialLanguageParam={initialLanguageParam}
+        initialSearchParam={initialSearchParam}
+        initialPageParam={String(pageNum)}
+        initialProducts={products}
+        initialMeta={meta}
+        initialQueryKey={initialQueryKey}
+      />
+    </Suspense>
   );
 }

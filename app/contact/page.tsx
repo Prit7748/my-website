@@ -63,8 +63,8 @@ export default function ContactPage() {
                 <div>
                    <h3 className="font-bold text-slate-900">Email Us</h3>
                    <p className="text-sm text-slate-500 mb-3">For order issues & PDFs.</p>
-                   <a href="mailto:support@ignouportal.com" className="text-sm font-bold text-blue-600 hover:underline">
-                     support@ignouportal.com
+                   <a href="mailto:support@istudentsportal.com" className="text-sm font-bold text-blue-600 hover:underline">
+                     support@istudentsportal.com
                    </a>
                 </div>
              </div>
@@ -77,7 +77,7 @@ export default function ContactPage() {
                 <div>
                    <h3 className="font-bold text-slate-900">Head Office</h3>
                    <p className="text-sm text-slate-500">
-                     Hansi, Haryana<br/> India
+                     Bhiwani, Haryana<br/> India
                    </p>
                 </div>
              </div>
@@ -98,11 +98,11 @@ export default function ContactPage() {
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                      <div className="space-y-2">
                         <label className="text-xs font-bold text-slate-500 uppercase">Your Name</label>
-                        <input required type="text" placeholder="John Doe" className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-blue-500 transition"/>
+                        <input required type="text" placeholder="Lalita Singh" className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-blue-500 transition"/>
                      </div>
                      <div className="space-y-2">
                         <label className="text-xs font-bold text-slate-500 uppercase">Phone / WhatsApp</label>
-                        <input required type="tel" placeholder="+91 99999..." className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-blue-500 transition"/>
+                        <input required type="tel" placeholder="+91 9876543210" className="w-full px-4 py-3 bg-gray-50 border border-gray-200 rounded-xl outline-none focus:border-blue-500 transition"/>
                      </div>
                   </div>
 

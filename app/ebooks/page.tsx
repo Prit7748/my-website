@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
 import EbooksClient from "./EbooksClient";
-import SeoPaginationLinks from "@/components/seo/SeoPaginationLinks";
 
 import dbConnect from "@/lib/db";
 import Product from "@/models/Product";
@@ -651,9 +650,9 @@ export async function generateMetadata({ searchParams }: PageProps): Promise<Met
     category || course || session || language || search || (page && page !== "1")
   );
 
-  const baseTitle = "Ebooks";
+  const baseTitle = "IGNOU eBooks and Notes";
   const parts = [course, session, language].filter(Boolean);
-  const dynamicTitle = parts.length ? `${baseTitle} - ${parts.join(" - ")}` : "IGNOU Ebooks";
+  const dynamicTitle = parts.length ? `${baseTitle} - ${parts.join(" - ")}` : baseTitle;
 
   const description = hasNonCanonicalParams
     ? `Browse IGNOU ebooks${course ? ` for ${course}` : ""}${
@@ -662,7 +661,6 @@ export async function generateMetadata({ searchParams }: PageProps): Promise<Met
     : "Browse IGNOU ebooks by subject code, course, session, and medium. Find digital study material quickly for your IGNOU subject.";
 
   return {
-    metadataBase: new URL(BASE_URL),
     title: dynamicTitle,
     description,
     alternates: {
@@ -702,7 +700,7 @@ export async function generateMetadata({ searchParams }: PageProps): Promise<Met
           url: "/og.jpg",
           width: 1200,
           height: 630,
-          alt: "IGNOU Ebooks - IGNOU Students Portal",
+          alt: "IGNOU eBooks and Notes - IGNOU Students Portal",
         },
       ],
     },
@@ -743,36 +741,17 @@ export default async function Page({ searchParams }: PageProps) {
   });
 
   return (
-    <>
-      <Suspense fallback={<div className="p-6">Loading...</div>}>
-        <EbooksClient
-          initialCourseParam={initialCourseParam}
-          initialSessionParam={initialSessionParam}
-          initialLanguageParam={initialLanguageParam}
-          initialSearchParam={initialSearchParam}
-          initialPageParam={String(pageNum)}
-          initialProducts={products}
-          initialMeta={meta}
-          initialQueryKey={initialQueryKey}
-        />
-      </Suspense>
-
-      <section className="bg-white px-4 pb-10">
-        <div className="mx-auto max-w-[1600px]">
-          <SeoPaginationLinks
-            basePath={PAGE_PATH}
-            currentPage={meta.page}
-            totalPages={meta.totalPages}
-            searchParams={{
-              course: initialCourseParam,
-              session: initialSessionParam,
-              language: initialLanguageParam,
-              search: initialSearchParam,
-            }}
-            label="Ebooks pagination"
-          />
-        </div>
-      </section>
-    </>
+    <Suspense fallback={<div className="p-6">Loading...</div>}>
+      <EbooksClient
+        initialCourseParam={initialCourseParam}
+        initialSessionParam={initialSessionParam}
+        initialLanguageParam={initialLanguageParam}
+        initialSearchParam={initialSearchParam}
+        initialPageParam={String(pageNum)}
+        initialProducts={products}
+        initialMeta={meta}
+        initialQueryKey={initialQueryKey}
+      />
+    </Suspense>
   );
 }
