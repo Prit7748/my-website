@@ -1,5 +1,9 @@
 // D:\my-website\proxy.ts
 import { NextRequest, NextResponse } from "next/server";
+import {
+  buildRedirectDestination,
+  getRedirectionRule,
+} from "@/lib/redirections";
 
 const NEW_SITE_ORIGIN = "https://istudentsportal.com";
 
@@ -39,7 +43,7 @@ function cleanHost(hostHeader: string | null) {
     .trim();
 }
 
-export function proxy(req: NextRequest) {
+export async function proxy(req: NextRequest) {
   const host = cleanHost(req.headers.get("host"));
   const pathname = req.nextUrl.pathname;
 
@@ -50,6 +54,16 @@ export function proxy(req: NextRequest) {
     url.pathname = pathname;
     url.search = req.nextUrl.search;
     return NextResponse.redirect(url, 301);
+  }
+
+  const redirectRule = await getRedirectionRule(pathname);
+  if (redirectRule) {
+    const destination = buildRedirectDestination(
+      redirectRule.toPath,
+      req.nextUrl.origin,
+      req.nextUrl.search
+    );
+    return NextResponse.redirect(destination, redirectRule.statusCode);
   }
 
   const token = req.cookies.get("token")?.value;

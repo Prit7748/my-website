@@ -1,8 +1,6 @@
 // lib/db.ts
 import mongoose from "mongoose";
 
-const DB_NAME = process.env.MONGODB_DB || "ignoucluster";
-
 type MongooseCache = {
   conn: typeof mongoose | null;
   promise: Promise<typeof mongoose> | null;
@@ -28,8 +26,10 @@ export default async function dbConnect() {
   if (!cached.promise) {
     mongoose.set("strictQuery", true);
 
+    const dbName = String(process.env.MONGODB_DB || "ignoucluster").trim();
+
     cached.promise = mongoose.connect(MONGODB_URI, {
-      dbName: DB_NAME,
+      dbName,
       serverSelectionTimeoutMS: 15000,
       socketTimeoutMS: 45000,
       maxPoolSize: 10,

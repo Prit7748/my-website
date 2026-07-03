@@ -28,6 +28,7 @@ import {
   BarChart3,
   TrendingUp,
   Clock3,
+  ArrowRightLeft,
   FileSpreadsheet,
   BellRing,
   Youtube,
@@ -161,6 +162,7 @@ const DEFAULT_TILE_TONES: Record<AdminDashboardTileKey, NonDefaultTone> = {
   "official-papers": "sky",
   "product-pricing": "emerald",
   "on-demand-timing-rules": "indigo",
+  redirections: "gray",
   "dashboard-tile-order": "indigo",
 };
 
@@ -874,6 +876,15 @@ export default function AdminPage() {
         "/admin/on-demand-timing-rules",
         Clock3,
         "Category default + course-wise timer configuration"
+      );
+    }
+
+    if (tile.key === "redirections") {
+      return renderBasicTile(
+        tile,
+        "/admin/redirections",
+        ArrowRightLeft,
+        "301 / 302 redirects from old URLs to new paths"
       );
     }
 

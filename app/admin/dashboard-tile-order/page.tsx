@@ -31,6 +31,7 @@ import {
   BarChart3,
   TrendingUp,
   Clock3,
+  ArrowRightLeft,
   Users,
   Type,
   Palette,
@@ -165,6 +166,7 @@ const DEFAULT_TILE_TONES: Record<AdminDashboardTileKey, NonDefaultTone> = {
   "official-papers": "sky",
   "product-pricing": "emerald",
   "on-demand-timing-rules": "indigo",
+  redirections: "gray",
   "dashboard-tile-order": "indigo",
 };
 
@@ -954,6 +956,20 @@ export default function DashboardTileOrderPage() {
             <div className={`font-extrabold ${tone.title}`}>{getDisplayTitle(row)}</div>
             <div className="text-xs text-slate-600 mt-1">
               Category default + course-wise timer configuration
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    if (row.key === "redirections") {
+      return (
+        <div className="flex items-center gap-3">
+          <ArrowRightLeft className={tone.icon} />
+          <div>
+            <div className={`font-extrabold ${tone.title}`}>{getDisplayTitle(row)}</div>
+            <div className="text-xs text-slate-600 mt-1">
+              301 / 302 redirects from old URLs to new paths
             </div>
           </div>
         </div>

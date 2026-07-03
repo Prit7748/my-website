@@ -22,6 +22,7 @@ export type AdminDashboardTileKey =
   | "official-papers"
   | "product-pricing"
   | "on-demand-timing-rules"
+  | "redirections"
   | "dashboard-tile-order";
 
 export type AdminDashboardTileTone =
@@ -215,6 +216,12 @@ export const ADMIN_DASHBOARD_TILES: AdminDashboardTileConfig[] = [
     defaultTitle: "On Demand Timing Rules",
     description: "Category default + course-wise timer configuration",
     href: "/admin/on-demand-timing-rules",
+  },
+  {
+    key: "redirections",
+    defaultTitle: "URL Redirections",
+    description: "301 / 302 redirects from old URLs to new paths",
+    href: "/admin/redirections",
   },
   {
     key: "dashboard-tile-order",

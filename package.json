@@ -6,7 +6,11 @@
     "dev": "set NODE_OPTIONS=--dns-result-order=ipv4first && next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "fetch-product-urls": "npx tsx scripts/fetch-product-urls.ts",
+    "analyze-long-urls": "npx tsx scripts/analyze-long-urls.ts",
+    "export-slug-suggestions": "npx tsx scripts/export-slug-suggestions.ts",
+    "apply-slug-migrations": "npx tsx scripts/apply-slug-migrations.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.990.0",

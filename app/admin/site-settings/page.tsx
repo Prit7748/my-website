@@ -25,6 +25,7 @@ import {
   PenBox,
   Images,
   BookOpenCheck,
+  ArrowRightLeft,
 } from "lucide-react";
 
 export default function SiteSettingsPage() {
@@ -259,6 +260,21 @@ export default function SiteSettingsPage() {
                   <div className="font-extrabold text-blue-900">Hardcopy Backfill</div>
                   <div className="text-xs text-blue-700 mt-1">
                     Already uploaded solved assignments se missing hardcopy products generate / sync karo
+                  </div>
+                </div>
+              </div>
+            </Link>
+
+            <Link
+              href="/admin/redirections"
+              className="rounded-2xl border border-slate-200 bg-slate-50 hover:bg-white transition p-5 shadow-sm"
+            >
+              <div className="flex items-center gap-3">
+                <ArrowRightLeft className="text-slate-700" />
+                <div>
+                  <div className="font-extrabold text-slate-900">URL Redirections</div>
+                  <div className="text-xs text-slate-600 mt-1">
+                    301 / 302 redirects from old URLs to new relative or absolute paths
                   </div>
                 </div>
               </div>
